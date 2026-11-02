@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "name": "CRM Sandbox MCP",
+  "transport": "streamable_http",
+  "endpoint": "https://mcp.sandbox.internal.example.com/mcp",
+  "authMode": "service_token",
+  "secretRef": "vault://workspace/mcp/crm-sandbox-token",
+  "connectTimeoutMs": 5000,
+  "toolTimeoutMs": 30000,
+  "maxResponseBytes": 1048576,
+  "allowlistedHost": "mcp.sandbox.internal.example.com",
+  "redirectPolicy": "deny"
+}
+

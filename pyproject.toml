@@ -1,0 +1,44 @@
+[project]
+name = "enterprise-agent-platform-v2"
+version = "2.0.0"
+description = "Enterprise AI Agent Platform Monorepo Workspace v2.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+    "apps/control-api",
+    "apps/agent-runtime",
+    "apps/jobs-worker",
+    "libs/python/platform-common",
+    "libs/python/agent-contracts"
+]
+
+[tool.uv.sources]
+platform-common = { workspace = true }
+agent-contracts = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pyyaml>=6.0.2",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "apps"]
+addopts = "--import-mode=importlib -p no:dash"
+markers = [
+    "integration: requires real external infrastructure such as PostgreSQL",
+]
+pythonpath = [
+    "libs/python/platform-common/src",
+    "libs/python/agent-contracts/src",
+    "apps/control-api/src",
+    "apps/agent-runtime/src",
+    "apps/jobs-worker/src"
+]

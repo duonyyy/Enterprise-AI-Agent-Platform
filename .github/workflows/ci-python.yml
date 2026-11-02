@@ -1,0 +1,203 @@
+name: Enterprise CI Pipeline
+
+on:
+  push:
+    branches: [main, master, "release/**"]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commitlint:
+    name: Conventional Commit Gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install locked commitlint dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Validate commits in this pull request
+        run: pnpm exec commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
+
+  changes:
+    name: Detect Changed Project Areas
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      web: ${{ steps.filter.outputs.web }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            python:
+              - 'apps/control-api/**'
+              - 'apps/agent-runtime/**'
+              - 'apps/jobs-worker/**'
+              - 'libs/python/**'
+              - 'contracts/**'
+              - 'database/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci-python.yml'
+            web:
+              - 'apps/studio-web/**'
+              - 'packages/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'contracts/**'
+              - '.github/workflows/ci-python.yml'
+            docker:
+              - 'apps/**/Dockerfile'
+              - 'infra/**'
+              - '.dockerignore'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci-python.yml'
+
+  static-analysis:
+    name: Python Compilation & Database Schema Validation
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked development dependencies
+        run: uv sync --all-packages --locked --group dev
+
+      # The repository has a pre-existing Ruff backlog.  Keep CI actionable
+      # while that baseline is paid down in a dedicated cleanup change.
+      - name: Compile Python sources
+        run: |
+          uv run python -B -m compileall -q apps libs tests
+
+      - name: Validate DB-56 Schema & RLS Policies
+        run: |
+          uv run python docs/03-database/database/validate_db_static.py
+
+  contract-and-unit-tests:
+    name: Contract & Unit Test Suite
+    runs-on: ubuntu-latest
+    needs: [changes, static-analysis]
+    if: needs.changes.outputs.python == 'true' || github.event_name == 'push'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: platform_owner
+          POSTGRES_PASSWORD: ci-owner-password
+          POSTGRES_DB: enterprise_agent_platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform_owner -d enterprise_agent_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked development dependencies
+        run: uv sync --all-packages --locked --group dev
+
+      - name: Apply DB-56 migrations with restricted application role
+        env:
+          PGPASSWORD: ci-owner-password
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -c "CREATE ROLE platform_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD 'ci-app-password';"
+          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -f database/migrations/0001_baseline.sql
+          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -f database/migrations/0002_fail_closed_rls.sql
+
+      - name: Run Contract & Core Tests
+        env:
+          DATABASE_URL: postgresql+psycopg://platform_app:ci-app-password@localhost:5432/enterprise_agent_platform
+          RLS_TEST_DATABASE_URL: postgresql://platform_app:ci-app-password@localhost:5432/enterprise_agent_platform
+          MIGRATION_DATABASE_URL: postgresql://platform_owner:ci-owner-password@localhost:5432/enterprise_agent_platform
+          JWT_SECRET_KEY: ci-jwt-secret-key-at-least-32-characters-long
+          JWT_ISSUER: http://localhost:8080/realms/enterprise
+          JWT_AUDIENCE: enterprise-control-api
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          uv run pytest tests/contract/ tests/integration/ apps/control-api/tests apps/jobs-worker/tests -v
+
+  web-build:
+    name: Studio Web Build
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install locked web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build Studio Web
+        run: pnpm --filter studio-web build
+
+  docker-compose-gate:
+    name: Docker Deployment Spec Gate
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose Configuration
+        env:
+          POSTGRES_PASSWORD: ci-owner-password
+          PLATFORM_APP_DB_PASSWORD: ci-app-password
+          JWT_SECRET_KEY: ci-jwt-secret-key-at-least-32-characters-long
+          RUNTIME_JWT_SECRET: ci-runtime-jwt-secret-at-least-32-characters
+          MINIO_ROOT_USER: ci-minio-root-user
+          MINIO_ROOT_PASSWORD: ci-minio-root-password
+        run: |
+          docker compose -f infra/compose/docker-compose.dev.yml config --quiet
+          docker compose -f infra/compose/docker-compose.dev.yml build control-api agent-runtime jobs-worker

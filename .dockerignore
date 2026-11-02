@@ -1,0 +1,14 @@
+.git/
+.agents/
+.venv/
+node_modules/
+.next/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.sqlite
+*.db
+dist/
+build/

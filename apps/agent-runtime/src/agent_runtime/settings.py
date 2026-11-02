@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class RuntimeSettings(BaseSettings):
+    """Runtime configuration. Empty security settings deliberately fail closed."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    environment: str = "development"
+    database_url: str = ""
+    runtime_jwt_secret: str = ""
+    runtime_jwt_issuer: str = ""
+    runtime_jwt_audience: str = "agent-runtime"
+    model_gateway_health_url: str = ""
+    qdrant_health_url: str = ""
+    dependency_timeout_seconds: float = 1.0
+    mcp_timeout_seconds: float = 10.0
+    mcp_max_response_bytes: int = 1_048_576
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> RuntimeSettings:
+    return RuntimeSettings()
+

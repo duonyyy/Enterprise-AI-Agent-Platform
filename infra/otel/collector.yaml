@@ -1,0 +1,1 @@
+receivers: { otlp: { protocols: { grpc: {}, http: {} } } }

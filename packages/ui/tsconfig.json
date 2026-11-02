@@ -1,0 +1,1 @@
+{"extends":"@enterprise/config/tsconfig.json","include":["src"]}

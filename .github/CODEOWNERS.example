@@ -1,0 +1,20 @@
+# Copy this file to .github/CODEOWNERS after the new GitHub repository exists.
+# Replace every <...> value with a GitHub user or visible GitHub organization
+# team that has explicit write access to the repository. Do not enable
+# "Require review from Code Owners" until every placeholder is replaced.
+
+*                                           @<org-or-user>/platform-maintainers
+
+/apps/control-api/                          @<org-or-user>/control-plane-owners
+/apps/agent-runtime/                        @<org-or-user>/runtime-owners
+/apps/jobs-worker/                          @<org-or-user>/runtime-owners
+/libs/python/                               @<org-or-user>/runtime-owners
+/apps/studio-web/                           @<org-or-user>/studio-owners
+/packages/                                  @<org-or-user>/studio-owners
+
+/contracts/                                 @<org-or-user>/contract-db-owners
+/database/migrations/                       @<org-or-user>/contract-db-owners
+/infra/                                     @<org-or-user>/platform-maintainers
+/.github/                                   @<org-or-user>/platform-maintainers
+/AGENTS.md                                  @<org-or-user>/platform-maintainers
+/docs/00-governance/                        @<org-or-user>/platform-maintainers
