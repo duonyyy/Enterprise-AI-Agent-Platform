@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/tool-spec.v1.schema.json",
+  "title": "ToolSpec",
+  "type": "object",
+  "required": ["toolKey", "version", "kind", "inputSchema", "outputSchema", "riskLevel"],
+  "properties": {
+    "toolKey": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+    "version": { "type": "string", "default": "1.0.0" },
+    "kind": { "type": "string", "enum": ["http_api", "function", "mcp_client", "mcp"] },
+    "description": { "type": "string" },
+    "inputSchema": { "type": "object" },
+    "outputSchema": { "type": "object" },
+    "riskLevel": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "requiredScopes": { "type": "array", "items": { "type": "string" } },
+    "approvalPolicy": { "type": "string", "enum": ["never", "conditional", "always"] },
+    "timeoutSeconds": { "type": "integer", "default": 30 },
+    "maxRetries": { "type": "integer", "default": 2 },
+    "idempotencySupported": { "type": "boolean", "default": true },
+    "mcpConfig": {
+      "type": "object",
+      "properties": {
+        "connectionId": { "type": "string" },
+        "remoteToolName": { "type": "string" },
+        "mappingId": { "type": "string" },
+        "approvedSchemaSha256": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

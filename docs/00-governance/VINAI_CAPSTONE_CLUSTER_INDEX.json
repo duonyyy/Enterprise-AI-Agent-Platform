@@ -1,0 +1,596 @@
+{
+  "CLUSTER_1_LLM_CORE": {
+    "name": "LLM Foundation, Prompt Engineering & Model Gateway",
+    "target_module": "apps/agent-runtime/src/agent_runtime/llm/ & SPEC-LLM-001",
+    "day_ids": [
+      "VIN-P1-D01",
+      "VIN-P1-D03",
+      "VIN-P1-D04",
+      "VIN-T3-D21",
+      "VIN-T3-D22"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D01",
+        "title": "Khám Phá LLM API & Trợ Lý CLI Tự Phục Hồi (LLM API Exploration & Resilient CLI)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day01-LLM-API-Exploration",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D03",
+        "title": "Chatbot Đối Đầu ReAct Agent & Trợ Lý Đơn Hàng (Chatbot vs ReAct Agent & Order Assistant)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day03-Lab-Chatbot-vs-react-agent-E403-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D04",
+        "title": "Kỹ Nghệ Prompt & Đánh Giá Gọi Công Cụ Thực Nghiệm (Prompt Engineering & Tool Calling Eval)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day04-Prompt-Engineering-Tool-Calling-Labs-student-k3-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D21",
+        "title": "Tinh Chỉnh Mô Hình Ngôn Ngữ Bằng LoRA & QLoRA (Fine-Tuning LLMs with LoRA & QLoRA)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\Day21-Track3-Finetuning-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D22",
+        "title": "Căn Chỉnh Mô Hình Theo Sở Thích: DPO & ORPO (Preference Alignment: DPO & ORPO)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\K3-Track3-Day22-DPO-ORPO-Alignment-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_2_TOOLS_MCP": {
+    "name": "Single Tool Gateway, Agent Skills & Model Context Protocol (MCP)",
+    "target_module": "SPEC-TOOL-001, SPEC-SKILL-001, SPEC-MCP-001 & apps/agent-runtime/src/agent_runtime/tools/ & mcp/",
+    "day_ids": [
+      "VIN-P1-D03",
+      "VIN-P1-D04",
+      "VIN-T3-D26A",
+      "VIN-COMP-ARENA"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D03",
+        "title": "Chatbot Đối Đầu ReAct Agent & Trợ Lý Đơn Hàng (Chatbot vs ReAct Agent & Order Assistant)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day03-Lab-Chatbot-vs-react-agent-E403-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D04",
+        "title": "Kỹ Nghệ Prompt & Đánh Giá Gọi Công Cụ Thực Nghiệm (Prompt Engineering & Tool Calling Eval)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day04-Prompt-Engineering-Tool-Calling-Labs-student-k3-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D26A",
+        "title": "Giao Thức Bối Cảnh Mô Hình & Tích Hợp Công Cụ Chuẩn Hóa (Model Context Protocol - MCP)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\Day26-MCP-Tools-Integration-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-COMP-ARENA",
+        "title": "Đấu Trường Agent Arena: Đóng Gói Bộ Giáp Tác Tử (Agent Arena Harnessing Challenge)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_Shared_Competitions\\\\Day16-AgentArena-Student-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_3_RAG_KNOWLEDGE": {
+    "name": "Enterprise Knowledge, Hybrid RAG (Dense+BM25 RRF), Vector Store & Citation Verifier",
+    "target_module": "SPEC-KNOWLEDGE-001 & apps/agent-runtime/src/agent_runtime/knowledge/",
+    "day_ids": [
+      "VIN-P1-D07",
+      "VIN-P1-D08",
+      "VIN-P1-D10",
+      "VIN-T2-D17",
+      "VIN-T2-D18",
+      "VIN-T2-D19",
+      "VIN-T3-D18",
+      "VIN-T3-D19"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D07",
+        "title": "Nền Tảng Dữ Liệu: Embedding, Chunking & Vector Store (Data Foundations: Vector Space)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K4-Day07-Data-Foundations-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D08",
+        "title": "Quy Trình RAG Nâng Cao Đầu-Cuối (End-to-End Advanced RAG Pipeline)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Day08_RAG_pipeline_cohort2",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D10",
+        "title": "Đường Ống Dữ Liệu & Quan Sát Lỗi Dữ Liệu (Data Pipeline & Data Observability)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K4_Day10_Data-Pipeline-Data-Observability-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D17",
+        "title": "Kỹ Nghệ Đường Ống Dữ Liệu & Hợp Đồng Dữ Liệu dbt (Data Pipeline Engineering & dbt)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day17-Track2-DataPipeline-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D18",
+        "title": "Kiến Trúc Hồ Dữ Liệu Lakehouse: Delta Lake & Iceberg (Lakehouse Architecture: Delta & Iceberg)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day18-Track2-Lakehouse-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D19",
+        "title": "Kho Đặc Trưng & Cơ Sở Dữ Liệu Vector (Vector & Feature Store: Feast & Qdrant)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day19-Track2-VectorFeatureStore-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D18",
+        "title": "Đường Ống RAG Sản Xuất 5 Module Chuẩn Mực (Production-Grade 5-Module RAG Pipeline)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\K34-Day18-Production-RAG-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D19",
+        "title": "Đồ Thị Tri Thức RAG Đối Đầu RAG Truyền Thống (Production-Grade GraphRAG vs Flat RAG)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\K3-Track3-Lab19-GraphRAG-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_4_WORKFLOW_MULTI_AGENT": {
+    "name": "Workflow Orchestration, LangGraph StateGraph & Multi-Agent Collaboration (A2A)",
+    "target_module": "SPEC-WORKFLOW-001, SPEC-RUNTIME-001 & apps/agent-runtime/src/agent_runtime/application/",
+    "day_ids": [
+      "VIN-P1-D09A",
+      "VIN-P1-D09B",
+      "VIN-T3-D08",
+      "VIN-T3-D20",
+      "VIN-T3-D26B"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D09A",
+        "title": "Kiến Trúc Đa Tác Tử: Trợ Lý Mua Sắm LangGraph (Multi-Agent Shopping Assistant)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Day09-MultiAgent-Architecture",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D09B",
+        "title": "Điều Phối Tác Tử - Tác Tử (A2A): Phân Xử Khiếu Nại TMĐT Olist (Agent-to-Agent Dispute Resolution)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K4-Day9-Multi-Agent-A2A-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D08",
+        "title": "Điều Phối Tác Tử Bằng Đồ Thị Trạng Thái LangGraph (LangGraph Agentic Orchestration)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\phase2-k3-4-track3-day8-langgraph-agent-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D20",
+        "title": "Hệ Thống Đa Tác Tử Nghiên Cứu Chuyên Sâu (VinUni AI20K Multi-Agent Research System)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\VinUni-AI20k-K4-Track3-Lab20-MultiAgent-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D26B",
+        "title": "Đấu Trường Đối Kháng Đa Tác Tử (Colosseum: Multi-Agent Competitive Arena)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\Day26-Colosseum-Agent-Arena-Kit-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_5_SECURITY_GUARDRAILS": {
+    "name": "Agent Security, Prompt Injection Defense, PII Scrubber, AST Sandbox & HITL",
+    "target_module": "SPEC-SECURITY-001 & apps/agent-runtime/src/agent_runtime/safety/",
+    "day_ids": [
+      "VIN-P1-D11",
+      "VIN-T1-D22",
+      "VIN-T2-D24",
+      "VIN-COMP-ARENA"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D11",
+        "title": "Bảo Mật Tác Tử & Kiểm Soát Con Người (Controlled Agent Security & HITL)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K4-Day-11-Guardrails-HITL-Responsible-AI-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D22",
+        "title": "Trí Tuệ Nhân Tạo Có Trách Nhiệm Trong Vận Hành (Responsible AI in Production)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day22-Responsible-AI-Production-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D24",
+        "title": "Quản Trị Dữ Liệu & Bảo Mật: Tấn Công & Cô Lập Tác Tử (Data Governance & Agent Security)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day24-Track2-Data-governance-security-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-COMP-ARENA",
+        "title": "Đấu Trường Agent Arena: Đóng Gói Bộ Giáp Tác Tử (Agent Arena Harnessing Challenge)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_Shared_Competitions\\\\Day16-AgentArena-Student-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_6_RELIABILITY_CHAOS": {
+    "name": "Reliability Engineering, Circuit Breakers, Shared Semantic Cache & Chaos Recovery",
+    "target_module": "SPEC-RUNTIME-001 & apps/agent-runtime/src/agent_runtime/context/",
+    "day_ids": [
+      "VIN-T2-D23",
+      "VIN-T2-D25A",
+      "VIN-T3-D25"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-T2-D23",
+        "title": "Khắc Phục Sự Cố & Tính Sẵn Sàng Cao Cho Hạ Tầng AI (Disaster Recovery & High Availability)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day23-DisaterRecovery4AIInfrastructure-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D25A",
+        "title": "Mô Hình Cầu Dao & Mẫu Thiết Kế Độ Tin Cậy (Circuit Breakers & Reliability Patterns)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\day25-circuit-breakers-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D25",
+        "title": "Kỹ Nghệ Độ Tin Cậy Cho Hệ Thống Tác Tử (Reliability Engineering for AI Agents)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\K3-Day25-Track3-Reliability-Agent-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_7_EVALUATION_METRICS": {
+    "name": "AI Evaluation Harness, Golden Datasets, RAGAS 50Q, LLM-as-a-Judge & Arena Scorer",
+    "target_module": "SPEC-EVAL-001 & evals/",
+    "day_ids": [
+      "VIN-P1-D14",
+      "VIN-T1-D20",
+      "VIN-T3-D24",
+      "VIN-COMP-ARENA"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D14",
+        "title": "Hệ Thống Đánh Giá & Đo Lường Chất Lượng AI (AI Evaluation & Benchmarking Pipeline)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3_Day14_AI_Evaluation-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D20",
+        "title": "Bộ Công Cụ Đánh Giá Sản Phẩm AI (AI Evaluation Kit & Judge Calibration)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\K3-Track1-Day20-21-AI-Evaluation-master",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T3-D24",
+        "title": "Bộ Công Cụ Đánh Giá Sản Xuất & Tầng Bảo Vệ RAG (Production Eval & Guardrail Stack)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_3_Agentic_AI\\\\Day24-Track3-Production-Eval-Guardrail-Stack-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-COMP-ARENA",
+        "title": "Đấu Trường Agent Arena: Đóng Gói Bộ Giáp Tác Tử (Agent Arena Harnessing Challenge)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_Shared_Competitions\\\\Day16-AgentArena-Student-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  },
+  "CLUSTER_8_PRODUCT_FINOPS_DOSSIER": {
+    "name": "Product Discovery, JTBD, AI COGS FinOps, GTM & Operating Dashboards",
+    "target_module": "docs/01-product/, docs/08-operations/ & Capstone Thesis Dossier",
+    "day_ids": [
+      "VIN-P1-D02",
+      "VIN-P1-D12",
+      "VIN-P1-D13",
+      "VIN-T1-D16",
+      "VIN-T1-D17",
+      "VIN-T1-D18",
+      "VIN-T1-D23",
+      "VIN-T1-D24",
+      "VIN-T1-D25",
+      "VIN-T1-D26",
+      "VIN-T1-D27",
+      "VIN-T1-D28",
+      "VIN-T2-D16",
+      "VIN-T2-D20",
+      "VIN-T2-D21",
+      "VIN-T2-D22",
+      "VIN-T2-D25B",
+      "VIN-T2-D27",
+      "VIN-T2-D28",
+      "VIN-T2-REF"
+    ],
+    "items": [
+      {
+        "day_id": "VIN-P1-D02",
+        "title": "Phát Hiện Bài Toán & Quyết Định Kiến Trúc AI (AI Problem Discovery & Architecture Selection)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day02-AI-Product-Labs-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D12",
+        "title": "Hạ Tầng Điện Toán Đám Mây & Triển Khai Sản Phẩm (Cloud Services & Deployment)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\K3-Day12-Cloud-Services-And-Deployment-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-P1-D13",
+        "title": "Khả Năng Quan Sát Toàn Diện: Giám Sát, Truy Vết & Sự Cố (Observability, Tracing & Incidents)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Day13-K3-Observability-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D16",
+        "title": "Mổ Xẻ Sản Phẩm AI & Rào Cản Chuyển Đổi (AI Product Teardown & Switching Cost)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day16-Track1-Product-Teardown-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D17",
+        "title": "Khám Phá Vấn Đề & Kịch Bản Phỏng Vấn Khách Hàng (Problem Discovery & Interview Guide)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day17-Track1-Problem-Discovery-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D18",
+        "title": "Thiết Kế Đa Phương Án Nguyên Mẫu (Rapid Prototyping: No-AI vs Copilot vs Autonomous)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day18-Track1-Multiple-Prototypes-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D23",
+        "title": "Chỉ Số Sản Phẩm, Hành Động Cốt Lõi & Giữ Chân Người Dùng (Product Metrics & Retention)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day23-Track1-Product-Metrics-Retention-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D24",
+        "title": "Mô Hình Tài Chính & Kinh Tế Đơn Vị Sản Phẩm AI (AI Product Financial Model & Unit Economics)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day24-Track1-AI-Product-Financial-Model-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D25",
+        "title": "Chiến Lược Go-To-Market & Định Giá Sản Phẩm AI (GTM Strategy & AI Pricing Models)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day25-Track1-GTM-Monetization-Model-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D26",
+        "title": "Sổ Tay Vận Hành & Bảng Chỉ Số Báo Động Sớm (AI Operating Handbook: Early Signals)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day26-Track-1-AI-Product-Handbook-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D27",
+        "title": "Thiết Kế Đội Ngũ Sản Phẩm AI & Kế Hoạch Sức Khỏe Squad (AI Team Capstone & Squad Health)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day27-Track1-AI-Team-Capstone-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T1-D28",
+        "title": "Bảng Điều Khiển Hành Động & Chuyển Đổi Vận Hành AI (Action Dashboard & Change Management)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Phase_1_Core_Foundations\\\\Track_1_AI_Product\\\\Day28-Track1-Action-Dashboard-Final-Lab",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D16",
+        "title": "Hạ Tầng AI Đám Mây Bằng Mã Nguồn Terraform (Cloud AI Infrastructure as Code)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day16-Track2-Assignment-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D20",
+        "title": "Phục Vụ Mô Hình & Tối Ưu Hóa Suy Luận (Model Serving & Inference Optimization)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day20-Track2-ModelServing-Lab-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D21",
+        "title": "Quy Trình CI/CD Cho Hệ Thống Trí Tuệ Nhân Tạo (CI/CD for AI Systems & MLOps Pipeline)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\K4-Track2-Day21-CI-CD-for-AI-Systems-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D22",
+        "title": "Quản Trị Phiên Bản Prompt & Quan Sát LangSmith (LLMOps: Prompt Versioning & LangSmith)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day22-Track2-LLMops-Prompt-versioning-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D25B",
+        "title": "Quản Trị Tài Chính Điện Toán GPU (GPU FinOps & Cost Optimization)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day25-Track2-GpuFinOps-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D27",
+        "title": "Khả Năng Quan Sát Dữ Liệu & Nguồn Gốc Dữ Liệu (Data Observability, Contracts & Lineage)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\day27-track2-data-observability-lineage-v2-student-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-D28",
+        "title": "Tích Hợp Nền Tảng AI Hiện Đại Qua 10 Điểm Kết Nối (Modern AI Platform Integration)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Day28-Modern-Platform-Lab-Student-main",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      },
+      {
+        "day_id": "VIN-T2-REF",
+        "title": "Nền Tảng Tác Tử Doanh Nghiệp Hợp Nhất (Master Production Agent Platform Reference)",
+        "source_path": "c:\\\\Users\\\\Admin\\\\Desktop\\\\KLTN\\\\VinAI\\\\Vin\\\\Track_2_Data_Infra_LLMOps\\\\Master-Production-Agent-Platform",
+        "topic": "",
+        "tech_stack": [],
+        "core_algorithms": [],
+        "target_role": ""
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/mcp-connection.v1.schema.json",
+  "title": "McpConnectionConfig",
+  "type": "object",
+  "required": ["schemaVersion", "transport", "endpoint", "authMode"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "transport": { "type": "string", "enum": ["streamable_http", "stdio"] },
+    "endpoint": { "type": "string" },
+    "authMode": { "type": "string", "enum": ["service_token", "oauth2", "none"] },
+    "secretRef": { "type": "string" },
+    "connectTimeoutMs": { "type": "integer", "default": 5000 },
+    "toolTimeoutMs": { "type": "integer", "default": 30000 },
+    "maxResponseBytes": { "type": "integer", "default": 1048576 },
+    "allowlistedHost": { "type": "string" },
+    "redirectPolicy": { "type": "string", "enum": ["deny", "allow_same_host"], "default": "deny" }
+  },
+  "additionalProperties": false
+}
+

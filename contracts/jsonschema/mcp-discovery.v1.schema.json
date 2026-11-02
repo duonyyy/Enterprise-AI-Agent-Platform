@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/mcp-discovery.v1.schema.json",
+  "title": "McpDiscoverySnapshot",
+  "type": "object",
+  "required": ["snapshotId", "connectionId", "status", "protocolEra", "capabilities", "catalogSha256"],
+  "properties": {
+    "snapshotId": { "type": "string" },
+    "connectionId": { "type": "string" },
+    "status": { "type": "string", "enum": ["complete", "partial", "failed"] },
+    "protocolVersion": { "type": "string" },
+    "protocolEra": { "type": "string", "enum": ["modern", "legacy", "unknown"] },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "tools": { "type": "boolean" },
+        "resources": { "type": "boolean" },
+        "prompts": { "type": "boolean" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "tools": { "type": "integer" },
+        "resources": { "type": "integer" },
+        "prompts": { "type": "integer" }
+      }
+    },
+    "catalogSha256": { "type": "string" },
+    "capturedAt": { "type": "string" }
+  },
+  "additionalProperties": false
+}
+

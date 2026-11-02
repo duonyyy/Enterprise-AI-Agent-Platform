@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/run-event.v1.schema.json",
+  "title": "RunEvent",
+  "type": "object",
+  "required": ["schemaVersion", "eventId", "runId", "workspaceId", "sequence", "type", "timestamp", "data"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "eventId": { "type": "string" },
+    "runId": { "type": "string" },
+    "workspaceId": { "type": "string" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "type": {
+      "type": "string",
+      "enum": [
+        "run.started",
+        "run.step_started",
+        "run.tool_call_requested",
+        "run.tool_call_completed",
+        "run.approval_requested",
+        "run.approval_resolved",
+        "run.completed",
+        "run.failed",
+        "run.cancelled"
+      ]
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "traceId": { "type": "string" },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false
+}

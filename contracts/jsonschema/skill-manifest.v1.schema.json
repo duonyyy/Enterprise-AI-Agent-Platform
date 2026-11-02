@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/skill-manifest.v1.schema.json",
+  "title": "SkillManifest",
+  "type": "object",
+  "required": ["schemaVersion", "name", "description"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+    "description": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "license": { "type": "string" },
+    "compatibility": { "type": "string" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "resources": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "allowedTools": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}
+

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/agent-spec.v1.schema.json",
+  "title": "AgentSpec",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "metadata", "mode", "modelRef", "persona", "limits"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "kind": { "type": "string", "enum": ["Agent"] },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+        "displayName": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "mode": { "type": "string", "enum": ["fixed_plan", "planner_based", "react"] },
+    "modelRef": { "type": "string" },
+    "persona": {
+      "type": "object",
+      "required": ["instructions"],
+      "properties": {
+        "role": { "type": "string" },
+        "tone": { "type": "string" },
+        "language": { "type": "string", "default": "vi" },
+        "instructions": { "type": "string" }
+      }
+    },
+    "toolRefs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "skillRefs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["skillId", "skillVersionId"],
+        "properties": {
+          "skillId": { "type": "string" },
+          "skillVersionId": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "knowledgeRefs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "workflowRef": { "type": "string" },
+    "approvalPolicyRef": { "type": "string" },
+    "limits": {
+      "type": "object",
+      "required": ["maxSteps"],
+      "properties": {
+        "maxSteps": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+        "maxWallTimeSeconds": { "type": "integer", "default": 180 },
+        "maxTotalTokens": { "type": "integer", "default": 16000 }
+      }
+    }
+  },
+  "additionalProperties": false
+}

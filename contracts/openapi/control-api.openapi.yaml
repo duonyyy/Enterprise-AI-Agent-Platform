@@ -1,0 +1,43 @@
+openapi: 3.1.0
+info:
+  title: Control Plane API v2.0
+  version: 2.0.0
+paths:
+  /v1/workspaces:
+    post:
+      summary: Create workspace
+      responses:
+        '201': { description: Created }
+  /v1/workspaces/{workspace_id}/agents:
+    get:
+      summary: List agents
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Success }
+    post:
+      summary: Create agent draft
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '201': { description: Created }
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
+    post:
+      summary: Atomically publish immutable agent version
+      parameters:
+        - { name: workspace_id, in: path, required: true, schema: { type: string } }
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Published }
+  /v1/workspaces/{workspace_id}/approvals:
+    get:
+      summary: List pending approval requests
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Success }
+  /v1/workspaces/{workspace_id}/approvals/{approval_id}/decision:
+    post:
+      summary: Submit CAS approval decision
+      parameters:
+        - { name: workspace_id, in: path, required: true, schema: { type: string } }
+        - { name: approval_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Decision committed }

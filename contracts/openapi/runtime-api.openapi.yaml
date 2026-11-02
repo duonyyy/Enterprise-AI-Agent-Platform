@@ -1,0 +1,33 @@
+openapi: 3.1.0
+info:
+  title: Agent Runtime API v2.0
+  version: 2.0.0
+paths:
+  /v1/runs:
+    post:
+      summary: Start run with pinned agent version
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        '202': { description: Queued }
+  /v1/runs/{run_id}:
+    get:
+      summary: Get run status
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Success }
+  /v1/runs/{run_id}/events:
+    get:
+      summary: Reconnectable SSE events stream
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Stream }
+  /internal/v1/runs/{run_id}/resume:
+    post:
+      summary: Private service resume with signed approval decision proof
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Resumed }

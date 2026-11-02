@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/workflow-spec.v1.schema.json",
+  "title": "WorkflowSpec",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "entrypoint", "nodes", "edges"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "kind": { "type": "string", "enum": ["Workflow"] },
+    "entrypoint": { "type": "string" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["knowledge_retrieval", "agent_step", "human_approval", "tool_call", "condition", "end"] },
+          "params": { "type": "object" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "when": { "type": "string" }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxTransitions": { "type": "integer", "default": 15 }
+      }
+    }
+  },
+  "additionalProperties": false
+}
