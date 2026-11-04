@@ -1,1 +1,12 @@
-{"extends":"@enterprise/config/tsconfig.json","include":["src"]}
+{
+  "extends": "../config/tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}

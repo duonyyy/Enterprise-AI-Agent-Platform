@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/knowledge-vector.v1.schema.json",
+  "title": "KnowledgeVectorPayload",
+  "description": "Derived Qdrant vector identity only; carries no source text or authorization grants. Internal storage contract, not a public search API.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "tenant_id",
+    "workspace_id",
+    "base_id",
+    "document_id",
+    "document_version_id",
+    "chunk_id",
+    "content_hash",
+    "embedding_model",
+    "embedding_revision"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "workspace_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "base_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "document_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "document_version_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "chunk_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "embedding_model": {
+      "const": "intfloat/multilingual-e5-small"
+    },
+    "embedding_revision": {
+      "const": "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+    }
+  },
+  "additionalProperties": false
+}

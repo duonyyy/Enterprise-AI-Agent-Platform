@@ -6,9 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH"
 
-RUN pip install --no-cache-dir "uv==0.11.26"
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser && \
+    pip install --no-cache-dir "uv==0.11.26"
 
 COPY . /app
-RUN uv sync --frozen --no-dev --package jobs-worker
+RUN uv sync --frozen --no-dev --package jobs-worker && chown -R appuser:appuser /app
+
+USER appuser
 
 CMD ["python", "-m", "jobs_worker.main"]

@@ -17,4 +17,7 @@
 /infra/                                     @<org-or-user>/platform-maintainers
 /.github/                                   @<org-or-user>/platform-maintainers
 /AGENTS.md                                  @<org-or-user>/platform-maintainers
-/docs/00-governance/                        @<org-or-user>/platform-maintainers
+/AGENT_CODING_RULES.md                       @<org-or-user>/platform-maintainers
+/ARCHITECTURE.md                             @<org-or-user>/platform-maintainers
+/CONTRIBUTING.md                             @<org-or-user>/platform-maintainers
+/scripts/                                   @<org-or-user>/platform-maintainers

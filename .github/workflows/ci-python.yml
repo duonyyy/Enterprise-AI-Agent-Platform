@@ -52,6 +52,7 @@ jobs:
               - 'contracts/**'
               - 'database/**'
               - 'tests/**'
+              - 'scripts/validate_database_schema.py'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/ci-python.yml'
@@ -97,9 +98,9 @@ jobs:
         run: |
           uv run python -B -m compileall -q apps libs tests
 
-      - name: Validate DB-56 Schema & RLS Policies
+      - name: Validate static database definitions (not live RLS proof)
         run: |
-          uv run python docs/03-database/database/validate_db_static.py
+          uv run python -B scripts/validate_database_schema.py
 
   contract-and-unit-tests:
     name: Contract & Unit Test Suite

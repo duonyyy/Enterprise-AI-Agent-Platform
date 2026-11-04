@@ -1,1 +1,9 @@
-{"extends":"@enterprise/config/tsconfig.json","include":["src"]}
+{
+  "extends": "../config/tsconfig.json",
+  "compilerOptions": {
+    "moduleResolution": "node",
+    "lib": ["dom", "es2022"],
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}

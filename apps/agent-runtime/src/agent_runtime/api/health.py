@@ -117,54 +117,64 @@ from agent_runtime.settings import get_settings
 
 
 def probe_postgres() -> bool:
-    """Socket-level connection probe to active PostgreSQL host and port."""
+    """Executes a real SELECT 1 query against PostgreSQL using configured credentials."""
     settings = get_settings()
     url = settings.database_url or os.getenv("DATABASE_URL", "")
     if not url:
         return False
     try:
+        import psycopg
+
         clean_url = (
-            url.replace("postgresql+asyncpg://", "http://")
-            .replace("postgresql+psycopg://", "http://")
-            .replace("postgresql://", "http://")
+            url.replace("postgresql+asyncpg://", "postgresql://")
+            .replace("postgresql+psycopg://", "postgresql://")
         )
-        parsed = urlparse(clean_url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or 5432
-        sock = socket.create_connection((host, port), timeout=0.8)
-        sock.close()
-        return True
+        with psycopg.connect(clean_url, connect_timeout=1) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+                return bool(row and row[0] == 1)
     except Exception:
         return False
 
 
 def probe_redis() -> bool:
-    """Socket-level connection probe to Redis server."""
+    """Protocol-level PING/PONG probe to Redis server."""
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
         parsed = urlparse(redis_url)
         host = parsed.hostname or "localhost"
         port = parsed.port or 6379
-        sock = socket.create_connection((host, port), timeout=0.8)
-        sock.close()
-        return True
+        with socket.create_connection((host, port), timeout=0.8) as sock:
+            sock.settimeout(0.8)
+            sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+            data = sock.recv(64)
+            return data.startswith(b"+PONG")
+    except Exception:
+        return False
+
+
+def probe_qdrant() -> bool:
+    """HTTP readiness probe to Qdrant vector database (/healthz)."""
+    settings = get_settings()
+    url = settings.qdrant_health_url or os.getenv("QDRANT_HEALTH_URL", "")
+    if not url:
+        qdrant_host = os.getenv("QDRANT_HOST", "localhost")
+        qdrant_port = os.getenv("QDRANT_PORT", "6333")
+        url = f"http://{qdrant_host}:{qdrant_port}/healthz"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
+            return 200 <= resp.status < 400
     except Exception:
         return False
 
 
 def probe_model_gateway() -> bool:
-    """Probes the configured model gateway or local inference port."""
+    """Probes the explicitly configured model gateway URL if present."""
     settings = get_settings()
     url = settings.model_gateway_health_url or os.getenv("MODEL_GATEWAY_URL", "")
     if not url:
-        # Check standard inference ports (vLLM / LiteLLM / Ollama)
-        for port in (8000, 11434, 4000):
-            try:
-                sock = socket.create_connection(("127.0.0.1", port), timeout=0.2)
-                sock.close()
-                return True
-            except Exception:
-                continue
         return False
     try:
         req = urllib.request.Request(url, method="GET")
@@ -175,12 +185,17 @@ def probe_model_gateway() -> bool:
 
 
 # Global default healthchecker
-default_health_checker = HealthChecker()
+default_health_checker = HealthChecker(probe_timeout_seconds=1.5)
 
 # Register real dependency probes
 default_health_checker.register_probe("database_postgres", probe_postgres, is_critical=True)
+default_health_checker.register_probe("vector_index_qdrant", probe_qdrant, is_critical=True)
 default_health_checker.register_probe("semantic_cache_redis", probe_redis, is_critical=False)
-default_health_checker.register_probe("model_gateway", probe_model_gateway, is_critical=True)
+default_health_checker.register_probe(
+    "model_gateway",
+    probe_model_gateway,
+    is_critical=bool(get_settings().model_gateway_health_url or os.getenv("MODEL_GATEWAY_URL", "")),
+)
 
 
 @router.get("", summary="Overall health status")

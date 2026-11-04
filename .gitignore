@@ -17,6 +17,7 @@ node_modules/
 .next/
 out/
 *.tsbuildinfo
+.turbo/
 
 # IDE & OS
 .idea/
@@ -29,5 +30,26 @@ Thumbs.db
 # Environment & DB
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 *.sqlite
+*.sqlite3
 *.db
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Internal design/review material stays local or in a separate private repository.
+/docs/
+/.private-docs-export/
+/artifacts/evidence/
+/ENTERPRISE_AGENT_PLATFORM_DATABASE_PRODUCTION_V1/
+/ENTERPRISE_AGENT_PLATFORM_DATABASE_PRODUCTION_V2/
+/models/
+*.safetensors
+
+# Internal UI design decisions and audit notes stay with the private documentation.
+/STUDIO_DESIGN_DECISIONS.md
+/STUDIO_VISUAL_DIRECTION.md
+/UI_TECH_AUDIT.md

@@ -101,7 +101,7 @@ The architecture separates the **control plane**, where configurations and polic
 - **Human oversight:** High-impact actions require an authorized approval tied to the proposed action.
 - **Versioned contracts:** API and data definitions provide a shared boundary between services and teams.
 
-These are engineering requirements and design goals. Consult the [architecture](./docs/02-architecture/SYSTEM_ARCHITECTURE.md), [module specifications](./docs/04-module-specs/), and current source before assuming a capability is complete.
+These are engineering requirements and design goals. Consult the [architecture overview](./ARCHITECTURE.md), versioned [contracts](./contracts/), and current source before assuming a capability is complete. Detailed design specifications and implementation plans are maintained separately with restricted access.
 
 ### Repository layout
 
@@ -113,7 +113,7 @@ contracts/   JSON Schema and OpenAPI definitions
 database/    Database migrations
 infra/       Local development infrastructure
 tests/       Contract, integration, security, and other test suites
-docs/        Product, architecture, engineering, and operations documentation
+scripts/     Repository checks and development utilities
 ```
 
 ## Who is it for?
@@ -124,7 +124,7 @@ docs/        Product, architecture, engineering, and operations documentation
 
 ## Get started
 
-The steps below start the **development environment** from the repository root. They use PowerShell on Windows; the same tools are available on other platforms. This setup is for contributors and is not a production deployment.
+The steps below start and verify the **local development environment** from the repository root using PowerShell on Windows. This setup is for contributors and local verification; it is not a production deployment.
 
 ### Prerequisites
 
@@ -132,61 +132,69 @@ The steps below start the **development environment** from the repository root. 
 - Python 3.12 or later and `uv` 0.11.26.
 - Node.js 22 and pnpm 10.18.3.
 
-### 1. Get the project and configure it
+### 1. First-time local setup
 
-Clone the repository from your GitHub repository URL, then open a terminal in the project directory. Create a local configuration file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Open `.env` and replace the `replace-with-*` values with your own development credentials. Use distinct, strong values for the database and JWT secrets; the JWT secrets must be at least 32 characters long. Keep `.env` private and out of Git.
-
-### 2. Install dependencies
+Run the setup script from the repository root. If `.env` does not exist yet, it creates `.env` from `.env.example` with generated development secrets. If `.env` already exists, it preserves all existing credentials and appends only missing keys. It also syncs Python (`uv` including the `retrieval` extra) and Node (`pnpm`) workspaces, verifies the offline `intfloat/multilingual-e5-small` model snapshot (`614241f622f53c4eeff9890bdc4f31cfecc418b3`), and validates the Compose configuration:
 
 ```powershell
-uv sync --all-packages --locked --group dev
-pnpm install --frozen-lockfile
+powershell -ExecutionPolicy Bypass -File .\scripts\local-setup.ps1
 ```
 
-### 3. Start the services
+### 2. Build and start the local stack
 
 ```powershell
-docker compose --env-file .env -f infra/compose/docker-compose.dev.yml up --build -d
-docker compose --env-file .env -f infra/compose/docker-compose.dev.yml ps
+powershell -ExecutionPolicy Bypass -File .\scripts\local-start.ps1
 ```
 
-The first startup downloads and builds images. The stack starts the APIs and their development dependencies; Studio Web is started separately in the next step. The local stack is intended for development and does not provide a complete production deployment or a configured model provider.
+This builds and starts the core infrastructure (`postgres`, `redis`, `qdrant`, `minio`, `minio-init`) and applications (`control-api`, `agent-runtime`, `studio-web`), binding host ports to `127.0.0.1`:
 
-### 4. Start Studio Web
+- **Studio Web:** `http://127.0.0.1:3000` (e.g. `http://127.0.0.1:3000/login`)
+- **Control API:** `http://127.0.0.1:8000` (`/health/live`, `/health/ready`, `/docs`)
+- **Agent Runtime:** `http://127.0.0.1:8001` (`/health/live`, `/health/ready`, `/health/deep`, `/docs`)
+- **PostgreSQL 16:** `127.0.0.1:5432`
+- **Redis 7:** `127.0.0.1:6379`
+- **Qdrant:** `http://127.0.0.1:6333`
+- **MinIO S3 API & Console:** `http://127.0.0.1:9000` / `http://127.0.0.1:9001`
 
-In a separate terminal, from the repository root:
+### 3. Verify the running environment
+
+Run the automated verification suite to check Compose configuration, container readiness, PostgreSQL `platform_app` permissions and fail-closed RLS, Redis ephemeral cache behavior, MinIO non-root object read/write, Qdrant + E5 384-d embeddings, HTTP auth enforcement, restart persistence, and dependency-loss readiness transitions:
 
 ```powershell
-pnpm --filter studio-web dev
+powershell -ExecutionPolicy Bypass -File .\scripts\local-verify.ps1
 ```
 
-Open [http://localhost:3000](http://localhost:3000) for Studio. The Control API is available at [http://localhost:8000/docs](http://localhost:8000/docs) and the Agent Runtime at [http://localhost:8001/docs](http://localhost:8001/docs). Studio and API features are still being developed.
+Public-safe redacted evidence is written to `artifacts/evidence/infra-local/<timestamp>/`.
 
-### 5. Stop the development environment
-
-Stop Studio with `Ctrl+C`, then run:
+### 4. View logs and enable optional profiles
 
 ```powershell
-docker compose --env-file .env -f infra/compose/docker-compose.dev.yml down
+# View service logs
+docker compose --env-file .env -f infra/compose/docker-compose.dev.yml logs --tail=100
+
+# Optional profiles (Kafka event bus or background worker when scope/executor are configured)
+powershell -ExecutionPolicy Bypass -File .\scripts\local-start.ps1 -Profiles kafka
+powershell -ExecutionPolicy Bypass -File .\scripts\local-start.ps1 -Profiles worker
 ```
 
-The worker is optional and needs a valid tenant and workspace configured first; see [CONTRIBUTING.md](./CONTRIBUTING.md). The development Compose setup is not a backup or persistence strategy; protect any data you need before removing or recreating containers and volumes.
+### 5. Stop the stack while preserving data
 
-Before changing code, read the [agent instructions](./AGENTS.md) and the [collaboration and branching guide](./docs/00-governance/AGENT_COLLABORATION_AND_BRANCHING.md).
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\local-stop.ps1
+```
+
+This stops the containers without `-v`, preserving `postgres_data`, `qdrant_data`, and `minio_data` volumes.
+
+Before changing code, read the [agent instructions](./AGENTS.md) and the [contribution and branching guide](./CONTRIBUTING.md). Implementation contributors also need the approved task specifications supplied by the maintainer.
 
 ## Explore the project
 
-- [Product requirements](./docs/01-product/PRODUCT_REQUIREMENTS.md) — the problems, users, and goals shaping the platform.
-- [Roadmap](./docs/01-product/ROADMAP.md) — the intended direction for development.
-- [Architecture](./docs/02-architecture/SYSTEM_ARCHITECTURE.md) — how the platform is designed.
-- [Documentation index](./docs/00-governance/DOCUMENT_INDEX.md) — a guide to the complete project documentation.
+- [Architecture overview](./ARCHITECTURE.md) — service boundaries, persistence, and trust.
+- [API and payload contracts](./contracts/) — versioned definitions used by the implementation.
+- [Agent coding rules](./AGENT_CODING_RULES.md) — the public engineering baseline.
 - [Contributing](./CONTRIBUTING.md) — local setup and ways to contribute.
+
+Internal use cases, design decisions, audits, evidence, and detailed runbooks are not distributed in this code repository. Contributors receive the relevant approved material through a private task packet; contact the maintainer for access before implementing features that depend on it.
 
 ## Security
 

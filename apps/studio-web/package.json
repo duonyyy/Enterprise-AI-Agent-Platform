@@ -18,8 +18,10 @@
   "devDependencies": {
     "@enterprise/config": "workspace:*",
     "@types/node": "^26.6.6",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.4",
     "typescript": "^5"
   }
 }

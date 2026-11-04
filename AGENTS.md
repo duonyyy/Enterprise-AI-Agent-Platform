@@ -1,13 +1,14 @@
 # AGENTS.md — Enterprise AI Agent Platform
 
-> Repository-wide instructions for Codex and other coding agents. Quick actionable coding guide: [`AGENT_CODING_RULES.md`](./AGENT_CODING_RULES.md). Full mandatory policy: [`docs/00-governance/CODING_STANDARDS_AND_ARCHITECTURE_RULES.md`](./docs/00-governance/CODING_STANDARDS_AND_ARCHITECTURE_RULES.md). Collaboration and branch workflow: [`docs/00-governance/AGENT_COLLABORATION_AND_BRANCHING.md`](./docs/00-governance/AGENT_COLLABORATION_AND_BRANCHING.md).
+> Repository-wide instructions for Codex and other coding agents. Public coding baseline: [`AGENT_CODING_RULES.md`](./AGENT_CODING_RULES.md). Collaboration: [`CONTRIBUTING.md`](./CONTRIBUTING.md). Architecture: [`ARCHITECTURE.md`](./ARCHITECTURE.md). Detailed specifications, approved policy, ADRs, audits and implementation runbooks are supplied separately through the maintainer's private documentation bundle.
 
 ## 1. Before editing code
 
 - Identify the current branch, commit, git status, existing modules, migration head, and already implemented features. Do not assert code exists based on documentation.
-- Read `docs/00-governance/AGENT_COLLABORATION_AND_BRANCHING.md`; declare branch scope and owned paths before editing.
-- Read the matching `SPEC-*.md`, accepted ADRs, `docs/00-governance/SOURCE_OF_TRUTH.md`, and (for affected modules) `CR-SKILL-001` or `CR-MCP-001`; verify real file locations.
-- Treat the database as **target 56 domain tables / 7 PostgreSQL schemas** (50 baseline + 3 Skill + 3 MCP), not a claim that migrations have run.
+- Read `CONTRIBUTING.md`; declare branch scope and owned paths before editing. Preserve existing working-tree and staged changes; do not switch/reset a dirty checkout to create a branch.
+- Obtain the approved task packet from the maintainer: matching SPEC, accepted ADRs, policy/source-of-truth excerpts, and CR-SKILL-001 or CR-MCP-001 when applicable. Record document IDs/revisions and the matching code baseline. A local ignored documentation folder may provide the bundle; it is not part of a public clone. Do not assume every draft in that folder is approved.
+- If a required specification, security policy or architectural decision is unavailable, mark the affected implementation BLOCKED and request the missing task packet. Continue independent read-only investigation or explicitly scoped work; do not infer authority from README examples.
+- Treat the current SQL as an authored target of **56 domain tables / 7 PostgreSQL schemas**, not a claim that migrations have run. Schema history and approved deltas must be verified from the task packet and actual migrations.
 - If canonical SQL/JSON Schema/OpenAPI contradicts a task description, stop and report the conflict; do not invent a schema, migration or endpoint.
 
 ## 2. Mandatory implementation boundaries
@@ -37,4 +38,4 @@
 
 Stop and label `BLOCKED` if a security-critical contract is unknown; migrations disagree; RLS cannot be verified for an applicable change; a high-impact external write lacks safe reconciliation; a Tool or Skill needs unauthorized execution; a secret would be exposed; or a required test cannot be run but would be claimed successful.
 
-Read the full policy before any implementation that changes permissions, schemas, Agent publishing, runtime, Tool Gateway, Skills, MCP, approvals, knowledge ACL, secrets or deployment.
+Read the full approved policy supplied privately before implementation that changes permissions, schemas, Agent publishing, runtime, Tool Gateway, Skills, MCP, approvals, knowledge ACL, secrets or deployment. The public coding guide is a minimum baseline, not permission to bypass a missing requirement. Do not commit the private bundle or paste its sensitive contents into public issues, PRs or logs; public handoffs use document IDs/revisions and a non-sensitive scope summary.

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -9,8 +7,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: enterprise_agent_platform
       PLATFORM_APP_DB_PASSWORD: ${PLATFORM_APP_DB_PASSWORD:?PLATFORM_APP_DB_PASSWORD is required}
-    ports: ["5432:5432"]
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
+      - postgres_data:/var/lib/postgresql/data
       - ../postgres/00-create-platform-app.sh:/docker-entrypoint-initdb.d/00-create-platform-app.sh:ro
       - ../../database/migrations/0001_baseline.sql:/docker-entrypoint-initdb.d/0001_baseline.sql:ro
       - ../../database/migrations/0002_fail_closed_rls.sql:/docker-entrypoint-initdb.d/0002_fail_closed_rls.sql:ro
@@ -18,12 +18,16 @@ services:
       test: ["CMD-SHELL", "pg_isready -U platform_owner -d enterprise_agent_platform"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
     container_name: enterprise-redis
-    ports: ["6379:6379"]
+    # Ephemeral cache role per SPEC-DEPLOY-001 section 2 (not authoritative state)
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -33,7 +37,20 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.9.0
     container_name: enterprise-qdrant
-    ports: ["6333:6333"]
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   minio:
     # Development-only compose service. Pin this image before a production deployment.
@@ -43,23 +60,61 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
-    ports: ["9000:9000", "9001:9001"]
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
-  # Optional Enterprise Event Bus Profile (ADR-014)
+  minio-init:
+    image: minio/minio:latest
+    container_name: enterprise-minio-init
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+      S3_BUCKET: ${S3_BUCKET:-agent-platform-docs}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ "$$S3_ACCESS_KEY" = "$$MINIO_ROOT_USER" ]; then
+          echo "ERROR: S3_ACCESS_KEY must not equal MINIO_ROOT_USER" >&2
+          exit 1
+        fi
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
+        mc mb --ignore-existing "local/$$S3_BUCKET" >/dev/null
+        mc admin user add local "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" >/dev/null
+        mc admin policy attach local readwrite --user "$$S3_ACCESS_KEY" >/dev/null 2>&1 || true
+        echo "MinIO bucket and non-root application user provisioned."
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # Optional Enterprise Event Bus Profile (ADR-014; default is postgres_outbox)
   # Run with: docker compose --profile kafka up
   kafka:
     image: apache/kafka:3.7.0
     profiles: ["kafka"]
     container_name: enterprise-kafka
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://127.0.0.1:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -72,33 +127,121 @@ services:
       context: ../..
       dockerfile: apps/control-api/Dockerfile
     container_name: enterprise-control-api
-    ports: ["8000:8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://platform_app:${PLATFORM_APP_DB_PASSWORD:?PLATFORM_APP_DB_PASSWORD is required}@postgres:5432/enterprise_agent_platform
+      ENV: ${ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql+asyncpg://platform_app:${PLATFORM_APP_DB_PASSWORD:?PLATFORM_APP_DB_PASSWORD is required}@postgres:5432/enterprise_agent_platform
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
-      JWT_ISSUER: http://localhost:8080/realms/enterprise
-      JWT_AUDIENCE: enterprise-control-api
+      JWT_ISSUER: ${JWT_ISSUER:-http://localhost:8080/realms/enterprise}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-enterprise-control-api}
       RUNTIME_API_URL: http://agent-runtime:8001
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+      S3_BUCKET: ${S3_BUCKET:-agent-platform-docs}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
 
   agent-runtime:
     build:
       context: ../..
       dockerfile: apps/agent-runtime/Dockerfile
+      args:
+        INSTALL_RETRIEVAL: "${AGENT_RUNTIME_INSTALL_RETRIEVAL:-1}"
     container_name: enterprise-agent-runtime
-    ports: ["8001:8001"]
+    ports:
+      - "127.0.0.1:8001:8001"
     environment:
+      ENV: ${ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgresql+psycopg://platform_app:${PLATFORM_APP_DB_PASSWORD:?PLATFORM_APP_DB_PASSWORD is required}@postgres:5432/enterprise_agent_platform
       REDIS_URL: redis://redis:6379/0
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_HEALTH_URL: http://qdrant:6333/healthz
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+      S3_BUCKET: ${S3_BUCKET:-agent-platform-docs}
       RUNTIME_JWT_SECRET: ${RUNTIME_JWT_SECRET:?RUNTIME_JWT_SECRET is required}
-      RUNTIME_JWT_ISSUER: http://localhost:8080/realms/enterprise
-      RUNTIME_JWT_AUDIENCE: agent-runtime
+      RUNTIME_JWT_ISSUER: ${RUNTIME_JWT_ISSUER:-http://localhost:8080/realms/enterprise}
+      RUNTIME_JWT_AUDIENCE: ${RUNTIME_JWT_AUDIENCE:-agent-runtime}
+      E5_MODEL_SNAPSHOT: /opt/models/e5/614241f622f53c4eeff9890bdc4f31cfecc418b3
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ${E5_MODEL_SNAPSHOT:?E5_MODEL_SNAPSHOT is required}:/opt/models/e5/614241f622f53c4eeff9890bdc4f31cfecc418b3:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  studio-web:
+    build:
+      context: ../..
+      dockerfile: apps/studio-web/Dockerfile
+      args:
+        NEXT_PUBLIC_CONTROL_API_URL: ${NEXT_PUBLIC_CONTROL_API_URL:-http://127.0.0.1:8000}
+        NEXT_PUBLIC_RUNTIME_API_URL: ${NEXT_PUBLIC_RUNTIME_API_URL:-http://127.0.0.1:8001}
+        CONTROL_API_INTERNAL_URL: http://control-api:8000
+    container_name: enterprise-studio-web
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_CONTROL_API_URL: ${NEXT_PUBLIC_CONTROL_API_URL:-http://127.0.0.1:8000}
+      NEXT_PUBLIC_RUNTIME_API_URL: ${NEXT_PUBLIC_RUNTIME_API_URL:-http://127.0.0.1:8001}
+      CONTROL_API_INTERNAL_URL: http://control-api:8000
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      control-api:
+        condition: service_healthy
+      agent-runtime:
         condition: service_healthy
 
   jobs-worker:
@@ -117,3 +260,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  minio_data:

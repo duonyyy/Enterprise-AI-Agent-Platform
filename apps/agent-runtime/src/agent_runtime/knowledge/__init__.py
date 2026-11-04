@@ -1,29 +1,38 @@
 """
-Data Substrate Package: Delta Lake ACID Audit Store, Feast Feature Store, and Qdrant Hybrid RRF.
+Knowledge utilities and scoped E5/Qdrant retrieval adapters.
 """
 
+from .citation_verifier import CitationVerifier, InvalidCitationError
 from .delta_audit_ledger import DeltaAuditLedger
+from .embeddings import E5EmbeddingModel, EmbeddingUnavailable
 from .feast_store import FeastDualStore
 from .hybrid_retriever import HybridRetriever
-from .citation_verifier import CitationVerifier, InvalidCitationError
 from .ingestion_quarantine import (
-    IngestionDataContractGate,
-    ValidatedDocument,
-    QuarantineRecord,
-    QuarantineCode,
     IngestionBatchResult,
+    IngestionDataContractGate,
+    QuarantineCode,
+    QuarantineRecord,
+    ValidatedDocument,
 )
+from .qdrant_index import QdrantVectorIndex
+from .retrieval_types import KnowledgeChunk, RetrievalHit, RetrievalScope, RetrievalUnavailable
 
 __all__ = [
+    "CitationVerifier",
     "DeltaAuditLedger",
+    "E5EmbeddingModel",
+    "EmbeddingUnavailable",
     "FeastDualStore",
     "HybridRetriever",
-    "CitationVerifier",
-    "InvalidCitationError",
-    "IngestionDataContractGate",
-    "ValidatedDocument",
-    "QuarantineRecord",
-    "QuarantineCode",
     "IngestionBatchResult",
+    "IngestionDataContractGate",
+    "InvalidCitationError",
+    "KnowledgeChunk",
+    "QdrantVectorIndex",
+    "QuarantineCode",
+    "QuarantineRecord",
+    "RetrievalHit",
+    "RetrievalScope",
+    "RetrievalUnavailable",
+    "ValidatedDocument",
 ]
-

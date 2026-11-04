@@ -1,7 +1,7 @@
 # AGENT_CODING_RULES.md — Condensed Rules for AI Coding Agents
 
 > **Audience:** Codex, Cursor, Claude Code, Antigravity, Copilot, and human reviewers.  
-> **Source of Truth:** Full specification at [`docs/00-governance/CODING_STANDARDS_AND_ARCHITECTURE_RULES.md`](./docs/00-governance/CODING_STANDARDS_AND_ARCHITECTURE_RULES.md).  
+> **Public baseline:** Read with [`AGENTS.md`](./AGENTS.md), [`CONTRIBUTING.md`](./CONTRIBUTING.md), and [`ARCHITECTURE.md`](./ARCHITECTURE.md). The maintainer supplies the full approved policy and feature specifications privately, pinned to a document revision and code baseline. Required private requirements that are missing block the affected implementation.  
 > **Status:** APPROVED POLICY (v1.0 Baseline) | **Target DB:** 56 tables / 7 schemas.
 
 ---
@@ -35,7 +35,9 @@
 
 ---
 
-## 3. TypeScript & Next.js 15 Implementation Rules
+## 3. TypeScript, React & Next.js Implementation Rules
+
+Use the versions pinned in the manifests and lockfile; this guide does not authorize a framework upgrade.
 
 - **Strictness:** `strict: true`, `noUncheckedIndexedAccess: true`. Never use `any` or `as any`.
 - **Discriminated Unions:** Model UI states and run lifecycle with tagged unions (e.g., `{ status: "idle" | "saving" | "error" }`). Handle all cases exhaustively with `assertNever(x: never)`.
@@ -80,7 +82,7 @@
 |---|---|---|
 | 1 | `except Exception: pass` | Catch specific exception, log context, re-raise with `from exc` |
 | 2 | `Any` or `dict[str, Any]` everywhere | Use Pydantic DTOs / frozen dataclasses / Protocols |
-| 3 | `eval()`, `exec()`, or raw shell execution | Canned tool execution via 12-Step ToolDispatcher sandbox |
+| 3 | `eval()`, `exec()`, or raw shell execution | Approved typed tools through the shared Dispatcher; Skill scripts/local subprocess stay disabled until an approved sandbox is implemented |
 | 4 | Shared `AsyncSession` in `asyncio.gather` | One `AsyncSession` per task scope |
 | 5 | Dynamic SQL string interpolation (`f"SELECT... {val}"`) | Parameter binding via SQLAlchemy `select()` |
 | 6 | Returning `success: true` on external write timeout | Record `unknown` state and trigger reconciliation |
@@ -109,7 +111,8 @@ SPEC-... or CR-... / implementation task
 | Format/Lint | `uv run ruff check .` | PASS/FAIL/NOT_RUN/BLOCKED | 0 errors |
 | Typecheck | `uv run mypy ...` | PASS/FAIL/NOT_RUN/BLOCKED | 0 errors |
 | Tests | `pytest tests/contract/` | PASS/FAIL/NOT_RUN/BLOCKED | 7 passed |
-| Security/RLS | `python docs/03-database/database/validate_db_static.py` | PASS/FAIL/NOT_RUN/BLOCKED | 56 tables, 55 RLS |
+| Static SQL inventory | `python -B scripts/validate_database_schema.py` | PASS/FAIL/NOT_RUN/BLOCKED | Definitions only; not live RLS proof |
+| Security/RLS integration | Actual approved PostgreSQL test command | PASS/FAIL/NOT_RUN/BLOCKED | Non-bypass role, denial cases and DB effects |
 
 ## Rollback Plan
 - Revert commit / pinned version pointer.
