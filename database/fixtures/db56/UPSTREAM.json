@@ -1,0 +1,106 @@
+{
+  "archive_name": "ENTERPRISE_AGENT_PLATFORM_DB56_SAMPLE_DATA_KIT.zip",
+  "archive_sha256": "9697f76ef36d336fab9fb9dd8335ffb6960554a5c95bf5d66c3ed73ddf0915b3",
+  "upstream_files": [
+    {
+      "path": "CODEX_SEED_PROMPT.md",
+      "bytes": 2924,
+      "sha256": "13b124cf3f57b15bcd7939d43639b9bad557fb0da4d0c88754b59d3d351c41c2"
+    },
+    {
+      "path": "DB56_BASELINE_REFERENCE.sql",
+      "bytes": 83236,
+      "sha256": "52387ee77c36d6f36a4f281d9fd8074ec9144b8e9f43616ced6e290f26a214b5"
+    },
+    {
+      "path": "README.md",
+      "bytes": 8801,
+      "sha256": "8ce69264c776a3cdce93339aeec7d583d37d268811cbd018a7195df6d4262e3f"
+    },
+    {
+      "path": "SECURITY_TEST_PLAN.md",
+      "bytes": 2321,
+      "sha256": "1b5e69ba77c15e4642fc6a9690dddfcaf32737563c77be382d6e1d791f038725"
+    },
+    {
+      "path": "fixtures/business_mock_data.json",
+      "bytes": 3596,
+      "sha256": "102bbb60c0b4800fb8e54d7cb9b96d0989ce5b6cfb3b9ddaa0c0d58bec3a3b2e"
+    },
+    {
+      "path": "fixtures/knowledge_docs/it_runbook_demo.md",
+      "bytes": 458,
+      "sha256": "8aebf2e972f987b9423b841099f733325cf0339f24d0d1ed123d74b12983fa17"
+    },
+    {
+      "path": "fixtures/knowledge_docs/onboarding_policy_demo.md",
+      "bytes": 605,
+      "sha256": "8fdb0a56416701d3bb8c7f271da8697602ef148ff19412257ca3522ed2384c09"
+    },
+    {
+      "path": "fixtures/knowledge_docs/quotation_policy_demo.md",
+      "bytes": 611,
+      "sha256": "f12bce66cf327c1b8009c8aa51d1d50a034e494c68d37e45dc000576de7ac47b"
+    },
+    {
+      "path": "generate_seed.py",
+      "bytes": 28006,
+      "sha256": "cdfe7990c8fd41854c68be19e27f126db38ff3b1e41b397fb4e57fad5229670f"
+    },
+    {
+      "path": "manifest_demo.json",
+      "bytes": 7263,
+      "sha256": "3dc5e92ec4a55704a91ae781f634b980730e7d447746186870fc358b37ac09a9"
+    },
+    {
+      "path": "manifest_load.json",
+      "bytes": 43734,
+      "sha256": "9f7ccb17d9a9a5d5b11984d04f55619b9a1c4fc13afdf42e03fbfdffa047b807"
+    },
+    {
+      "path": "manifest_small.json",
+      "bytes": 4095,
+      "sha256": "a8e4c0bddcfb0cb3da3aca433c381b6b391f78e339a316e76b7f9a73616d98dd"
+    },
+    {
+      "path": "seed_demo.sql",
+      "bytes": 572686,
+      "sha256": "08295af5d78c3a805a8285467597d967bd524c100a0a7a2b67fec459d3af5903"
+    },
+    {
+      "path": "seed_load.sql",
+      "bytes": 8549933,
+      "sha256": "100c8b32048391a393d350796290f88bd4b96019b1e6d98c7c3cfb30e6e14dce"
+    },
+    {
+      "path": "seed_small.sql",
+      "bytes": 144589,
+      "sha256": "3a6b418093076e1396486cf9297ce69f48d45c7b19d857438ce74dc3546797ef"
+    },
+    {
+      "path": "verify_generated_files.py",
+      "bytes": 1465,
+      "sha256": "4cc5d71d1e08eedc75f32f0e944c4bf0bbc38bb882f52a357d309b240d78cd2d"
+    },
+    {
+      "path": "verify_table_counts.sql",
+      "bytes": 7615,
+      "sha256": "98ea57ced962d5eb5995a8d8dfc04cae0e7ef4d0f156b05f7db62a4d0ab41a5d"
+    }
+  ],
+  "reviewed_migrations": [
+    {
+      "path": "database/migrations/0001_baseline.sql",
+      "normalized_sha256": "a3fa172cc8ade6addfec2c307bcbb7fd0077608f56d3d04c0482516d1ffc263d"
+    },
+    {
+      "path": "database/migrations/0002_fail_closed_rls.sql",
+      "normalized_sha256": "d39d932afaac063fa5b1d2d5da62c3fe049cbd4c7b114b3a9df565ad6110718d"
+    }
+  ],
+  "upstream_instructions": "Reference material only; not executed as user instructions. Original full archive contents retained privately.",
+  "limitations": [
+    "Synthetic UI/database fixtures only; not runtime, model, RAG, approval or encryption proof.",
+    "No live PostgreSQL/RLS import test performed during setup."
+  ]
+}

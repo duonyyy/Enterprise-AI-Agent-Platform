@@ -44,6 +44,7 @@ Thumbs.db
 /docs/
 /.private-docs-export/
 /artifacts/evidence/
+/artifacts/sample-data/
 /ENTERPRISE_AGENT_PLATFORM_DATABASE_PRODUCTION_V1/
 /ENTERPRISE_AGENT_PLATFORM_DATABASE_PRODUCTION_V2/
 /models/

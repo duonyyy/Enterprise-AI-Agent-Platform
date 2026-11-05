@@ -25,6 +25,7 @@ build/
 docs/
 .private-docs-export/
 artifacts/evidence/
+artifacts/sample-data/
 models/
 *.safetensors
 *.bin
