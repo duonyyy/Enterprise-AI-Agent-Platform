@@ -1,0 +1,55 @@
+{
+  "metadata": {
+    "classification": "synthetic_test_data_only",
+    "schema": "fixture/business/v1",
+    "currency": "VND",
+    "disclaimer": "Dữ liệu giả lập; không phải bản ghi nghiệp vụ và không được phép gửi ra hệ thống bên ngoài."
+  },
+  "UC-BIZ-01": {
+    "questions": [
+      "Nhân viên mới phải hoàn thành bước nào trong tuần đầu tiên?",
+      "Ai được phép phê duyệt báo giá gửi khách hàng?",
+      "Không tìm thấy thông tin chính sách nghỉ phép thì Agent phải làm gì?"
+    ],
+    "expected_behavior": "Trả lời kèm tham chiếu tới tài liệu được phép truy cập, hoặc nói không đủ bằng chứng."
+  },
+  "UC-BIZ-02": {
+    "quotation_request": {"customer": "Công ty Khách Hàng Mẫu", "contact": "demo-quote@example.test", "items": [
+      {"sku": "DEMO-LIC-01", "quantity": 2, "unit_price_vnd": 1250000},
+      {"sku": "DEMO-SVC-02", "quantity": 1, "unit_price_vnd": 850000}
+    ], "discount_pct": 5, "currency": "VND"},
+    "expected_behavior": "Tính bằng Decimal/thuật toán xác định; tạo draft, xin phê duyệt, KHÔNG gửi thật."
+  },
+  "UC-BIZ-03": {
+    "kpi_rows": [
+      {"month": "2026-07", "revenue_vnd": 125000000, "orders": 158, "stock_units": 320},
+      {"month": "2026-08", "revenue_vnd": 138000000, "orders": 169, "stock_units": 285},
+      {"month": "2026-09", "revenue_vnd": 131000000, "orders": 163, "stock_units": 298}
+    ],
+    "questions": ["Doanh thu tháng 9 so với tháng 8 tăng hay giảm?", "Tồn kho tháng 8 là bao nhiêu?"],
+    "expected_behavior": "Chỉ query/read-only, nêu rõ đơn vị và phép tính, không tự suy diễn dữ liệu không có."
+  },
+  "UC-BIZ-04": {
+    "crm_tickets": [
+      {"ticket_id": "DEMO-CS-001", "topic": "Không truy cập được tài khoản demo", "priority": "normal", "status": "open"},
+      {"ticket_id": "DEMO-CS-002", "topic": "Yêu cầu giải thích tình trạng đơn hàng giả lập", "priority": "high", "status": "waiting_review"}
+    ],
+    "expected_behavior": "Phân loại và soạn trả lời nháp; cập nhật CRM phải qua Tool Gateway/approval phù hợp."
+  },
+  "UC-BIZ-05": {
+    "new_hires": [{"employee_ref": "DEMO-HR-001", "department": "IT", "start_date": "2026-11-10", "checklist": ["Xác minh hồ sơ", "Chấp thuận cấp tài khoản", "Cấp thiết bị", "Hướng dẫn an toàn thông tin"]}],
+    "expected_behavior": "Không cấp tài khoản thực tế; mô phỏng các bước và luồng phê duyệt."
+  },
+  "UC-BIZ-06": {
+    "invoices": [{"invoice_id": "DEMO-INV-001", "po_id": "DEMO-PO-001", "supplier": "Nhà cung cấp Thử Nghiệm", "amount_vnd": 5100000, "purchase_order_amount_vnd": 4950000, "currency": "VND"}],
+    "expected_behavior": "Phát hiện lệch 150000 VND; yêu cầu kế toán xác minh trước khi ghi sổ."
+  },
+  "UC-BIZ-07": {
+    "contract_reviews": [{"contract_ref": "DEMO-CON-001", "title": "Hợp đồng cung cấp dịch vụ (GIẢ LẬP)", "clauses": ["Điều khoản thanh toán", "Thời hạn hợp đồng"], "missing_clauses": ["Giới hạn trách nhiệm"]}],
+    "expected_behavior": "Nêu rủi ro và vị trí điều khoản; không thay thế chuyên gia pháp lý."
+  },
+  "UC-BIZ-08": {
+    "it_incidents": [{"incident_id": "DEMO-IT-001", "summary": "Không truy cập được môi trường kiểm thử", "severity": "medium", "status": "open"}],
+    "expected_behavior": "Gợi ý runbook, escalation; không chạy script hoặc thay đổi production."
+  }
+}
