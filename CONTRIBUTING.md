@@ -24,6 +24,15 @@ pnpm --filter studio-web build
 
 5. Chạy dependency stack bằng `docker compose -f infra/compose/docker-compose.dev.yml up --build` sau khi Docker Desktop hoạt động. Worker là profile riêng; chỉ bật khi có `WORKER_TENANT_ID` và `WORKER_WORKSPACE_ID` hợp lệ.
 
+The static database validator recognizes baseline declarations after masking SQL
+comments and quoted spans. It pins the reviewed `0002` program by a lexical
+fingerprint; it does not execute or semantically validate PL/pgSQL. The current
+authored `0002` leaves `iam.workspaces` without its policy, a known Step 01 blocker.
+Static PASS does not close PostgreSQL/RLS, privileges, restore or upgrade gates.
+Reviewed forward migrations require an explicit update to the static migration
+inventory and relevant tests; do not edit applied migrations or refresh a
+fingerprint merely to suppress a failure.
+
 ## Rules
 
 - Không sửa `0001_baseline.sql` sau khi môi trường đã áp dụng migration; thêm forward migration.
@@ -56,13 +65,7 @@ Before assigning a feature, the maintainer supplies a task packet containing:
 
 Không có nội dung yêu cầu bắt buộc thì báo BLOCKED phần phụ thuộc, không tự suy endpoint, schema hoặc quyền từ README. Các file local có thể đặt trong thư mục `docs/` đã ignore; việc có file không chứng minh nó đã được duyệt. Không copy tài liệu nội bộ vào public issue/PR hoặc ép thêm bằng `git add -f`.
 
-The local helper below creates a **separate local snapshot** for handoff to a private documentation repository. It does not initialize a repository, create a GitHub repository, upload or change visibility:
-
-```powershell
-python -B scripts/export_internal_docs.py
-```
-
-Output goes under `.private-docs-export/`, which is excluded from Git and the Docker build context. Original files remain in place. Treat the snapshot as private material and review it before sharing. To preserve relative links to source/contracts while working locally, use the documentation as an ignored overlay in the code checkout. When copying updated docs, reconcile local edits rather than overwriting them blindly.
+Local handoff snapshots and dedicated worktrees can be kept under `.private-docs-export/`, which is excluded from Git and the Docker build context alongside `docs/` and `artifacts/evidence/`. Original files remain in place. Treat any local snapshot as private material and review it before sharing. To preserve relative links to source/contracts while working locally, use the documentation as an ignored overlay in the code checkout. When copying updated docs, reconcile local edits rather than overwriting them blindly.
 
 ## Evidence and publication
 
