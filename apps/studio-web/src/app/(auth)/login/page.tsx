@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button, Input } from "@enterprise/ui";
+import { Button, Input, BrandIcon } from "@enterprise/ui";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -45,30 +45,42 @@ export default function LoginPage() {
         }}
       >
         {/* Brand Header */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: "8px" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: "10px" }}>
           <div
             style={{
-              width: "44px",
+              width: "56px",
               height: "44px",
               borderRadius: "10px",
-              backgroundColor: "var(--color-primary)",
+              backgroundColor: "var(--color-primary-subtle)",
+              border: "1px solid var(--color-primary-border)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "#FFFFFF",
-              fontSize: "18px",
-              fontWeight: 800,
-              boxShadow: "0 2px 8px rgba(15, 118, 110, 0.25)",
+              boxShadow: "0 2px 8px rgba(15, 118, 110, 0.15)",
             }}
           >
-            AG
+            <svg
+              width="38"
+              height="24"
+              viewBox="90 100 820 520"
+              role="img"
+              aria-label="Enterprise Agent Platform Logo"
+            >
+              <path
+                d="M110 603 C101 603 101 597 107 581 L158 482 L362 482 L395 410 L196 410 L252 297 L482 297 L520 223 L291 223 L333 140 C339 125 348 115 366 115 L636 115 C654 115 664 121 673 139 L890 581 C901 602 889 607 877 607 L664 607 L643 417 L548 365 L459 417 L437 607 L125 607 C116 607 112 606 110 603 Z"
+                fill="#0F766E"
+              />
+              <path d="M493 607 L493 439 L548 409 L602 439 L602 607 Z" fill="#C2410C" />
+            </svg>
           </div>
-          <h1 style={{ fontSize: "18px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>
-            Enterprise Agent Studio
-          </h1>
-          <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: 0 }}>
-            Hệ thống Quản trị & Điều phối Tác tử AI Doanh nghiệp
-          </p>
+          <div>
+            <h1 style={{ fontSize: "18px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>
+              Enterprise Agent Studio
+            </h1>
+            <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "4px 0 0 0" }}>
+              Hệ thống Quản trị &amp; Điều phối Tác tử AI Doanh nghiệp
+            </p>
+          </div>
         </div>
 
         {/* Login Form */}
@@ -125,10 +137,7 @@ export default function LoginPage() {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
+            <BrandIcon name="safety-shield" size={14} color="var(--color-primary)" />
             <span>Bảo mật Zero-Trust &amp; Phân quyền RBAC</span>
           </div>
           <div>Bản phân phối Doanh nghiệp Miễn phí (Free SaaS) — Không yêu cầu thanh toán.</div>

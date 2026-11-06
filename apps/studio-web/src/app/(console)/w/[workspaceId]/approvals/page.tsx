@@ -11,6 +11,7 @@ import {
   ErrorState,
   ConfirmDialog,
   Column,
+  BrandIcon,
 } from "@enterprise/ui";
 import {
   defaultApiClient,
@@ -208,17 +209,19 @@ export default function ApprovalsPage({
           <Button
             variant="outline"
             size="sm"
-            style={{ color: "var(--color-success)", borderColor: "var(--color-success-border)" }}
+            style={{ color: "var(--color-success)", borderColor: "var(--color-success-border)", display: "inline-flex", alignItems: "center", gap: "4px" }}
             onClick={() => setDecisionTarget({ item, decision: "approved" })}
           >
+            <BrandIcon name="action-approve" size={13} color="currentColor" />
             Duyệt
           </Button>
           <Button
             variant="ghost"
             size="sm"
-            style={{ color: "var(--color-danger)" }}
+            style={{ color: "var(--color-danger)", display: "inline-flex", alignItems: "center", gap: "4px" }}
             onClick={() => setDecisionTarget({ item, decision: "rejected" })}
           >
+            <BrandIcon name="action-reject" size={13} color="currentColor" />
             Từ chối
           </Button>
         </div>

@@ -1,6 +1,14 @@
-# Enterprise AI Agent Platform
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/brand/svg/logo-horizontal-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/brand/svg/logo-horizontal-light.svg">
+    <img alt="Enterprise AI Agent Platform" src="./assets/brand/svg/logo-horizontal-light.svg" width="460">
+  </picture>
+</p>
 
-> Build AI agents that bring knowledge, tools, and people together to move work forward.
+<p align="center">
+  <strong>Build AI agents that bring knowledge, tools, and people together to move work forward.</strong>
+</p>
 
 <p align="center">
   <a href="#the-vision">Vision</a> ·
@@ -8,7 +16,8 @@
   <a href="#platform-capabilities">Capabilities</a> ·
   <a href="#how-it-fits-together">How it works</a> ·
   <a href="#technical-overview">Architecture</a> ·
-  <a href="#get-started">Get started</a>
+  <a href="#get-started">Get started</a> ·
+  <a href="./assets/">Brand & Assets</a>
 </p>
 
 <p align="center">
@@ -107,6 +116,7 @@ These are engineering requirements and design goals. Consult the [architecture o
 
 ```text
 apps/        Studio Web, Control API, Agent Runtime, and Jobs Worker
+assets/      Design assets, brand system, and iconography
 libs/        Shared Python libraries
 packages/    Shared TypeScript packages
 contracts/   JSON Schema and OpenAPI definitions
@@ -191,6 +201,7 @@ Before changing code, read the [agent instructions](./AGENTS.md) and the [contri
 
 - [Architecture overview](./ARCHITECTURE.md) — service boundaries, persistence, and trust.
 - [API and payload contracts](./contracts/) — versioned definitions used by the implementation.
+- [Brand and design assets](./assets/) — official logos, icon system, and design tokens.
 - [Agent coding rules](./AGENT_CODING_RULES.md) — the public engineering baseline.
 - [Contributing](./CONTRIBUTING.md) — local setup and ways to contribute.
 

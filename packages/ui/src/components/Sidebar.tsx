@@ -1,4 +1,5 @@
 import React from "react";
+import { BrandLogo } from "./BrandLogo";
 
 export interface NavItem {
   id: string;
@@ -67,37 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <div
-              style={{
-                width: "28px",
-                height: "28px",
-                borderRadius: "6px",
-                backgroundColor: "var(--color-primary)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#FFFFFF",
-                fontWeight: 700,
-                fontSize: "14px",
-                letterSpacing: "-0.02em",
-                flexShrink: 0,
-                boxShadow: "0 2px 4px rgba(0, 0, 0, 0.2)",
-              }}
-            >
-              AG
-            </div>
-            {!isCollapsed && (
-              <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
-                <span style={{ fontSize: "13px", fontWeight: 700, color: "var(--sidebar-text-primary)" }}>
-                  Agent Studio
-                </span>
-                <span style={{ fontSize: "10px", color: "var(--sidebar-text-muted)" }}>
-                  Enterprise Edition
-                </span>
-              </div>
-            )}
-          </div>
+          <BrandLogo surface="dark" compact={isCollapsed} />
 
           {!isCollapsed && onToggleCollapse && (
             <button

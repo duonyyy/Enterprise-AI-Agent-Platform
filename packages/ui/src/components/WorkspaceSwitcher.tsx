@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { BrandIcon } from "./BrandIcon";
 
 export interface WorkspaceItem {
   id: string;
@@ -67,20 +68,18 @@ export const WorkspaceSwitcher: React.FC<WorkspaceSwitcherProps> = ({
       >
         <span
           style={{
-            width: "18px",
-            height: "18px",
+            width: "20px",
+            height: "20px",
             borderRadius: "4px",
             backgroundColor: "var(--color-primary-subtle)",
             color: "var(--color-primary)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: "10px",
-            fontWeight: 700,
             flexShrink: 0,
           }}
         >
-          W
+          <BrandIcon name="nav-workspace" size={13} color="var(--color-primary)" />
         </span>
 
         <div style={{ display: "flex", flexDirection: "column", textAlign: "left", lineHeight: 1.2 }}>

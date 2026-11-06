@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="266" viewBox="0 0 934 266">
+<g transform="translate(0 -4) scale(0.32)"><path d="M110 603 C101 603 101 597 107 581 L158 482 L362 482 L395 410 L196 410 L252 297 L482 297 L520 223 L291 223 L333 140 C339 125 348 115 366 115 L636 115 C654 115 664 121 673 139 L890 581 C901 602 889 607 877 607 L664 607 L643 417 L548 365 L459 417 L437 607 L125 607 C116 607 112 606 110 603 Z" fill="#42B4A7"/><path d="M493 607 L493 439 L548 409 L602 439 L602 607 Z" fill="#C2410C"/></g>
+<path d="M300 59V222" stroke="#647A7C" stroke-width="2"/>
+<text x="337" y="128" fill="#FFFFFF" font-family="Inter,Arial,sans-serif" font-size="77" font-weight="700">Enterprise</text>
+<text x="337" y="217" fill="#FFFFFF" font-family="Inter,Arial,sans-serif" font-size="77" font-weight="700">Agent Platform</text>
+</svg>

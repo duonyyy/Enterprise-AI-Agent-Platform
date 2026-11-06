@@ -17,6 +17,7 @@ import {
   Pagination,
   Input,
   Column,
+  BrandIcon,
 } from "@enterprise/ui";
 import {
   defaultApiClient,
@@ -419,7 +420,9 @@ export default function AgentsPage({
                   setPublishTargetAgent(item);
                 }}
                 title="Publish immutable version"
+                style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}
               >
+                <BrandIcon name="action-publish" size={13} color="currentColor" />
                 Publish
               </Button>
             ) : (

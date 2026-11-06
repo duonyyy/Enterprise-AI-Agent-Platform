@@ -1,4 +1,5 @@
 import React from "react";
+import { BrandIcon, StatusActionIconName } from "./BrandIcon";
 
 export type StatusType =
   | "PUBLISHED"
@@ -15,14 +16,27 @@ export interface StatusBadgeProps {
   status: StatusType;
   customLabel?: string;
   size?: "sm" | "md";
+  withIcon?: boolean;
 }
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({
   status,
   customLabel,
   size = "md",
+  withIcon = true,
 }) => {
   const normalized = (status || "").toUpperCase();
+
+  const iconMap: Record<string, StatusActionIconName> = {
+    PUBLISHED: "status-published",
+    DRAFT: "status-draft",
+    PENDING: "run-waiting-approval",
+    REJECTED: "action-reject",
+    EXPIRED: "status-archived",
+    RUNNING: "run-running",
+    ARCHIVED: "status-archived",
+    IMMUTABLE: "status-immutable",
+  };
 
   const configs: Record<
     string,
@@ -116,16 +130,24 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
         whiteSpace: "nowrap",
       }}
     >
-      <span
-        style={{
-          width: isSmall ? "4px" : "6px",
-          height: isSmall ? "4px" : "6px",
-          borderRadius: "50%",
-          backgroundColor: current.dot,
-          flexShrink: 0,
-        }}
-        aria-hidden="true"
-      />
+      {withIcon && iconMap[normalized] ? (
+        <BrandIcon
+          name={iconMap[normalized]}
+          size={isSmall ? 10 : 12}
+          color={current.color}
+        />
+      ) : (
+        <span
+          style={{
+            width: isSmall ? "4px" : "6px",
+            height: isSmall ? "4px" : "6px",
+            borderRadius: "50%",
+            backgroundColor: current.dot,
+            flexShrink: 0,
+          }}
+          aria-hidden="true"
+        />
+      )}
       <span>{displayText}</span>
     </span>
   );

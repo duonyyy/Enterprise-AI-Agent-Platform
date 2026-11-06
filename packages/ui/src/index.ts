@@ -20,3 +20,5 @@ export * from "./components/Pagination";
 export * from "./components/WorkspaceSwitcher";
 export * from "./components/Sidebar";
 export * from "./components/AppShell";
+export * from "./components/BrandLogo";
+export * from "./components/BrandIcon";
