@@ -43,6 +43,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bm25 = [
+    { name = "rank-bm25" },
+]
 retrieval = [
     { name = "rank-bm25" },
     { name = "sentence-transformers" },
@@ -62,6 +65,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1.18" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.2.0" },
+    { name = "rank-bm25", marker = "extra == 'bm25'", specifier = "==0.2.2" },
     { name = "rank-bm25", marker = "extra == 'retrieval'", specifier = "==0.2.2" },
     { name = "sentence-transformers", marker = "extra == 'retrieval'", specifier = "==5.5.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
@@ -69,7 +73,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'retrieval'", specifier = "==5.10.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
-provides-extras = ["retrieval"]
+provides-extras = ["bm25", "retrieval"]
 
 [[package]]
 name = "annotated-doc"
@@ -459,6 +463,7 @@ source = { virtual = "." }
 dev = [
     { name = "pytest" },
     { name = "pyyaml" },
+    { name = "rank-bm25" },
     { name = "ruff" },
 ]
 
@@ -468,6 +473,7 @@ dev = [
 dev = [
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rank-bm25", specifier = "==0.2.2" },
     { name = "ruff", specifier = ">=0.8.0" },
 ]
 

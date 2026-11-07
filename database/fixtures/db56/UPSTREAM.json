@@ -96,6 +96,10 @@
     {
       "path": "database/migrations/0002_fail_closed_rls.sql",
       "normalized_sha256": "d39d932afaac063fa5b1d2d5da62c3fe049cbd4c7b114b3a9df565ad6110718d"
+    },
+    {
+      "path": "database/migrations/0003_restore_workspaces_rls.sql",
+      "normalized_sha256": "1742cb49620643106ae01b88e2824dcd8c53eb7429ed5c523dde0ee1753203b9"
     }
   ],
   "upstream_instructions": "Reference material only; not executed as user instructions. Original full archive contents retained privately.",

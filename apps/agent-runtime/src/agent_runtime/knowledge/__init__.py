@@ -15,7 +15,13 @@ from .ingestion_quarantine import (
     ValidatedDocument,
 )
 from .qdrant_index import QdrantVectorIndex
-from .retrieval_types import KnowledgeChunk, RetrievalHit, RetrievalScope, RetrievalUnavailable
+from .retrieval_types import (
+    KnowledgeAuthorization,
+    KnowledgeChunk,
+    RetrievalHit,
+    RetrievalScope,
+    RetrievalUnavailable,
+)
 
 __all__ = [
     "CitationVerifier",
@@ -27,6 +33,7 @@ __all__ = [
     "IngestionBatchResult",
     "IngestionDataContractGate",
     "InvalidCitationError",
+    "KnowledgeAuthorization",
     "KnowledgeChunk",
     "QdrantVectorIndex",
     "QuarantineCode",

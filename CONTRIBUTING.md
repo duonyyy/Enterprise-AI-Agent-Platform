@@ -22,12 +22,27 @@ uv run python -B scripts/validate_database_schema.py
 pnpm --filter studio-web build
 ```
 
-5. Chạy dependency stack bằng `docker compose -f infra/compose/docker-compose.dev.yml up --build` sau khi Docker Desktop hoạt động. Worker là profile riêng; chỉ bật khi có `WORKER_TENANT_ID` và `WORKER_WORKSPACE_ID` hợp lệ.
+5. Trên Windows, chạy `./scripts/local-start.ps1` sau khi Docker Desktop hoạt động. Script tạo bootstrap từ canonical migrations và chạy upgrade trước các ứng dụng. Worker là profile riêng; chỉ bật khi có `WORKER_TENANT_ID` và `WORKER_WORKSPACE_ID` hợp lệ.
+
+Trên máy khác, tạo bootstrap trước lệnh Compose:
+
+```sh
+uv run python -B scripts/run_migrations.py --write-bootstrap artifacts/evidence/local-bootstrap/01-migrations.sql
+docker compose -f infra/compose/docker-compose.dev.yml up --build
+```
+
+Bootstrap chỉ áp dụng khi volume PostgreSQL còn mới. Với volume đã có history,
+đặt `MIGRATION_DATABASE_URL` bằng migration identity qua environment và chạy
+`uv run python -B scripts/run_migrations.py` trước khi khởi động ứng dụng mới.
+Database cũ có domain tables nhưng thiếu history sẽ bị từ chối để chờ đối chiếu
+và tiếp nhận lịch sử được review; không tự đánh dấu đã apply, chạy lại baseline
+hoặc xóa volume. Không dùng app role để chạy migrations.
 
 The static database validator recognizes baseline declarations after masking SQL
 comments and quoted spans. It pins the reviewed `0002` program by a lexical
 fingerprint; it does not execute or semantically validate PL/pgSQL. The current
-authored `0002` leaves `iam.workspaces` without its policy, a known Step 01 blocker.
+authored `0002` leaves `iam.workspaces` without its policy; forward migration
+`0003` restores it without editing published `0001`/`0002`.
 Static PASS does not close PostgreSQL/RLS, privileges, restore or upgrade gates.
 Reviewed forward migrations require an explicit update to the static migration
 inventory and relevant tests; do not edit applied migrations or refresh a

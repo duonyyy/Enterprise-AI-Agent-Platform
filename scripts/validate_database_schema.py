@@ -17,12 +17,16 @@ from typing import Final
 EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0001_baseline.sql",
     "0002_fail_closed_rls.sql",
+    "0003_restore_workspaces_rls.sql",
 )
 
 # Pin the reviewed authored program, not its database effects. Whitespace and
 # comments outside quoted bodies are ignored; PL/pgSQL bodies remain opaque.
 REVIEWED_POLICY_FINGERPRINT: Final[str] = (
     "0b176f7075846f6424c795293a122d538a6f23ad4bccab89c12508f4237e93b1"
+)
+REVIEWED_RESTORE_RLS_FINGERPRINT: Final[str] = (
+    "e078a8dadd4a793ed6237ce6402f7ff2fdb23cfc421feeb9ff722af013fb9a22"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -588,6 +592,27 @@ def _validate_fail_closed_rls_sql(sql: str) -> list[str]:
     return errors
 
 
+def _validate_restore_workspaces_rls_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    executable, fingerprint = _sql_structure(sql)
+
+    if FORBIDDEN_DDL_IN_POLICY_MIGRATION_RE.search(executable):
+        errors.append("0003_restore_workspaces_rls.sql must not contain CREATE TABLE or DROP TABLE")
+
+    if fingerprint != REVIEWED_RESTORE_RLS_FINGERPRINT:
+        errors.append(
+            "0003_restore_workspaces_rls.sql differs from the reviewed authored SQL fingerprint; "
+            "policy changes require review"
+        )
+
+    if not re.search(r"CREATE\s+POLICY\s+tenant_isolation\s+ON\s+iam\.workspaces\b", executable):
+        errors.append(
+            "0003_restore_workspaces_rls.sql must declare CREATE POLICY tenant_isolation ON iam.workspaces"
+        )
+
+    return errors
+
+
 def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     """Validate the canonical SQL migration directory and return a list of errors."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -602,6 +627,9 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
 
     rls_sql = (target_dir / "0002_fail_closed_rls.sql").read_text(encoding="utf-8-sig")
     errors.extend(_validate_fail_closed_rls_sql(rls_sql))
+
+    restore_sql = (target_dir / "0003_restore_workspaces_rls.sql").read_text(encoding="utf-8-sig")
+    errors.extend(_validate_restore_workspaces_rls_sql(restore_sql))
 
     return errors
 
@@ -626,18 +654,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 2 ordered migrations, 7 schemas, 56 canonical tables, "
+        "PASS static checks: 3 ordered migrations, 7 schemas, 56 canonical tables, "
         "recognized FK/UNIQUE declarations, 55 baseline RLS declarations, "
-        "10 immutable trigger declarations + 1 document guard, reviewed 0002 content fingerprint."
+        "10 immutable trigger declarations + 1 document guard, "
+        "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint."
     )
     print(
-        "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state "
-        "(including iam.workspaces policy restoration), live RLS isolation, "
-        "and crash/recovery testing."
+        "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy (DEC-DB-01)."
     )
     print(
-        "KNOWN G1 BLOCKER: authored 0002 drops iam.workspaces tenant_isolation "
-        "without recreating it; static PASS does not certify a usable or isolated database."
+        "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "
+        "live RLS isolation, and crash/recovery testing."
     )
     return 0
 

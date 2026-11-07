@@ -149,6 +149,8 @@ if ($leafName -ne $e5Rev) {
 Write-Host "Verified E5 model snapshot at: $snapshotPath" -ForegroundColor Green
 
 Write-Host "=== [5/5] Validating Docker Compose configuration (quiet mode, no secret output) ===" -ForegroundColor Cyan
+uv run python -B scripts/run_migrations.py --write-bootstrap artifacts/evidence/local-bootstrap/01-migrations.sql
+if ($LASTEXITCODE -ne 0) { throw "Generating transactional database bootstrap failed." }
 docker compose --env-file .env -f infra/compose/docker-compose.dev.yml config --quiet
 if ($LASTEXITCODE -ne 0) {
     throw "docker compose config validation failed."

@@ -52,7 +52,7 @@ jobs:
               - 'contracts/**'
               - 'database/**'
               - 'tests/**'
-              - 'scripts/validate_database_schema.py'
+              - 'scripts/**'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/ci-python.yml'
@@ -68,6 +68,9 @@ jobs:
             docker:
               - 'apps/**/Dockerfile'
               - 'infra/**'
+              - 'database/migrations/**'
+              - 'scripts/run_migrations.py'
+              - 'scripts/validate_database_schema.py'
               - '.dockerignore'
               - 'pyproject.toml'
               - 'uv.lock'
@@ -108,19 +111,6 @@ jobs:
     needs: [changes, static-analysis]
     if: needs.changes.outputs.python == 'true' || github.event_name == 'push'
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: platform_owner
-          POSTGRES_PASSWORD: ci-owner-password
-          POSTGRES_DB: enterprise_agent_platform
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U platform_owner -d enterprise_agent_platform"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
       redis:
         image: redis:7-alpine
         ports:
@@ -142,27 +132,31 @@ jobs:
       - name: Install locked development dependencies
         run: uv sync --all-packages --locked --group dev
 
-      - name: Apply DB-56 migrations with restricted application role
-        env:
-          PGPASSWORD: ci-owner-password
+      - name: Prepare isolated storage test images
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -c "CREATE ROLE platform_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD 'ci-app-password';"
-          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -f database/migrations/0001_baseline.sql
-          psql -h localhost -U platform_owner -d enterprise_agent_platform -v ON_ERROR_STOP=1 -f database/migrations/0002_fail_closed_rls.sql
+          docker pull postgres:16-alpine
+          docker pull minio/minio:latest
+          docker pull qdrant/qdrant:v1.9.0
 
       - name: Run Contract & Core Tests
         env:
-          DATABASE_URL: postgresql+psycopg://platform_app:ci-app-password@localhost:5432/enterprise_agent_platform
-          RLS_TEST_DATABASE_URL: postgresql://platform_app:ci-app-password@localhost:5432/enterprise_agent_platform
-          MIGRATION_DATABASE_URL: postgresql://platform_owner:ci-owner-password@localhost:5432/enterprise_agent_platform
+          # Core unit imports require settings; live SQL uses the owned Docker fixture.
+          DATABASE_URL: postgresql+psycopg://platform_app:ci-fixture-only@127.0.0.1:1/unit_imports_only
           JWT_SECRET_KEY: ci-jwt-secret-key-at-least-32-characters-long
           JWT_ISSUER: http://localhost:8080/realms/enterprise
           JWT_AUDIENCE: enterprise-control-api
           REDIS_URL: redis://localhost:6379/0
         run: |
           uv run pytest tests/contract/ tests/integration/ apps/control-api/tests apps/jobs-worker/tests -v
+
+      - name: Retain sanitized database test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step01-postgres-evidence
+          path: artifacts/evidence/step01-fixtures/
+          if-no-files-found: warn
+          retention-days: 7
 
   web-build:
     name: Studio Web Build
@@ -191,6 +185,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Generate transactional PostgreSQL bootstrap
+        run: |
+          uv sync --all-packages --locked --group dev
+          uv run python -B scripts/run_migrations.py --write-bootstrap artifacts/evidence/local-bootstrap/01-migrations.sql
+
       - name: Validate Docker Compose Configuration
         env:
           POSTGRES_PASSWORD: ci-owner-password
@@ -199,6 +203,10 @@ jobs:
           RUNTIME_JWT_SECRET: ci-runtime-jwt-secret-at-least-32-characters
           MINIO_ROOT_USER: ci-minio-root-user
           MINIO_ROOT_PASSWORD: ci-minio-root-password
+          S3_ACCESS_KEY: ci-app-s3-access-key
+          S3_SECRET_KEY: ci-app-s3-secret-key-at-least-16-chars
+          E5_MODEL_SNAPSHOT: ./models
         run: |
+          mkdir -p models
           docker compose -f infra/compose/docker-compose.dev.yml config --quiet
           docker compose -f infra/compose/docker-compose.dev.yml build control-api agent-runtime jobs-worker

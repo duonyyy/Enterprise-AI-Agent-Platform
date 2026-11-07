@@ -22,6 +22,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.optional-dependencies]
+bm25 = [
+    "rank-bm25==0.2.2",
+]
 retrieval = [
     "sentence-transformers==5.5.1",
     "transformers==5.10.2",

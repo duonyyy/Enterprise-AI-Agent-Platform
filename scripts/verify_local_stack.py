@@ -399,67 +399,80 @@ def run_integration_phase(env_map: dict[str, str], evidence_dir: Path) -> None:
     }
 
     # 4. Qdrant + Real E5 Embedding verification (host + container)
+    from collections.abc import Sequence
+    from uuid import UUID
     from agent_runtime.knowledge import (
-        BM25LexicalIndex,
-        DocumentChunk,
         E5EmbeddingModel,
         HybridRetriever,
         KnowledgeAuthorization,
+        KnowledgeChunk,
         QdrantVectorIndex,
+        RetrievalScope,
     )
+
+    class _StackAuthFixture:
+        def __init__(self, scope: RetrievalScope) -> None:
+            self._scope = scope
+
+        def require_index(self, chunk: KnowledgeChunk) -> None:
+            assert chunk.scope == self._scope
+
+        def recheck(self, scope: RetrievalScope, chunks: Sequence[KnowledgeChunk]) -> Sequence[KnowledgeChunk]:
+            return tuple(c for c in chunks if c.scope == scope)
 
     snapshot_path = Path(env_map["E5_MODEL_SNAPSHOT"])
     embedder = E5EmbeddingModel(snapshot_path)
-    qdrant = QdrantVectorIndex(url="http://127.0.0.1:6333", collection_name=QDRANT_COLLECTION)
+    qdrant = QdrantVectorIndex(url="http://127.0.0.1:6333", collection=QDRANT_COLLECTION)
     qdrant.ensure_collection()
 
+    scope_a = RetrievalScope(UUID(TENANT_A), UUID(WORKSPACE_A))
+    base_id = UUID(int=100)
+    doc_id = UUID(int=101)
+    ver_id = UUID(int=102)
+
     chunks = [
-        DocumentChunk(
-            chunk_id="chunk-policy-rls",
-            document_id="doc-db56-security",
-            source_id="src-security",
-            tenant_id=TENANT_A,
-            workspace_id=WORKSPACE_A,
-            content="PostgreSQL row level security enforces tenant_id and workspace_id isolation via platform_app.",
-            metadata={"topic": "rls"},
+        KnowledgeChunk(
+            scope=scope_a,
+            base_id=base_id,
+            document_id=doc_id,
+            document_version_id=ver_id,
+            chunk_id=UUID(int=1),
+            text="PostgreSQL row level security enforces tenant_id and workspace_id isolation via platform_app.",
         ),
-        DocumentChunk(
-            chunk_id="chunk-tool-gateway",
-            document_id="doc-tool-gateway",
-            source_id="src-runtime",
-            tenant_id=TENANT_A,
-            workspace_id=WORKSPACE_A,
-            content="Every tool invocation passes through the 12-step ToolDispatcher and records idempotency receipts.",
-            metadata={"topic": "tools"},
+        KnowledgeChunk(
+            scope=scope_a,
+            base_id=base_id,
+            document_id=doc_id,
+            document_version_id=ver_id,
+            chunk_id=UUID(int=2),
+            text="Every tool invocation passes through the 12-step ToolDispatcher and records idempotency receipts.",
         ),
-        DocumentChunk(
-            chunk_id="chunk-minio-storage",
-            document_id="doc-minio",
-            source_id="src-infra",
-            tenant_id=TENANT_A,
-            workspace_id=WORKSPACE_A,
-            content="MinIO stores document artifacts in S3 buckets using scoped non-root application credentials.",
-            metadata={"topic": "storage"},
+        KnowledgeChunk(
+            scope=scope_a,
+            base_id=base_id,
+            document_id=doc_id,
+            document_version_id=ver_id,
+            chunk_id=UUID(int=3),
+            text="MinIO stores document artifacts in S3 buckets using scoped non-root application credentials.",
         ),
     ]
-    lexical = BM25LexicalIndex()
+
+    auth = _StackAuthFixture(scope_a)
     retriever = HybridRetriever(
-        embedding_model=embedder,
-        vector_index=qdrant,
-        lexical_index=lexical,
-        authorization=KnowledgeAuthorization(
-            tenant_id=TENANT_A,
-            workspace_id=WORKSPACE_A,
-            allowed_source_ids=frozenset({"src-security", "src-runtime", "src-infra"}),
-        ),
+        embeddings=embedder,
+        index=qdrant,
+        authorization=auth,
     )
-    retriever.index_chunks(chunks)
-    hits = retriever.retrieve(
+    for c in chunks:
+        retriever.index_document(c)
+    hits = retriever.search(
         "How does PostgreSQL row level security isolate tenant_id and workspace_id?",
+        scope=scope_a,
+        authorized_chunks=chunks,
         top_k=2,
     )
     assert len(hits) >= 1
-    assert hits[0].chunk.chunk_id == "chunk-policy-rls"
+    assert hits[0].chunk.chunk_id == UUID(int=1)
     q_vec = embedder.embed_query("test query norm")
     vec_norm = round(math.sqrt(sum(v * v for v in q_vec)), 6)
 
@@ -754,29 +767,44 @@ def run_resilience_phase(env_map: dict[str, str], evidence_dir: Path) -> None:
     assert len(minio_bytes_after_restart) > 20
 
     # Check Qdrant vectors survived restart
-    from agent_runtime.knowledge import E5EmbeddingModel, QdrantVectorIndex
+    from uuid import UUID
+    from agent_runtime.knowledge import E5EmbeddingModel, KnowledgeChunk, QdrantVectorIndex, RetrievalScope
+
+    scope_a = RetrievalScope(UUID(TENANT_A), UUID(WORKSPACE_A))
+    base_id = UUID(int=100)
+    doc_id = UUID(int=101)
+    ver_id = UUID(int=102)
+    chunks = [
+        KnowledgeChunk(
+            scope=scope_a,
+            base_id=base_id,
+            document_id=doc_id,
+            document_version_id=ver_id,
+            chunk_id=UUID(int=1),
+            text="PostgreSQL row level security enforces tenant_id and workspace_id isolation via platform_app.",
+        ),
+    ]
 
     embedder = E5EmbeddingModel(Path(env_map["E5_MODEL_SNAPSHOT"]))
-    qdrant = QdrantVectorIndex(url="http://127.0.0.1:6333", collection_name=QDRANT_COLLECTION)
+    qdrant = QdrantVectorIndex(url="http://127.0.0.1:6333", collection=QDRANT_COLLECTION)
     q_vec = embedder.embed_query(
         "How does PostgreSQL row level security isolate tenant_id and workspace_id?"
     )
     qdrant_hits = qdrant.search(
-        query_vector=q_vec,
-        tenant_id=TENANT_A,
-        workspace_id=WORKSPACE_A,
-        allowed_source_ids=frozenset({"src-security", "src-runtime", "src-infra"}),
-        top_k=2,
+        scope=scope_a,
+        chunks=chunks,
+        vector=q_vec,
+        limit=2,
     )
     assert len(qdrant_hits) >= 1
-    assert qdrant_hits[0].chunk.chunk_id == "chunk-policy-rls"
+    assert qdrant_hits[0].point_id == chunks[0].point_id
 
     resilience["checks"]["restart_persistence"] = {
         "status": "PASS",
         "postgres_agents_count_after_restart": agents_after_restart,
         "postgres_runs_count_after_restart": runs_after_restart,
         "minio_object_status_after_restart": minio_status_after_restart,
-        "qdrant_top1_after_restart": qdrant_hits[0].chunk.chunk_id,
+        "qdrant_top1_after_restart": qdrant_hits[0].point_id,
     }
 
     # 2. Dependency outage test: stop postgres -> verify /health/ready returns 503 on both APIs while /health/live stays 200 -> start postgres -> verify recovery to 200
