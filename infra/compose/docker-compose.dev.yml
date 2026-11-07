@@ -53,8 +53,11 @@ services:
       start_period: 10s
 
   minio:
-    # Development-only compose service. Pin this image before a production deployment.
-    image: minio/minio:latest
+    # Build from pinned official source; the old Docker Hub image cannot be pulled.
+    image: enterprise-agent-platform-minio:2025-10-15
+    build:
+      context: ../minio
+      dockerfile: Dockerfile
     container_name: enterprise-minio
     command: server /data --console-address ":9001"
     environment:
@@ -73,7 +76,7 @@ services:
       start_period: 10s
 
   minio-init:
-    image: minio/minio:latest
+    image: enterprise-agent-platform-minio:2025-10-15
     container_name: enterprise-minio-init
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}

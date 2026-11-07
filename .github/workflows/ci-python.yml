@@ -135,8 +135,8 @@ jobs:
       - name: Prepare isolated storage test images
         run: |
           docker pull postgres:16-alpine
-          docker pull minio/minio:latest
           docker pull qdrant/qdrant:v1.9.0
+          docker build -t enterprise-agent-platform-minio:2025-10-15 infra/minio
 
       - name: Run Contract & Core Tests
         env:
@@ -209,4 +209,4 @@ jobs:
         run: |
           mkdir -p models
           docker compose -f infra/compose/docker-compose.dev.yml config --quiet
-          docker compose -f infra/compose/docker-compose.dev.yml build control-api agent-runtime jobs-worker
+          docker compose -f infra/compose/docker-compose.dev.yml build minio control-api agent-runtime jobs-worker

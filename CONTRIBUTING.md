@@ -38,6 +38,19 @@ Database cũ có domain tables nhưng thiếu history sẽ bị từ chối đ�
 và tiếp nhận lịch sử được review; không tự đánh dấu đã apply, chạy lại baseline
 hoặc xóa volume. Không dùng app role để chạy migrations.
 
+Integration tests dùng Docker fixtures riêng, không dùng DSN của ứng dụng.
+Trước `uv run pytest tests/integration/`, build image MinIO từ source được ghim:
+
+```sh
+docker build -t enterprise-agent-platform-minio:2025-10-15 infra/minio
+```
+
+Compose cũng build image này cho `minio` và dùng cùng image cho `minio-init`.
+Nguồn upstream: [MinIO release](https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z)
+và [MC release](https://github.com/minio/mc/releases/tag/RELEASE.2025-08-13T08-35-41Z).
+Phiên bản source này phục vụ dev/CI; production qualification và chính sách
+bảo trì storage vẫn thuộc release review riêng.
+
 The static database validator recognizes baseline declarations after masking SQL
 comments and quoted spans. It pins the reviewed `0002` program by a lexical
 fingerprint; it does not execute or semantically validate PL/pgSQL. The current

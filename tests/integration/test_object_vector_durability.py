@@ -90,7 +90,7 @@ def cycle(resource, recreate):
 def test_minio_object_and_app_identity_survive_restart_and_recreate():
     root_secret, app_secret = secrets.token_hex(24), secrets.token_hex(24)
     with owned_service(
-        "minio/minio:latest",
+        "enterprise-agent-platform-minio:2025-10-15",
         9000,
         "/data",
         ("server", "/data"),
@@ -98,6 +98,8 @@ def test_minio_object_and_app_identity_survive_restart_and_recreate():
     ) as service:
         url = endpoint(service, "/minio/health/ready")
         container = service["container_id"]
+        # Same health command as Compose, before any fixture alias is configured.
+        docker("exec", container, "mc", "ready", "local")
         docker(
             "exec",
             container,
