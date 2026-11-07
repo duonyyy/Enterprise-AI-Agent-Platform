@@ -12,8 +12,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../postgres/00-create-platform-app.sh:/docker-entrypoint-initdb.d/00-create-platform-app.sh:ro
-      - ../../database/migrations/0001_baseline.sql:/docker-entrypoint-initdb.d/0001_baseline.sql:ro
-      - ../../database/migrations/0002_fail_closed_rls.sql:/docker-entrypoint-initdb.d/0002_fail_closed_rls.sql:ro
+      # Generate from canonical migrations before first startup (see CONTRIBUTING).
+      - ../../artifacts/evidence/local-bootstrap/01-migrations.sql:/docker-entrypoint-initdb.d/01-migrations.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform_owner -d enterprise_agent_platform"]
       interval: 5s
@@ -53,8 +53,11 @@ services:
       start_period: 10s
 
   minio:
-    # Development-only compose service. Pin this image before a production deployment.
-    image: minio/minio:latest
+    # Build from pinned official source; the old Docker Hub image cannot be pulled.
+    image: enterprise-agent-platform-minio:2025-10-15
+    build:
+      context: ../minio
+      dockerfile: Dockerfile
     container_name: enterprise-minio
     command: server /data --console-address ":9001"
     environment:
@@ -73,7 +76,7 @@ services:
       start_period: 10s
 
   minio-init:
-    image: minio/minio:latest
+    image: enterprise-agent-platform-minio:2025-10-15
     container_name: enterprise-minio-init
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}

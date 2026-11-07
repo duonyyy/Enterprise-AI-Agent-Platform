@@ -4,6 +4,7 @@ BEGIN;
 
 -- 1. Setup Tenant One & Workspace
 SELECT set_config('app.tenant_id','11111111-1111-4111-8111-111111111111',true);
+SELECT set_config('app.workspace_id','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',true);
 INSERT INTO iam.tenants (id,slug,name)
 VALUES ('11111111-1111-4111-8111-111111111111','test-tenant-one','Test Tenant One');
 INSERT INTO iam.workspaces (id,tenant_id,slug,name)
@@ -43,9 +44,9 @@ VALUES
   '11111111-2222-4333-8444-555555555555','22222222-3333-4444-8555-666666666666');
 
 -- 4. Insert Tool, ToolVersion, and MCP Connection, Snapshot, Discovered Item, Tool Mapping
-INSERT INTO catalog.tools (id,tenant_id,workspace_id,name,kind)
+INSERT INTO catalog.tools (id,tenant_id,workspace_id,tool_key,display_name,kind)
 VALUES ('44444444-5555-4666-8777-888888888888','11111111-1111-4111-8111-111111111111',
-        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','crm.lookup','mcp');
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','crm.lookup','CRM Lookup Tool','mcp');
 INSERT INTO catalog.tool_versions
  (id,tenant_id,workspace_id,tool_id,version,input_schema,output_schema,risk,sha256)
 VALUES
@@ -79,6 +80,7 @@ VALUES
 
 -- 5. Setup Tenant Two & Workspace
 SELECT set_config('app.tenant_id','22222222-2222-4222-8222-222222222222',true);
+SELECT set_config('app.workspace_id','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',true);
 INSERT INTO iam.tenants (id,slug,name)
 VALUES ('22222222-2222-4222-8222-222222222222','test-tenant-two','Test Tenant Two');
 INSERT INTO iam.workspaces (id,tenant_id,slug,name)
@@ -86,6 +88,9 @@ VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','22222222-2222-4222-8222-22222222
 
 -- 6. RLS fail-closed cross-tenant SELECT checks for Agents, Skills, and MCP Connections
 DO $$ BEGIN
+  IF (SELECT count(*) FROM iam.workspaces WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') <> 0 THEN
+      RAISE EXCEPTION 'FAIL: tenant TWO can see tenant ONE workspace';
+  END IF;
   IF (SELECT count(*) FROM catalog.agents) <> 0 THEN
       RAISE EXCEPTION 'FAIL: tenant TWO can see tenant ONE agent';
   END IF;
@@ -105,7 +110,11 @@ END $$;
 
 -- 7. Switch back to Tenant One and verify visibility
 SELECT set_config('app.tenant_id','11111111-1111-4111-8111-111111111111',true);
+SELECT set_config('app.workspace_id','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',true);
 DO $$ BEGIN
+  IF (SELECT count(*) FROM iam.workspaces WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') <> 1 THEN
+      RAISE EXCEPTION 'FAIL: tenant ONE cannot see its workspace';
+  END IF;
   IF (SELECT count(*) FROM catalog.agents) <> 1 THEN
       RAISE EXCEPTION 'FAIL: tenant ONE cannot see its agent';
   END IF;

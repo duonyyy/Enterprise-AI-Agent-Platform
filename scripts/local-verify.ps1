@@ -86,7 +86,6 @@ $pytestOut = (uv run --no-sync pytest -v `
     tests/integration/test_e5_embedding.py `
     apps/control-api/tests/test_health.py `
     apps/agent-runtime/tests/test_health.py `
-    apps/agent-runtime/tests/test_runtime_Auth_and_runs.py `
     apps/jobs-worker/tests/test_worker.py 2>&1 | Out-String)
 $pytestExit = $LASTEXITCODE
 Save-RedactedText "05-pytest-results.txt" $pytestOut

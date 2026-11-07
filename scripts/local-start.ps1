@@ -29,6 +29,8 @@ foreach ($port in $requiredPorts) {
 Write-Host "Port check OK." -ForegroundColor Green
 
 Write-Host "=== [2/4] Validating Compose configuration ===" -ForegroundColor Cyan
+uv run python -B scripts/run_migrations.py --write-bootstrap artifacts/evidence/local-bootstrap/01-migrations.sql
+if ($LASTEXITCODE -ne 0) { throw "Generating transactional database bootstrap failed." }
 $profileArgs = @()
 foreach ($p in $Profiles) {
     if ($p) {
@@ -41,6 +43,28 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "=== [3/4] Building & starting local stack ===" -ForegroundColor Cyan
+# Migrate before application startup. Do not reset a legacy volume without history.
+docker compose --env-file .env -f infra/compose/docker-compose.dev.yml up -d postgres
+if ($LASTEXITCODE -ne 0) { throw "Starting PostgreSQL failed." }
+$dbDeadline = (Get-Date).AddMinutes(2)
+do {
+    $dbHealth = docker inspect --format "{{.State.Health.Status}}" enterprise-postgres
+    if ($dbHealth -eq "healthy") { break }
+    Start-Sleep -Seconds 2
+} while ((Get-Date) -lt $dbDeadline)
+if ($dbHealth -ne "healthy") { throw "PostgreSQL did not become ready." }
+$passwordLine = Get-Content .env | Where-Object { $_ -match '^POSTGRES_PASSWORD=' } | Select-Object -First 1
+if (-not $passwordLine) { throw "POSTGRES_PASSWORD is missing from .env." }
+$ownerPassword = $passwordLine.Split('=', 2)[1].Trim().Trim('"').Trim("'")
+$previousMigrationUrl = $env:MIGRATION_DATABASE_URL
+try {
+    $env:MIGRATION_DATABASE_URL = 'postgresql://platform_owner:' + [uri]::EscapeDataString($ownerPassword) + '@127.0.0.1:5432/enterprise_agent_platform'
+    uv run python -B scripts/run_migrations.py
+    if ($LASTEXITCODE -ne 0) { throw "Database migration failed. Keep the volume and review the error." }
+} finally {
+    $env:MIGRATION_DATABASE_URL = $previousMigrationUrl
+    $ownerPassword = $null
+}
 $upArgs = @("--env-file", ".env", "-f", "infra/compose/docker-compose.dev.yml") + $profileArgs + @("up", "-d")
 if (-not $NoBuild) {
     $upArgs += "--build"
@@ -73,6 +97,7 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 3
 }
 
+if (-not $allHealthy) { throw "Local stack did not become ready within the deadline." }
 docker compose --env-file .env -f infra/compose/docker-compose.dev.yml @profileArgs ps
 Write-Host "Local stack is running." -ForegroundColor Green
 
