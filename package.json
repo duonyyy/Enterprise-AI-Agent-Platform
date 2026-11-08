@@ -10,7 +10,7 @@
     "test": "turbo run test"
   },
   "devDependencies": {
-    "@commitlint/cli": "^19.8.1",
+    "@commitlint/cli": "^21.2.4",
     "@commitlint/config-conventional": "^19.8.1",
     "turbo": "^2.0.0",
     "typescript": "^5.4.0"
