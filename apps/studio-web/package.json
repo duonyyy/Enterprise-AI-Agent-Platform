@@ -12,13 +12,13 @@
     "@enterprise/api-client": "workspace:*",
     "@enterprise/ui": "workspace:*",
     "next": "14.2.4",
-    "react": "^18.3.1",
+    "react": "^19.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@enterprise/config": "workspace:*",
     "@types/node": "^26.6.6",
-    "@types/react": "^18.3.1",
+    "@types/react": "^19.3.0",
     "@types/react-dom": "^18.3.1",
     "eslint": "^8.57.0",
     "eslint-config-next": "14.2.4",
