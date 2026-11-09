@@ -88,6 +88,7 @@ def _decode_and_verify_jwt(token: str) -> dict[str, Any]:
         return {
             "type": "session",
             "session_id": session_data.session_id,
+            "ver": session_data.rotation_version,
             "sub": session_data.user_id,
             "iss": settings.jwt_issuer,
             "aud": settings.jwt_audience,
@@ -193,9 +194,18 @@ async def get_current_authenticated_user(
         token = authorization.removeprefix("Bearer ").strip()
         payload = _decode_and_verify_jwt(token)
         user_id = _required_uuid_claim(payload, "sub")
-        # Check if it was a session token
+        # Check if it was a session token (already verified in _decode_and_verify_jwt)
         if payload.get("type") == "session":
-            session_data = session_manager.verify_session_token(token)
+            session_data = SessionData(
+                session_id=str(payload["session_id"]),
+                user_id=user_id,
+                issuer=str(payload["original_iss"]),
+                subject=str(payload["original_sub"]),
+                created_at=int(payload["iat"]),
+                idle_expires_at=int(payload["idle_exp"]),
+                absolute_expires_at=int(payload["exp"]),
+                rotation_version=int(payload["ver"]),
+            )
             return AuthenticatedUserContext(
                 user_id=user_id,
                 session_data=session_data,
@@ -228,7 +238,7 @@ async def get_current_principal(
     workspace_id: str,
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> AuthenticatedPrincipal:
     try:
         normalized_workspace_id = str(UUID(workspace_id))
@@ -243,11 +253,10 @@ async def get_current_principal(
 
         # Check if bearer token is a session token or a scoped API token
         if payload.get("type") == "session":
-            # Session token acting as bearer: Uniform session validation (Finding R04)
-            session_data = session_manager.verify_session_token(token)
+            # Session token acting as bearer: already verified via session_manager in _decode_and_verify_jwt
             return await _resolve_principal_from_user_id(
                 session=session,
-                user_id=session_data.user_id,
+                user_id=user_id,
                 workspace_id=normalized_workspace_id,
             )
 

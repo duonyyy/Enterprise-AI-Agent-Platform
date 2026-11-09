@@ -299,20 +299,29 @@ def test_session_refresh_and_logout(test_client: TestClient) -> None:
     test_client.cookies.set(settings.session_cookie_name, session_token)
     origin_header = {"Origin": "http://localhost:8000"}
 
-    # 1. Refresh session
+    # 1. Refresh session (atomically rotates credential version)
     resp_refresh = test_client.post("/v1/auth/refresh", headers=origin_header)
     assert resp_refresh.status_code == status.HTTP_200_OK
     assert resp_refresh.json()["status"] == "refreshed"
     assert settings.session_cookie_name in resp_refresh.cookies
     new_token = resp_refresh.cookies[settings.session_cookie_name]
+    assert new_token != session_token
+
+    # 1b. Old credential before rotation must now be rejected
+    test_client.cookies.clear()
+    test_client.cookies.set(settings.session_cookie_name, session_token)
+    resp_old = test_client.get("/v1/auth/me")
+    assert resp_old.status_code == status.HTTP_401_UNAUTHORIZED
 
     # 2. Logout
+    test_client.cookies.clear()
     test_client.cookies.set(settings.session_cookie_name, new_token)
     resp_logout = test_client.post("/v1/auth/logout", headers=origin_header)
     assert resp_logout.status_code == status.HTTP_200_OK
     assert resp_logout.json()["status"] == "logged_out"
 
     # 3. Access /v1/auth/me after logout must be rejected (revoked session)
+    test_client.cookies.clear()
     test_client.cookies.set(settings.session_cookie_name, new_token)
     resp_after = test_client.get("/v1/auth/me")
     assert resp_after.status_code == status.HTTP_401_UNAUTHORIZED

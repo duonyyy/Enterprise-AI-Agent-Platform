@@ -133,7 +133,7 @@ async def callback(
     )
 
     user_id = str(user["id"])
-    _session_data, session_token = session_manager.create_session(
+    session_data, session_token = session_manager.create_session(
         user_id=user_id,
         issuer=issuer,
         subject=subject,
@@ -143,12 +143,20 @@ async def callback(
     accept = request.headers.get("accept", "") if request else ""
     if "text/html" in accept:
         redirect_res = RedirectResponse(url=tx.return_to, status_code=status.HTTP_302_FOUND)
-        set_session_cookie(redirect_res, session_token)
+        set_session_cookie(
+            redirect_res,
+            session_token,
+            absolute_expires_at=session_data.absolute_expires_at,
+        )
         _clean_corr(redirect_res)
         return redirect_res
 
     # Otherwise set cookie on JSON response
-    set_session_cookie(response, session_token)
+    set_session_cookie(
+        response,
+        session_token,
+        absolute_expires_at=session_data.absolute_expires_at,
+    )
     _clean_corr(response)
     return CallbackResponse(
         user_id=user_id,
@@ -188,7 +196,7 @@ async def refresh_session(
     response: Response,
     auth_user: CurrentAuthenticatedUser,
 ) -> dict[str, str]:
-    """Refresh active session within absolute lifetime window and issue a refreshed session cookie."""
+    """Atomically rotate active session within absolute lifetime window and issue a new session cookie."""
     verify_csrf_or_origin(request)
 
     if not auth_user.session_data:
@@ -196,10 +204,15 @@ async def refresh_session(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Active application session required to refresh session",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    _new_session, new_token = session_manager.refresh_session(auth_user.session_data)
-    set_session_cookie(response, new_token)
+    new_session, new_token = session_manager.refresh_session(auth_user.session_data)
+    set_session_cookie(
+        response,
+        new_token,
+        absolute_expires_at=new_session.absolute_expires_at,
+    )
     return {"status": "refreshed"}
 
 

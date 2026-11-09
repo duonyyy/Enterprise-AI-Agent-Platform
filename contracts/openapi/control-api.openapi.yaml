@@ -67,6 +67,8 @@ paths:
           description: Invalid authorization code, state, or PKCE verifier mismatch
         '401':
           description: OIDC token verification failed
+        '503':
+          description: Auth or session store unavailable
   /v1/auth/me:
     get:
       summary: Get current authenticated user profile and allowed workspaces
@@ -103,18 +105,24 @@ paths:
                         workspace_name: { type: string }
                         role: { type: string }
         '401':
-          description: Missing or expired session
+          description: Missing, expired, revoked, or superseded session
+        '503':
+          description: Session or identity store unavailable
   /v1/auth/refresh:
     post:
-      summary: Refresh active session within absolute lifetime
+      summary: Atomically rotate active session within absolute lifetime
       security:
         - SessionCookie: []
         - BearerAuth: []
       responses:
         '200':
-          description: Session refreshed, new cookie set
+          description: Session rotated, new cookie set with bounded Max-Age
         '401':
-          description: Session expired, revoked, or invalid
+          description: Session expired, revoked, superseded, or invalid
+        '403':
+          description: Cross-origin or cross-site request rejected
+        '503':
+          description: Session store unavailable
   /v1/auth/logout:
     post:
       summary: Revoke session and clear session cookie
@@ -124,6 +132,8 @@ paths:
       responses:
         '200':
           description: Session revoked successfully or local session cleared
+        '403':
+          description: Cross-origin or cross-site request rejected
         '503':
           description: Revocation store unavailable; local session cleared but server-side revocation could not be confirmed
   /v1/auth/token:
@@ -153,8 +163,12 @@ paths:
                   access_token: { type: string }
                   token_type: { type: string, example: Bearer }
                   expires_in: { type: integer, example: 900 }
+        '401':
+          description: Missing, expired, revoked, or superseded parent session
         '403':
-          description: User lacks active membership in specified workspace
+          description: User lacks active membership in specified workspace or CSRF rejected
+        '503':
+          description: Session or identity store unavailable
   /v1/workspaces:
     post:
       summary: Create workspace

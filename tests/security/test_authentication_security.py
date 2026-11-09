@@ -634,8 +634,654 @@ def test_auth_p0_01_csrf_rejection_does_not_clear_cookie(client: TestClient) -> 
 
 
 # ==============================================================================
+# AUTH-T13 / TASK 02: Session Rotation, Concurrency, Lifecycle & Cookie Boundaries
+# ==============================================================================
+
+
+def test_task02_session_creation_and_same_second_rotation() -> None:
+    """Normal refresh changes credential and increments rotation_version even in the same second."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+
+    sess1, token1 = manager.create_session(uid, "https://idp.local", "sub-rot-1", now=t0)
+    assert sess1.rotation_version == 1
+    assert sess1.created_at == t0
+    assert sess1.idle_expires_at == t0 + settings.session_idle_timeout_seconds
+    assert sess1.absolute_expires_at == t0 + settings.session_absolute_timeout_seconds
+
+    # Refresh in the exact same second t0
+    sess2, token2 = manager.refresh_session(sess1, now=t0)
+    assert token2 != token1
+    assert sess2.rotation_version == 2
+    assert sess2.session_id == sess1.session_id
+    assert sess2.user_id == sess1.user_id
+    assert sess2.issuer == sess1.issuer
+    assert sess2.subject == sess1.subject
+    assert sess2.created_at == sess1.created_at
+    assert sess2.absolute_expires_at == sess1.absolute_expires_at
+    assert sess2.idle_expires_at == sess1.idle_expires_at
+
+    # New credential verifies cleanly
+    verified = manager.verify_session_token(token2, now=t0)
+    assert verified.rotation_version == 2
+    assert verified.session_id == sess1.session_id
+
+    # Old credential (version 1) is immediately rejected on verify and refresh
+    with pytest.raises(HTTPException) as exc_verify:
+        manager.verify_session_token(token1, now=t0)
+    assert exc_verify.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "superseded" in str(exc_verify.value.detail).lower()
+
+    with pytest.raises(HTTPException) as exc_refresh:
+        manager.refresh_session(sess1, now=t0)
+    assert exc_refresh.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "superseded" in str(exc_refresh.value.detail).lower()
+
+
+def test_task02_old_credential_rejected_across_all_routes_and_transports(
+    client: TestClient, sec_db: SecurityTestDatabaseContext
+) -> None:
+    """Superseded credential after rotation is rejected at /refresh, /me, /token, and workspace routes (Cookie & Bearer)."""
+    uid = str(uuid4())
+    wid = str(uuid4())
+    tid = str(uuid4())
+    sec_db.users[(settings.oidc_issuer, "sub-rot-routes")] = {
+        "id": uid,
+        "issuer": settings.oidc_issuer,
+        "subject": "sub-rot-routes",
+        "display_name": "Rotation User",
+        "email_normalized": "rot@vinai.io",
+    }
+    sec_db.users_by_id[uid] = sec_db.users[(settings.oidc_issuer, "sub-rot-routes")]
+    sec_db.memberships.append(
+        {
+            "tenant_id": tid,
+            "tenant_slug": "vinai-corp",
+            "tenant_name": "VinAI Corp",
+            "workspace_id": wid,
+            "workspace_slug": "ws-rot",
+            "workspace_name": "Rotation WS",
+            "user_id": uid,
+            "role": "developer",
+            "status": "active",
+        }
+    )
+
+    _sess1, token1 = session_manager.create_session(uid, settings.oidc_issuer, "sub-rot-routes")
+    client.cookies.set(settings.session_cookie_name, token1)
+    origin_headers = {"Origin": "http://localhost:8000"}
+
+    # Rotate via /v1/auth/refresh
+    ref_res = client.post("/v1/auth/refresh", headers=origin_headers)
+    assert ref_res.status_code == status.HTTP_200_OK
+    token2 = ref_res.cookies[settings.session_cookie_name]
+    assert token2 != token1
+
+    # 1. Old token rejected at /v1/auth/refresh (Cookie & Bearer)
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, token1)
+    r_ref_cookie = client.post("/v1/auth/refresh", headers=origin_headers)
+    assert r_ref_cookie.status_code == status.HTTP_401_UNAUTHORIZED
+    assert settings.session_cookie_name not in r_ref_cookie.cookies
+    assert "set-cookie" not in r_ref_cookie.headers
+
+    client.cookies.clear()
+    r_ref_bearer = client.post("/v1/auth/refresh", headers={"Authorization": f"Bearer {token1}"})
+    assert r_ref_bearer.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "set-cookie" not in r_ref_bearer.headers
+
+    # 2. Old token rejected at /v1/auth/me (Cookie & Bearer)
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, token1)
+    assert client.get("/v1/auth/me").status_code == status.HTTP_401_UNAUTHORIZED
+    client.cookies.clear()
+    assert (
+        client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token1}"}).status_code
+        == status.HTTP_401_UNAUTHORIZED
+    )
+
+    # 3. Old token rejected at /v1/auth/token (Cookie & Bearer)
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, token1)
+    assert (
+        client.post("/v1/auth/token", json={"workspace_id": wid}, headers=origin_headers).status_code
+        == status.HTTP_401_UNAUTHORIZED
+    )
+    client.cookies.clear()
+    assert (
+        client.post(
+            "/v1/auth/token",
+            json={"workspace_id": wid},
+            headers={"Authorization": f"Bearer {token1}"},
+        ).status_code
+        == status.HTTP_401_UNAUTHORIZED
+    )
+
+    # 4. Old token rejected at workspace route /v1/workspaces/{wid}/agents (Cookie & Bearer)
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, token1)
+    assert client.get(f"/v1/workspaces/{wid}/agents").status_code == status.HTTP_401_UNAUTHORIZED
+    client.cookies.clear()
+    assert (
+        client.get(
+            f"/v1/workspaces/{wid}/agents",
+            headers={"Authorization": f"Bearer {token1}"},
+        ).status_code
+        == status.HTTP_401_UNAUTHORIZED
+    )
+
+    # 5. Replay of token1 did NOT revoke token2 — token2 remains valid!
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, token2)
+    assert client.get("/v1/auth/me").status_code == status.HTTP_200_OK
+    assert (
+        client.post("/v1/auth/token", json={"workspace_id": wid}, headers=origin_headers).status_code
+        == status.HTTP_200_OK
+    )
+
+
+@pytest.mark.parametrize(
+    ("offset_from_idle", "should_pass"),
+    [
+        (-1, True),   # Strictly before idle_expires_at -> valid
+        (0, False),   # Exact boundary now == idle_expires_at -> expired
+        (1, False),   # After idle_expires_at -> expired
+    ],
+)
+def test_task02_idle_expiry_exact_boundaries(offset_from_idle: int, should_pass: bool) -> None:
+    """Idle expiration enforces now >= idle_expires_at on both verification and refresh."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+
+    sess, token = manager.create_session(uid, "https://idp.local", "sub-idle-b", now=t0)
+    eval_now = sess.idle_expires_at + offset_from_idle
+
+    if should_pass:
+        verified = manager.verify_session_token(token, now=eval_now)
+        assert verified.session_id == sess.session_id
+        rotated, _ = manager.refresh_session(sess, now=eval_now)
+        assert rotated.rotation_version == 2
+        assert rotated.idle_expires_at == min(
+            eval_now + settings.session_idle_timeout_seconds,
+            sess.absolute_expires_at,
+        )
+    else:
+        with pytest.raises(HTTPException) as exc_v:
+            manager.verify_session_token(token, now=eval_now)
+        assert exc_v.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "idle" in str(exc_v.value.detail).lower()
+
+        with pytest.raises(HTTPException) as exc_r:
+            manager.refresh_session(sess, now=eval_now)
+        assert exc_r.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "idle" in str(exc_r.value.detail).lower()
+
+
+@pytest.mark.parametrize(
+    ("offset_from_abs", "should_pass"),
+    [
+        (-1, True),   # Strictly before absolute_expires_at -> valid & refreshable (capped to abs_exp)
+        (0, False),   # Exact boundary now == absolute_expires_at -> expired
+        (1, False),   # After absolute_expires_at -> expired
+    ],
+)
+def test_task02_absolute_expiry_exact_boundaries_and_cap(offset_from_abs: int, should_pass: bool) -> None:
+    """Absolute expiration enforces now >= absolute_expires_at and caps refreshed idle_expires_at."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+    idle_timeout = 1800
+    abs_timeout = 3600
+
+    with patch.object(settings, "session_idle_timeout_seconds", idle_timeout), patch.object(
+        settings, "session_absolute_timeout_seconds", abs_timeout
+    ):
+        sess, token = manager.create_session(uid, "https://idp.local", "sub-abs-b", now=t0)
+        # First refresh at t0 + 1700 so idle_expires_at reaches t0 + 3500
+        sess, token = manager.refresh_session(sess, now=t0 + 1700)
+        # Second refresh at t0 + 3400 so idle_expires_at is capped at t0 + 3600 (absolute_expires_at)
+        sess, token = manager.refresh_session(sess, now=t0 + 3400)
+        assert sess.idle_expires_at == sess.absolute_expires_at
+
+        eval_now = sess.absolute_expires_at + offset_from_abs
+        if should_pass:
+            verified = manager.verify_session_token(token, now=eval_now)
+            assert verified.session_id == sess.session_id
+            rotated, _ = manager.refresh_session(sess, now=eval_now)
+            assert rotated.idle_expires_at == sess.absolute_expires_at
+            assert rotated.absolute_expires_at == sess.absolute_expires_at
+        else:
+            with pytest.raises(HTTPException) as exc_v:
+                manager.verify_session_token(token, now=eval_now)
+            assert exc_v.value.status_code == status.HTTP_401_UNAUTHORIZED
+            assert "expired" in str(exc_v.value.detail).lower()
+
+            with pytest.raises(HTTPException) as exc_r:
+                manager.refresh_session(sess, now=eval_now)
+            assert exc_r.value.status_code == status.HTTP_401_UNAUTHORIZED
+            assert "expired" in str(exc_r.value.detail).lower()
+
+
+def test_task02_missing_or_corrupt_state_rejected_and_never_recreated() -> None:
+    """Missing or corrupt state in store must be rejected and never lazy-recreated from JWT."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+
+    sess, token = manager.create_session(uid, "https://idp.local", "sub-missing", now=t0)
+    # Simulate evicted/missing state
+    store.clear_all()
+
+    with pytest.raises(HTTPException) as exc_v:
+        manager.verify_session_token(token, now=t0 + 5)
+    assert exc_v.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    with pytest.raises(HTTPException) as exc_r:
+        manager.refresh_session(sess, now=t0 + 5)
+    assert exc_r.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    # Ensure state was NOT recreated in store
+    assert store.get_session_state(sess.session_id, now=t0 + 5) is None
+
+
+def test_task02_logout_after_multiple_rotations_and_via_superseded_credential(client: TestClient) -> None:
+    """Logout revokes the stable session identity whether called with latest or superseded credential."""
+    uid = str(uuid4())
+    t0 = int(time.time())
+    sess_a1, token_a1 = session_manager.create_session(uid, "https://idp.local", "sub-multi-rot", now=t0)
+    sess_a2, _token_a2 = session_manager.refresh_session(sess_a1, now=t0 + 1)
+    _sess_a3, token_a3 = session_manager.refresh_session(sess_a2, now=t0 + 2)
+
+    # Independent session B of the same user
+    _sess_b1, token_b1 = session_manager.create_session(uid, "https://idp.local", "sub-multi-rot", now=t0 + 2)
+
+    # Logout using superseded credential token_a1!
+    client.cookies.set(settings.session_cookie_name, token_a1)
+    res_logout = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+    assert res_logout.status_code == status.HTTP_200_OK
+
+    # Latest credential token_a3 of session A is now REVOKED
+    with pytest.raises(HTTPException) as exc_a3:
+        session_manager.verify_session_token(token_a3, now=t0 + 3)
+    assert exc_a3.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "revoked" in str(exc_a3.value.detail).lower()
+
+    # Independent session B of the same user remains completely valid and can rotate
+    verified_b = session_manager.verify_session_token(token_b1, now=t0 + 3)
+    assert verified_b.user_id == uid
+    sess_b2, _token_b2 = session_manager.refresh_session(verified_b, now=t0 + 4)
+    assert sess_b2.rotation_version == 2
+
+
+def test_task02_user_cutoff_uses_original_created_at_after_rotations() -> None:
+    """User-wide cutoff evaluates against original session created_at even after multiple rotations."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+
+    sess1, _t1 = manager.create_session(uid, "https://idp.local", "sub-cut", now=t0)
+    # Rotate at t0 + 100
+    sess2, token2 = manager.refresh_session(sess1, now=t0 + 100)
+    assert sess2.created_at == t0
+
+    # User-wide revocation at cutoff = t0 + 50 (after original creation t0, before rotation t0 + 100)
+    manager.revoke_user(uid, cutoff=t0 + 50, now=t0 + 110)
+
+    # Token2 must be rejected as revoked because original created_at (t0) <= cutoff (t0 + 50)
+    with pytest.raises(HTTPException) as exc_v:
+        manager.verify_session_token(token2, now=t0 + 120)
+    assert exc_v.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "revoked" in str(exc_v.value.detail).lower()
+
+    with pytest.raises(HTTPException) as exc_r:
+        manager.refresh_session(sess2, now=t0 + 120)
+    assert exc_r.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "revoked" in str(exc_r.value.detail).lower()
+
+
+def test_task02_scoped_token_cannot_refresh_and_csrf_enforced_on_refresh(
+    client: TestClient, sec_db: SecurityTestDatabaseContext
+) -> None:
+    """Scoped workspace token cannot call /v1/auth/refresh; CSRF/Origin is enforced on /v1/auth/refresh."""
+    uid = str(uuid4())
+    wid = str(uuid4())
+    tid = str(uuid4())
+    sec_db.memberships.append(
+        {
+            "tenant_id": tid,
+            "tenant_slug": "vinai-corp",
+            "tenant_name": "VinAI Corp",
+            "workspace_id": wid,
+            "workspace_slug": "ws-rot",
+            "workspace_name": "Rotation WS",
+            "user_id": uid,
+            "role": "developer",
+            "status": "active",
+        }
+    )
+
+    _sess, session_token = session_manager.create_session(uid, settings.oidc_issuer, "sub-sc")
+    client.cookies.set(settings.session_cookie_name, session_token)
+
+    # Issue scoped workspace token
+    tok_res = client.post("/v1/auth/token", json={"workspace_id": wid}, headers={"Origin": "http://localhost:8000"})
+    assert tok_res.status_code == status.HTTP_200_OK
+    scoped_token = tok_res.json()["access_token"]
+
+    # 1. Scoped token cannot refresh session
+    client.cookies.clear()
+    res_scoped_refresh = client.post(
+        "/v1/auth/refresh",
+        headers={"Authorization": f"Bearer {scoped_token}"},
+    )
+    assert res_scoped_refresh.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "active application session required" in res_scoped_refresh.json()["detail"].lower()
+
+    # 2. Untrusted Origin on cookie-authenticated /v1/auth/refresh is rejected with 403 and no cookie mutation
+    client.cookies.set(settings.session_cookie_name, session_token)
+    res_csrf = client.post(
+        "/v1/auth/refresh",
+        headers={"Origin": "http://evil-origin.example.test"},
+    )
+    assert res_csrf.status_code == status.HTTP_403_FORBIDDEN
+    assert "set-cookie" not in res_csrf.headers
+
+
+def test_task02_cookie_attributes_and_bounded_max_age_on_refresh(client: TestClient) -> None:
+    """Refresh sets HttpOnly, SameSite, Path, and caps Max-Age to remaining absolute lifetime."""
+    uid = str(uuid4())
+    t0 = int(time.time()) - 1000  # Created 1000s ago
+    _sess, token1 = session_manager.create_session(uid, "https://idp.local", "sub-cookie", now=t0)
+
+    client.cookies.set(settings.session_cookie_name, token1)
+    res = client.post("/v1/auth/refresh", headers={"Origin": "http://localhost:8000"})
+    assert res.status_code == status.HTTP_200_OK
+
+    set_cookie_hdr = res.headers.get("set-cookie", "")
+    assert "HttpOnly" in set_cookie_hdr
+    assert "Path=/" in set_cookie_hdr
+    assert "SameSite=lax" in set_cookie_hdr
+
+    # Extract Max-Age and verify it is bounded by remaining absolute lifetime (<= 28800 - 1000)
+    max_age_val = None
+    for part in set_cookie_hdr.split(";"):
+        part_s = part.strip()
+        if part_s.lower().startswith("max-age="):
+            max_age_val = int(part_s.split("=", 1)[1])
+            break
+    assert max_age_val is not None
+    assert 0 < max_age_val <= settings.session_absolute_timeout_seconds - 995
+    assert max_age_val < settings.session_absolute_timeout_seconds
+
+
+def test_task02_concurrent_refresh_single_winner_and_loser_no_cookie(client: TestClient) -> None:
+    """Concurrent refresh requests with the same credential yield exactly one winner; loser does not set/delete cookie."""
+    import threading as _threading
+
+    uid = str(uuid4())
+    _sess, token1 = session_manager.create_session(uid, "https://idp.local", "sub-race")
+
+    barrier = _threading.Barrier(2)
+    orig_rotate = session_manager.denylist.rotate_session_state
+
+    def synced_rotate(*args: Any, **kwargs: Any) -> Any:
+        try:
+            barrier.wait(timeout=2.0)
+        except _threading.BrokenBarrierError:
+            pass
+        return orig_rotate(*args, **kwargs)
+
+    results: list[ Any ] = []
+
+    def worker() -> None:
+        with TestClient(app, base_url="http://localhost:8000") as local_client:
+            local_client.cookies.set(settings.session_cookie_name, token1)
+            r = local_client.post("/v1/auth/refresh", headers={"Origin": "http://localhost:8000"})
+            results.append(r)
+
+    with patch.object(session_manager.denylist, "rotate_session_state", side_effect=synced_rotate):
+        t1 = _threading.Thread(target=worker)
+        t2 = _threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert len(results) == 2
+    statuses = sorted(r.status_code for r in results)
+    assert statuses == [status.HTTP_200_OK, status.HTTP_401_UNAUTHORIZED]
+
+    winner = next(r for r in results if r.status_code == status.HTTP_200_OK)
+    loser = next(r for r in results if r.status_code == status.HTTP_401_UNAUTHORIZED)
+
+    # Winner receives new cookie
+    assert settings.session_cookie_name in winner.cookies
+    winning_token = winner.cookies[settings.session_cookie_name]
+    assert winning_token != token1
+
+    # Loser MUST NOT set or clear session cookie
+    assert settings.session_cookie_name not in loser.cookies
+    assert "set-cookie" not in loser.headers
+
+    # Winning token remains valid (replay/loser did not revoke session)
+    verified = session_manager.verify_session_token(winning_token)
+    assert verified.rotation_version == 2
+
+
+def test_task02_redis_failure_on_create_verify_and_rotate(client: TestClient) -> None:
+    """Redis unavailability during create, verify, or rotate fails closed with HTTP 503 and never issues false success."""
+    uid = str(uuid4())
+    _sess, token1 = session_manager.create_session(uid, "https://idp.local", "sub-503")
+
+    # 1. Failure during create_session -> 503, no token returned
+    with patch.object(
+        session_manager.denylist,
+        "create_session_state",
+        side_effect=HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Revocation store unavailable"),
+    ):
+        with pytest.raises(HTTPException) as exc_create:
+            session_manager.create_session(uid, "https://idp.local", "sub-503-fail")
+        assert exc_create.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+    # 2. Failure during verify_session_token -> 503
+    with patch.object(
+        session_manager.denylist,
+        "verify_and_get_session",
+        side_effect=HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Revocation store unavailable"),
+    ):
+        client.cookies.set(settings.session_cookie_name, token1)
+        res_me = client.get("/v1/auth/me")
+        assert res_me.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert "set-cookie" not in res_me.headers
+
+    # 3. Ambiguous timeout / failure during rotate_session_state -> 503, no cookie set or cleared
+    with patch.object(
+        session_manager.denylist,
+        "rotate_session_state",
+        side_effect=HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Revocation store unavailable"),
+    ):
+        client.cookies.set(settings.session_cookie_name, token1)
+        res_ref = client.post("/v1/auth/refresh", headers={"Origin": "http://localhost:8000"})
+        assert res_ref.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert "set-cookie" not in res_ref.headers
+
+
+def test_task02_redis_lua_rotation_and_revocation_semantics() -> None:
+    """Verify RedisRevocationStore methods and Lua state transitions against a stateful Redis command evaluator."""
+    import json as _json
+
+    from control_api.modules.identity.session import RedisRevocationStore
+
+    store_dict: dict[str, tuple[str, int]] = {}
+    current_redis_time = [1700000000]
+
+    class FakeRedisClient:
+        def get(self, key: str) -> str | None:
+            entry = store_dict.get(key)
+            if entry is None:
+                return None
+            val, exp = entry
+            if current_redis_time[0] >= exp:
+                del store_dict[key]
+                return None
+            return val
+
+        def set(self, key: str, val: str, ex: int | None = None) -> bool:
+            ttl = ex if ex is not None else 86400
+            store_dict[key] = (val, current_redis_time[0] + ttl)
+            return True
+
+        def delete(self, *keys: str) -> int:
+            count = 0
+            for k in keys:
+                if k in store_dict:
+                    del store_dict[k]
+                    count += 1
+            return count
+
+        def pipeline(self) -> Any:
+            client_ref = self
+
+            class FakePipe:
+                def __init__(self) -> None:
+                    self.ops: list[tuple[str, str | None]] = []
+
+                def get(self, key: str) -> FakePipe:
+                    self.ops.append(("get", key))
+                    return self
+
+                def time(self) -> FakePipe:
+                    self.ops.append(("time", None))
+                    return self
+
+                def execute(self) -> list[Any]:
+                    out: list[Any] = []
+                    for op, k in self.ops:
+                        if op == "get" and k is not None:
+                            out.append(client_ref.get(k))
+                        elif op == "time":
+                            out.append((current_redis_time[0], 0))
+                    return out
+
+            return FakePipe()
+
+        def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any:
+            keys = keys_and_args[:numkeys]
+            argv = keys_and_args[numkeys:]
+            if numkeys == 2:
+                # _LUA_REVOKE_SESSION
+                rev_key, sess_key = keys[0], keys[1]
+                exp_str, ttl_str = argv[0], argv[1]
+                self.set(rev_key, exp_str, ex=int(ttl_str))
+                self.delete(sess_key)
+                return 1
+            if numkeys == 3:
+                # _LUA_ROTATE_SESSION
+                sess_key, rev_sess_key, rev_user_key = keys[0], keys[1], keys[2]
+                expected_uid = argv[0]
+                expected_ver = int(argv[1])
+                expected_cat = int(argv[2])
+                override_now = int(argv[3])
+                idle_timeout = int(argv[4])
+                now_val = override_now if override_now > 0 else current_redis_time[0]
+
+                rev_sess_raw = self.get(rev_sess_key)
+                if rev_sess_raw is not None and int(rev_sess_raw) >= now_val:
+                    return ["REVOKED"]
+                rev_user_raw = self.get(rev_user_key)
+                if rev_user_raw is not None and expected_cat <= int(rev_user_raw):
+                    return ["REVOKED"]
+                raw = self.get(sess_key)
+                if raw is None:
+                    return ["MISSING"]
+                try:
+                    st = _json.loads(raw)
+                except (ValueError, TypeError):
+                    return ["CORRUPT"]
+                if not isinstance(st, dict) or st.get("user_id") != expected_uid or st.get("created_at") != expected_cat:
+                    return ["CORRUPT"]
+                if now_val >= int(st["absolute_expires_at"]):
+                    self.delete(sess_key)
+                    return ["ABSOLUTE_EXPIRED"]
+                if now_val >= int(st["idle_expires_at"]):
+                    return ["IDLE_EXPIRED"]
+                if int(st["rotation_version"]) != expected_ver:
+                    return ["VERSION_MISMATCH"]
+                st["rotation_version"] = int(st["rotation_version"]) + 1
+                st["idle_expires_at"] = min(now_val + idle_timeout, int(st["absolute_expires_at"]))
+                updated_raw = _json.dumps(st, separators=(",", ":"))
+                self.set(sess_key, updated_raw, ex=int(st["absolute_expires_at"]) - now_val)
+                return ["OK", updated_raw]
+            return 0
+
+    store = RedisRevocationStore("redis://localhost:6379/15")
+    store._client = FakeRedisClient()  # type: ignore[assignment]
+    mgr = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1700000000
+
+    sess1, tok1 = mgr.create_session(uid, "https://idp.local", "sub-redis-unit", now=t0)
+    assert mgr.verify_session_token(tok1, now=t0).rotation_version == 1
+
+    # Rotate
+    sess2, tok2 = mgr.refresh_session(sess1, now=t0 + 10)
+    assert sess2.rotation_version == 2
+    assert mgr.verify_session_token(tok2, now=t0 + 10).rotation_version == 2
+
+    # Old token rejected with VERSION_MISMATCH
+    with pytest.raises(HTTPException) as exc_old:
+        mgr.verify_session_token(tok1, now=t0 + 10)
+    assert exc_old.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "superseded" in str(exc_old.value.detail).lower()
+
+    # Corrupt Redis payload -> rejected with 401 and never recreated
+    store_dict[f"auth:session:{sess1.session_id}"] = ("{corrupt-json", t0 + 1000)
+    with pytest.raises(HTTPException) as exc_corrupt:
+        mgr.verify_session_token(tok2, now=t0 + 11)
+    assert exc_corrupt.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_task02_legacy_token_without_ver_claim_rejected() -> None:
+    """Pre-TASK-02 tokens lacking the 'ver' claim are deterministically rejected with 401 and never lazy-registered."""
+    from control_api.modules.identity.crypto import sign_jwt_hs256
+
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    sid = str(uuid4())
+    now = int(time.time())
+
+    legacy_payload = {
+        "type": "session",
+        "session_id": sid,
+        "sub": uid,
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "original_iss": "https://idp.local",
+        "original_sub": "legacy-sub",
+        "iat": now,
+        "idle_exp": now + 1800,
+        "exp": now + 28800,
+    }
+    legacy_token = sign_jwt_hs256(legacy_payload, settings.jwt_secret_key.get_secret_value())
+
+    with pytest.raises(HTTPException) as exc:
+        manager.verify_session_token(legacy_token, now=now)
+    assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert store.get_session_state(sid, now=now) is None
+
+
+# ==============================================================================
 # AUTH-T12 / P0-02: User-Wide Revocation Cutoff, Monotonicity & Bounded Retention
 # ==============================================================================
+
 
 def test_auth_p0_02_user_revocation_cutoff_boundaries() -> None:
     """Exact cutoff boundaries: <= cutoff is revoked, > cutoff remains valid."""
