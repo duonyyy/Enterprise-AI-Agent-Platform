@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { AppShell, NavGroup, WorkspaceItem, BrandIcon } from "@enterprise/ui";
+import { defaultApiClient, CurrentUserResponse } from "@enterprise/api-client";
 
 export default function WorkspaceConsoleLayout({
   children,
@@ -11,21 +12,64 @@ export default function WorkspaceConsoleLayout({
   children: React.ReactNode;
   params: { workspaceId: string };
 }) {
-  const currentWorkspaceId = params.workspaceId || "default";
+  const currentWorkspaceId = params.workspaceId;
   const pathname = usePathname() || "";
   const router = useRouter();
 
-  const availableWorkspaces: WorkspaceItem[] = useMemo(
-    () => [
-      { id: "default", name: "Default Workspace", tenantName: "VinAI Enterprise" },
-      { id: "ws_prod_01", name: "Production Workspace", tenantName: "VinAI Enterprise" },
-      { id: "ws_staging_02", name: "Staging Sandbox", tenantName: "VinAI Enterprise" },
-    ],
-    []
-  );
+  const [currentUser, setCurrentUser] = useState<CurrentUserResponse | null>(null);
+
+  useEffect(() => {
+    // Bootstrap user identity and workspace memberships (Finding R08)
+    defaultApiClient
+      .getCurrentUser()
+      .then((user) => {
+        setCurrentUser(user);
+        if (!user.workspaces || user.workspaces.length === 0) {
+          // User has no active workspaces, redirect to login landing empty state
+          router.push("/login");
+          return;
+        }
+
+        // If current workspace in URL is not among user's active workspaces, redirect to first active workspace
+        const hasAccess = user.workspaces.some((w) => w.workspace_id === currentWorkspaceId);
+        if (!hasAccess && user.workspaces[0]) {
+          router.push(`/w/${user.workspaces[0].workspace_id}/agents`);
+        }
+      })
+      .catch((err: unknown) => {
+        if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
+          router.push("/login?error=session_expired");
+        }
+      });
+  }, [currentWorkspaceId, router]);
+
+  const handleLogout = async () => {
+    try {
+      await defaultApiClient.logout();
+    } finally {
+      router.push("/login");
+    }
+  };
+
+  const availableWorkspaces: WorkspaceItem[] = useMemo(() => {
+    if (!currentUser || !currentUser.workspaces) {
+      return [];
+    }
+    return currentUser.workspaces.map((w) => ({
+      id: w.workspace_id,
+      name: w.workspace_name,
+      tenantName: w.tenant_name,
+    }));
+  }, [currentUser]);
+
+  const currentMembership = useMemo(() => {
+    return currentUser?.workspaces?.find((w) => w.workspace_id === currentWorkspaceId);
+  }, [currentUser, currentWorkspaceId]);
+
+  const userRole = currentMembership?.role ? `Vai trò: ${currentMembership.role}` : "Thành viên";
+  const tenantName = currentMembership?.tenant_name || "VinAI Enterprise";
 
   const handleSelectWorkspace = (newWorkspaceId: string) => {
-    // Replace current workspaceId in path
     const pathParts = pathname.split("/");
     const wIndex = pathParts.indexOf("w");
     if (wIndex !== -1 && pathParts[wIndex + 1]) {
@@ -143,11 +187,13 @@ export default function WorkspaceConsoleLayout({
       workspaces={availableWorkspaces}
       currentWorkspaceId={currentWorkspaceId}
       onSelectWorkspace={handleSelectWorkspace}
-      tenantName="VinAI Enterprise"
-      userRole="Agent Platform Admin"
+      tenantName={tenantName}
+      userRole={userRole}
+      userEmail={currentUser?.email_normalized || currentUser?.subject || "user@enterprise.local"}
+      userDisplayName={currentUser?.display_name || undefined}
+      onLogout={handleLogout}
     >
       {children}
     </AppShell>
   );
 }
-

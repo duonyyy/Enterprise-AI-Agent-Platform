@@ -11,6 +11,9 @@ export interface AppShellProps {
   onSelectWorkspace: (workspaceId: string) => void;
   tenantName?: string;
   userRole?: string;
+  userEmail?: string;
+  userDisplayName?: string;
+  onLogout?: () => void;
 }
 
 export const AppShell: React.FC<AppShellProps> = ({
@@ -22,6 +25,9 @@ export const AppShell: React.FC<AppShellProps> = ({
   onSelectWorkspace,
   tenantName = "VinAI Enterprise",
   userRole = "Chuyên viên Quản trị",
+  userEmail = "admin@vinai.io",
+  userDisplayName,
+  onLogout,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
@@ -117,16 +123,35 @@ export const AppShell: React.FC<AppShellProps> = ({
                   color: "var(--color-primary)",
                 }}
               >
-                VA
+                {(userDisplayName || userEmail || "U").substring(0, 2).toUpperCase()}
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
                 <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-primary)" }}>
-                  admin@vinai.io
+                  {userDisplayName || userEmail}
                 </span>
                 <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>
                   {userRole}
                 </span>
               </div>
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  title="Đăng xuất"
+                  style={{
+                    marginLeft: "8px",
+                    padding: "4px 8px",
+                    borderRadius: "var(--radius-xs)",
+                    border: "1px solid var(--border-subtle)",
+                    backgroundColor: "transparent",
+                    color: "var(--text-secondary)",
+                    fontSize: "11px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Đăng xuất
+                </button>
+              )}
             </div>
           </div>
         </header>

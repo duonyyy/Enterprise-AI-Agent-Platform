@@ -59,6 +59,36 @@ export interface DecisionResponse {
   revision: number;
 }
 
+export interface LoginInitiateResponse {
+  authorization_url: string;
+  state: string;
+}
+
+export interface WorkspaceMembershipInfo {
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_id: string;
+  workspace_slug: string;
+  workspace_name: string;
+  role: string;
+}
+
+export interface CurrentUserResponse {
+  user_id: string;
+  issuer: string;
+  subject: string;
+  display_name?: string | null;
+  email_normalized?: string | null;
+  workspaces: WorkspaceMembershipInfo[];
+}
+
+export interface WorkspaceTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
 export class ApiClientError extends Error {
   constructor(
     public readonly status: number,
@@ -221,6 +251,47 @@ export class ControlApiClientV2 {
         signal,
       }
     );
+  }
+
+  // --- Auth & Session API (SPEC-AUTH-001) ---
+  async getLoginUrl(returnTo?: string, signal?: AbortSignal): Promise<LoginInitiateResponse> {
+    const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+    return this.request<LoginInitiateResponse>(`/v1/auth/login${query}`, {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async getCurrentUser(signal?: AbortSignal): Promise<CurrentUserResponse> {
+    return this.request<CurrentUserResponse>("/v1/auth/me", {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async refreshSession(signal?: AbortSignal): Promise<{ status: string }> {
+    return this.request<{ status: string }>("/v1/auth/refresh", {
+      method: "POST",
+      signal,
+    });
+  }
+
+  async logout(signal?: AbortSignal): Promise<{ status: string }> {
+    return this.request<{ status: string }>("/v1/auth/logout", {
+      method: "POST",
+      signal,
+    });
+  }
+
+  async exchangeWorkspaceToken(
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceTokenResponse> {
+    return this.request<WorkspaceTokenResponse>("/v1/auth/token", {
+      method: "POST",
+      body: JSON.stringify({ workspace_id: workspaceId }),
+      signal,
+    });
   }
 }
 

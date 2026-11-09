@@ -147,7 +147,7 @@ jobs:
           JWT_AUDIENCE: enterprise-control-api
           REDIS_URL: redis://localhost:6379/0
         run: |
-          uv run pytest tests/contract/ tests/integration/ apps/control-api/tests apps/jobs-worker/tests -v
+          uv run pytest tests/contract/ tests/security/ tests/integration/ apps/control-api/tests apps/jobs-worker/tests -v
 
       - name: Retain sanitized database test evidence
         if: always()

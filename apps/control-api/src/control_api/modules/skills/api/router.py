@@ -8,7 +8,7 @@ import hashlib
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/skills", tags=["skills"])
 
 @router.get("", response_model=list[SkillResponseDTO])
-async def list_skills(workspace_id: str, principal: AuthenticatedPrincipal = CurrentUser):
+async def list_skills(workspace_id: str, principal: CurrentUser):
     return [{
         "id": "sk_1",
         "slug": "weekly-report",
@@ -18,7 +18,7 @@ async def list_skills(workspace_id: str, principal: AuthenticatedPrincipal = Cur
     }]
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=SkillResponseDTO)
-async def create_skill(workspace_id: str, dto: CreateSkillDraftDTO, principal: AuthenticatedPrincipal = CurrentUser):
+async def create_skill(workspace_id: str, dto: CreateSkillDraftDTO, principal: CurrentUser):
     return {
         "id": "sk_new",
         "slug": dto.slug,
@@ -28,7 +28,7 @@ async def create_skill(workspace_id: str, dto: CreateSkillDraftDTO, principal: A
     }
 
 @router.post("/{skill_id}/publish", status_code=status.HTTP_201_CREATED, response_model=SkillVersionDTO)
-async def publish_skill(workspace_id: str, skill_id: str, principal: AuthenticatedPrincipal = CurrentUser):
+async def publish_skill(workspace_id: str, skill_id: str, principal: CurrentUser):
     bundle_hash = hashlib.sha256(f"skill-bundle-{skill_id}".encode("utf-8")).hexdigest()
     return {
         "id": f"skv_{skill_id}_v1",

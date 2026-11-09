@@ -8,7 +8,7 @@ import hashlib
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/mcp", tags=["mcp"])
 
 @router.get("/connections", response_model=list[McpConnectionResponseDTO])
-async def list_connections(workspace_id: str, principal: AuthenticatedPrincipal = CurrentUser):
+async def list_connections(workspace_id: str, principal: CurrentUser):
     return [{
         "id": "conn_1",
         "name": "crm-sandbox",
@@ -18,7 +18,7 @@ async def list_connections(workspace_id: str, principal: AuthenticatedPrincipal 
     }]
 
 @router.post("/connections", status_code=status.HTTP_201_CREATED, response_model=McpConnectionResponseDTO)
-async def create_connection(workspace_id: str, dto: CreateMcpConnectionDTO, principal: AuthenticatedPrincipal = CurrentUser):
+async def create_connection(workspace_id: str, dto: CreateMcpConnectionDTO, principal: CurrentUser):
     return {
         "id": "conn_new",
         "name": dto.name,
@@ -28,7 +28,7 @@ async def create_connection(workspace_id: str, dto: CreateMcpConnectionDTO, prin
     }
 
 @router.post("/connections/{connection_id}/discover", status_code=status.HTTP_202_ACCEPTED, response_model=McpDiscoveryResponseDTO)
-async def discover_connection(workspace_id: str, connection_id: str, principal: AuthenticatedPrincipal = CurrentUser):
+async def discover_connection(workspace_id: str, connection_id: str, principal: CurrentUser):
     catalog_hash = hashlib.sha256(f"mcp-catalog-{connection_id}".encode("utf-8")).hexdigest()
     return {
         "snapshot_id": f"snap_{connection_id}",

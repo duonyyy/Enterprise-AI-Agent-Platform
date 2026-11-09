@@ -24,8 +24,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: enterprise-redis
-    # Ephemeral cache role per SPEC-DEPLOY-001 section 2 (not authoritative state)
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Durable AOF persistence for auth transaction and session revocation (DEC-AU-02)
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -139,6 +141,10 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
       JWT_ISSUER: ${JWT_ISSUER:-http://localhost:8080/realms/enterprise}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-enterprise-control-api}
+      RUNTIME_JWT_SECRET: ${RUNTIME_JWT_SECRET:?RUNTIME_JWT_SECRET is required}
+      RUNTIME_JWT_ISSUER: ${RUNTIME_JWT_ISSUER:-http://localhost:8080/realms/enterprise}
+      RUNTIME_JWT_AUDIENCE: ${RUNTIME_JWT_AUDIENCE:-agent-runtime}
+      REDIS_URL: redis://redis:6379/0
       RUNTIME_API_URL: http://agent-runtime:8001
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
@@ -266,5 +272,6 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   qdrant_data:
   minio_data:
