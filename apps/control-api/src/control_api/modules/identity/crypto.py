@@ -1,9 +1,9 @@
 """Cryptographic and token utilities for Enterprise Agent Platform Authentication (SPEC-AUTH-001).
 
-Zero-dependency, pure Python 3.12 implementation supporting:
+Authentication primitives supporting:
 - PKCE S256 verification and generation (RFC 7636)
 - HMAC-SHA256 (HS256) JWT signing and verification
-- RSA PKCS#1 v1.5 SHA-256 (RS256) signature verification against OIDC JWKS (RFC 7517/7518)
+- PyJWT/cryptography RS256 verification against trusted OIDC JWKS
 - Cryptographically secure token and state generation
 """
 
@@ -13,10 +13,45 @@ import base64
 import hashlib
 import hmac
 import json
+import math
+import re
 import secrets
-from typing import Any
+from collections.abc import Collection, Mapping
+from typing import Any, cast
 
-SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+import jwt
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from jwt.algorithms import RSAAlgorithm
+from jwt.types import Options
+
+_MAX_JWT_LENGTH = 65_536
+_MAX_JWKS_KEYS = 64
+_MAX_OIDC_LEEWAY_SECONDS = 60
+_SIGNATURE_ONLY_OPTIONS: Options = {
+    "verify_signature": True,
+    "verify_exp": False,
+    "verify_iat": False,
+    "verify_nbf": False,
+    "verify_aud": False,
+    "verify_iss": False,
+    "verify_sub": False,
+    "verify_jti": False,
+}
+
+
+class SigningKeyError(ValueError):
+    """The trusted JWKS may need refreshing after key rotation."""
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("Duplicate JWT JSON member")
+        result[name] = value
+    return result
 
 
 def b64url_encode(data: bytes) -> str:
@@ -111,79 +146,182 @@ def verify_rsa_pkcs1v15_sha256(
     n_b64: str,
     e_b64: str,
 ) -> bool:
-    """Verify an RSA-PKCS1v15 signature with SHA-256 using pure-python modular arithmetic.
-
-    Args:
-        message: The raw bytes that were signed (e.g. ASCII "header.payload").
-        signature: The raw signature bytes.
-        n_b64: The RSA modulus in base64url.
-        e_b64: The RSA public exponent in base64url.
-
-    Returns:
-        bool: True if signature is cryptographically valid, False otherwise.
-    """
+    """Compatibility wrapper; RSA verification is delegated to cryptography."""
     try:
-        n = int.from_bytes(b64url_decode(n_b64), "big")
-        e = int.from_bytes(b64url_decode(e_b64), "big")
-        sig_int = int.from_bytes(signature, "big")
-    except (ValueError, TypeError, OverflowError):
+        key = _rsa_public_key(n_b64, e_b64)
+        key.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
+    except (InvalidSignature, ValueError, TypeError, OverflowError):
         return False
-
-    if sig_int >= n or sig_int <= 0 or n <= 0 or e <= 0:
-        return False
-
-    # m = s^e mod n
-    decrypted_int = pow(sig_int, e, n)
-    k = (n.bit_length() + 7) // 8
-    em = decrypted_int.to_bytes(k, "big")
-
-    expected_hash = hashlib.sha256(message).digest()
-    expected_t = SHA256_DIGEST_INFO + expected_hash
-    # Minimum EM length = 11 + len(T)
-    if len(em) < len(expected_t) + 11:
-        return False
-    if em[0] != 0 or em[1] != 1:
-        return False
-
-    ps_len = len(em) - len(expected_t) - 3
-    if ps_len < 8:
-        return False
-    if any(b != 0xFF for b in em[2 : 2 + ps_len]):
-        return False
-    if em[2 + ps_len] != 0:
-        return False
-
-    actual_t = em[3 + ps_len :]
-    return hmac.compare_digest(actual_t, expected_t)
+    return True
 
 
-def verify_jwt_rs256_jwks(token: str, jwks: dict[str, Any]) -> dict[str, Any]:
-    """Verify an RS256 token against a JWKS key set."""
-    header, payload, signing_input, signature = decode_jwt_unverified(token)
-    alg = header.get("alg")
-    if alg != "RS256":
-        raise ValueError(f"Unsupported algorithm for RS256 verification: {alg}")
-
-    kid = header.get("kid")
-    keys = jwks.get("keys", [])
-    matching_key = None
-    if kid:
-        for k in keys:
-            if k.get("kid") == kid and k.get("kty") == "RSA":
-                matching_key = k
-                break
-    elif len(keys) == 1 and keys[0].get("kty") == "RSA":
-        matching_key = keys[0]
-
-    if not matching_key:
-        raise ValueError(f"No matching RSA key found in JWKS for kid: {kid}")
-
-    n_b64 = matching_key.get("n")
-    e_b64 = matching_key.get("e")
+def _rsa_public_key(n_b64: object, e_b64: object) -> rsa.RSAPublicKey:
     if not isinstance(n_b64, str) or not isinstance(e_b64, str):
-        raise TypeError("Invalid RSA key parameters in JWKS")
+        raise ValueError("Invalid RSA signing key")  # noqa: TRY004 -- Invalid external key data.
+    if len(n_b64) > 1500 or len(e_b64) > 16:
+        raise ValueError("Oversized RSA key material")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", n_b64) or not re.fullmatch(r"[A-Za-z0-9_-]+", e_b64):
+        raise ValueError("Invalid RSA key encoding")
+    try:
+        modulus = int.from_bytes(b64url_decode(n_b64), "big")
+        if not 2048 <= modulus.bit_length() <= 8192:
+            raise ValueError("Unsupported RSA key length")
+        # Only public parameters reach the library; ignore any private JWK material.
+        key = RSAAlgorithm.from_jwk(json.dumps({"kty": "RSA", "n": n_b64, "e": e_b64}))
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid RSA signing key") from exc
+    if not isinstance(key, rsa.RSAPublicKey):
+        raise ValueError("Invalid RSA public key")  # noqa: TRY004 -- Preserve verifier error contract.
+    return key
 
-    if not verify_rsa_pkcs1v15_sha256(signing_input, signature, n_b64, e_b64):
-        raise ValueError("Invalid RS256 signature against JWKS")
 
+def _rs256_header(token: str) -> dict[str, object]:
+    if not isinstance(token, str) or not token or len(token) > _MAX_JWT_LENGTH:
+        raise ValueError("Invalid JWT size or type")
+    try:
+        segments = token.split(".")
+        if len(segments) != 3:
+            raise ValueError("Invalid JWT segments")
+        # Reject ambiguous JSON before passing the bounded token to the library.
+        for segment in segments[:2]:
+            obj = json.loads(b64url_decode(segment), object_pairs_hook=_unique_json_object)
+            if not isinstance(obj, dict):
+                raise TypeError("JWT header and payload must be objects")
+        header = jwt.get_unverified_header(token)
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("Invalid JWT header") from exc
+    if header.get("alg") != "RS256":
+        raise ValueError("Unexpected JWT signing algorithm")
+    if any(name in header for name in ("crit", "jku", "jwk", "x5u", "b64")):
+        raise ValueError("Unsupported JOSE header")
+    kid = header.get("kid")
+    if kid is not None and (not isinstance(kid, str) or not kid or len(kid) > 256):
+        raise ValueError("Invalid JWT key ID")
+    return cast(dict[str, object], header)
+
+
+def _rsa_verification_key(token: str, jwks: Mapping[str, object]) -> rsa.RSAPublicKey:
+    header = _rs256_header(token)
+    kid = header.get("kid")
+    keys = jwks.get("keys") if isinstance(jwks, Mapping) else None
+    if not isinstance(keys, list) or len(keys) > _MAX_JWKS_KEYS:
+        raise ValueError("Invalid JWKS key set")
+    candidates: list[dict[str, object]] = []
+    for key in keys:
+        if not isinstance(key, dict) or key.get("kty") != "RSA":
+            continue
+        if kid is not None and key.get("kid") != kid:
+            continue
+        if key.get("alg", "RS256") != "RS256" or key.get("use", "sig") != "sig":
+            continue
+        ops = key.get("key_ops")
+        if ops is not None and (
+            not isinstance(ops, list)
+            or any(not isinstance(op, str) for op in ops)
+            or "verify" not in ops
+        ):
+            continue
+        candidates.append(key)
+    if not candidates:
+        raise SigningKeyError("No matching JWKS signing key")
+    if len(candidates) != 1:
+        raise ValueError("Ambiguous JWKS signing key")
+    return _rsa_public_key(candidates[0].get("n"), candidates[0].get("e"))
+
+
+def verify_jwt_rs256_jwks(token: str, jwks: Mapping[str, object]) -> dict[str, object]:
+    """Legacy signature-only verifier; OIDC callers must use the full ID Token verifier."""
+    key = _rsa_verification_key(token, jwks)
+    try:
+        return cast(
+            dict[str, object],
+            jwt.decode(token, key, algorithms=["RS256"], options=_SIGNATURE_ONLY_OPTIONS),
+        )
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid RS256 JWT") from exc
+
+
+def _numeric_date(payload: Mapping[str, object], claim: str) -> int | float:
+    value = payload[claim]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("Invalid OIDC timestamp")  # noqa: TRY004 -- Invalid external claim data.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Invalid OIDC timestamp")
+    return value
+
+
+def _validate_oidc_claims(
+    payload: Mapping[str, object], client_id: str, nonce: str, trusted_audiences: set[str]
+) -> None:
+    aud = payload["aud"]
+    audiences = [aud] if isinstance(aud, str) else aud
+    if (
+        not isinstance(audiences, list)
+        or not audiences
+        or any(not isinstance(a, str) or not a for a in audiences)
+        or any(a not in trusted_audiences for a in audiences)
+    ):
+        raise ValueError("Invalid OIDC audience")
+    azp = payload.get("azp")
+    if (len(audiences) > 1 and azp != client_id) or ("azp" in payload and azp != client_id):
+        raise ValueError("Invalid OIDC authorized party")
+    subject = payload["sub"]
+    token_nonce = payload["nonce"]
+    if not isinstance(subject, str) or not subject.strip() or not isinstance(token_nonce, str):
+        raise ValueError("Invalid OIDC subject or nonce")
+    try:
+        nonce_matches = hmac.compare_digest(token_nonce.encode("utf-8"), nonce.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("Invalid OIDC nonce encoding") from exc
+    if not nonce_matches:
+        raise ValueError("Invalid OIDC nonce")
+    expires_at = _numeric_date(payload, "exp")
+    if _numeric_date(payload, "iat") >= expires_at:
+        raise ValueError("Invalid OIDC timestamp ordering")
+    if "nbf" in payload and _numeric_date(payload, "nbf") >= expires_at:
+        raise ValueError("Invalid OIDC timestamp ordering")
+
+
+def verify_oidc_id_token_rs256(
+    token: str,
+    jwks: Mapping[str, object],
+    *,
+    issuer: str,
+    client_id: str,
+    nonce: str,
+    leeway_seconds: int = 0,
+    additional_trusted_audiences: Collection[str] = (),
+) -> dict[str, object]:
+    """Verify RS256 OIDC identity, time, audience/azp and nonce using trusted issuer keys.
+
+    The default accepts only this client's audience. Other audiences need an explicit
+    allowlist and matching azp. This profile never falls back to an OIDC HS256 verifier;
+    application-session and Runtime HS256 tokens are separate, unchanged profiles.
+    """
+    if not all(isinstance(v, str) and v for v in (issuer, client_id, nonce)):
+        raise ValueError("Invalid OIDC verifier configuration")
+    if (
+        type(leeway_seconds) is not int
+        or not 0 <= leeway_seconds <= _MAX_OIDC_LEEWAY_SECONDS
+        or isinstance(additional_trusted_audiences, str)
+        or len(additional_trusted_audiences) > _MAX_JWKS_KEYS
+        or any(not isinstance(a, str) or not a for a in additional_trusted_audiences)
+    ):
+        raise ValueError("Invalid OIDC verifier policy")
+    key = _rsa_verification_key(token, jwks)
+    try:
+        payload = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            issuer=issuer,
+            audience=client_id,
+            leeway=leeway_seconds,
+            options={"require": ["iss", "aud", "exp", "iat", "sub", "nonce"]},
+        )
+    except jwt.InvalidSignatureError as exc:
+        raise SigningKeyError("Invalid OIDC token signature") from exc
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid OIDC ID Token") from exc
+    _validate_oidc_claims(payload, client_id, nonce, {client_id, *additional_trusted_audiences})
     return payload

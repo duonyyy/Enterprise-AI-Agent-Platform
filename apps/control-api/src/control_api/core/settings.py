@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # OIDC & Session Authentication Settings (SPEC-AUTH-001 / Step 02)
     oidc_issuer: str = "http://localhost:8080/realms/enterprise"
     oidc_client_id: str = "enterprise-studio"
+    # Additional ID Token audiences require explicit trust, as well as matching azp.
+    oidc_additional_trusted_audiences: list[str] = Field(default_factory=list, max_length=64)
     oidc_client_secret: SecretStr = Field(
         default=SecretStr("enterprise-studio-client-secret-dev-default-32ch")
     )

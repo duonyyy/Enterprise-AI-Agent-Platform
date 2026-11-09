@@ -6,7 +6,7 @@ Implements:
 - Browser correlation check (RFC 9700 §2.1.1 / Finding R02)
 - Single-use state and nonce bound to auth transaction in shared Redis store (Finding R01)
 - Key discovery and JWKS caching with rollover support
-- ID Token verification (issuer, audience, expiry, nonce, RS256/HS256 signature)
+- Fixed RS256 ID Token profile with issuer, audience/azp, timestamps and nonce checks
 - Sanitized upstream errors preventing sensitive information disclosure
 """
 
@@ -18,19 +18,31 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode, urlparse
 
 import httpx
 from control_api.core.settings import settings
 from control_api.modules.identity.crypto import (
-    decode_jwt_unverified,
+    SigningKeyError,
     generate_pkce_pair,
     generate_secure_token,
-    verify_jwt_hs256,
-    verify_jwt_rs256_jwks,
+    verify_oidc_id_token_rs256,
 )
 from fastapi import HTTPException, status
+
+
+def _response_object(response: httpx.Response) -> dict[str, Any]:
+    """Reject malformed upstream JSON without leaking provider response content."""
+    try:
+        payload = response.json()
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid IdP response"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid IdP response")
+    return cast(dict[str, Any], payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +93,9 @@ class InMemoryAuthTransactionStore(BaseAuthTransactionStore):
 
     def _purge_expired_locked(self) -> None:
         now = int(time.time())
-        expired = [s for s, tx in self._transactions.items() if now - tx.created_at > self._ttl_seconds]
+        expired = [
+            s for s, tx in self._transactions.items() if now - tx.created_at > self._ttl_seconds
+        ]
         for s in expired:
             del self._transactions[s]
 
@@ -282,7 +296,7 @@ class OidcClient:
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=f"Failed to fetch JWKS from IdP ({resp.status_code})",
                 )
-            return resp.json()  # type: ignore[no-any-return]
+            return _response_object(resp)
 
         try:
             if client is not None:
@@ -326,7 +340,8 @@ class OidcClient:
 
         # 2. Browser correlation check (RFC 9700 §2.1.1 / Finding R02)
         if tx.browser_correlation and (
-            not browser_correlation or not hmac.compare_digest(browser_correlation, tx.browser_correlation)
+            not browser_correlation
+            or not hmac.compare_digest(browser_correlation, tx.browser_correlation)
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -354,7 +369,7 @@ class OidcClient:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Token exchange failed at IdP: invalid authorization code or grant",
                 )
-            return resp.json()  # type: ignore[no-any-return]
+            return _response_object(resp)
 
         try:
             if http_client is not None:
@@ -375,79 +390,37 @@ class OidcClient:
                 detail="IdP token response missing valid id_token",
             )
 
-        # 4. Decode & Verify ID Token
-        header, _, _, _ = decode_jwt_unverified(id_token_raw)
-        alg = header.get("alg")
+        # The IdP profile is fixed; a token header cannot enable an HS256 fallback.
+        def verify_id_token(keys: dict[str, Any]) -> dict[str, object]:
+            return verify_oidc_id_token_rs256(
+                id_token_raw,
+                keys,
+                issuer=settings.oidc_issuer,
+                client_id=settings.oidc_client_id,
+                nonce=tx.nonce,
+                additional_trusted_audiences=settings.oidc_additional_trusted_audiences,
+            )
 
-        if alg == "RS256":
+        jwks = await self.fetch_jwks(http_client)
+        try:
+            payload = verify_id_token(jwks)
+        except SigningKeyError:
+            # Refresh only for key/signature rotation, never for invalid identity claims.
+            with self._jwks_lock:
+                self._jwks_cache = None
             jwks = await self.fetch_jwks(http_client)
             try:
-                payload = verify_jwt_rs256_jwks(id_token_raw, jwks)
-            except ValueError:
-                # Key rollover: re-fetch JWKS once if validation failed
-                with self._jwks_lock:
-                    self._jwks_cache = None
-                jwks = await self.fetch_jwks(http_client)
-                try:
-                    payload = verify_jwt_rs256_jwks(id_token_raw, jwks)
-                except ValueError as err:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail=f"Invalid ID token signature: {err}",
-                    ) from err
-        elif alg == "HS256":
-            try:
-                payload = verify_jwt_hs256(
-                    id_token_raw, settings.oidc_client_secret.get_secret_value()
-                )
+                payload = verify_id_token(jwks)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Invalid HS256 ID token signature: {exc}",
+                    detail="Invalid OIDC ID token",
                 ) from exc
-        else:
+        except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Unsupported ID token algorithm: {alg}",
-            )
-
-        # 5. Validate Claims (OIDC Core §3.1.3.7)
-        iss = payload.get("iss")
-        if iss != settings.oidc_issuer:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"ID token issuer mismatch (expected {settings.oidc_issuer}, got {iss})",
-            )
-
-        aud = payload.get("aud")
-        audiences = [aud] if isinstance(aud, str) else (aud or [])
-        if settings.oidc_client_id not in audiences:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"ID token audience mismatch (expected {settings.oidc_client_id})",
-            )
-
-        exp = payload.get("exp")
-        if not isinstance(exp, (int, float)) or int(exp) <= now:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="ID token has expired",
-            )
-
-        token_nonce = payload.get("nonce")
-        if token_nonce != tx.nonce:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="ID token nonce mismatch",
-            )
-
-        sub = payload.get("sub")
-        if not isinstance(sub, str) or not sub.strip():
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="ID token missing valid sub (subject) claim",
-            )
-
+                detail="Invalid OIDC ID token",
+            ) from exc
         return payload, tx
 
 

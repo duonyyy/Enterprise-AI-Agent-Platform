@@ -1,69 +1,33 @@
 """OIDC Test Server Fixture for Enterprise Agent Platform (Step 02 / PR-02 / G2).
 
-Provides an in-process, RFC-compliant OpenID Connect provider for end-to-end testing:
+Provides a synthetic in-process OpenID Connect fixture for component tests:
 - OpenID Connect Discovery (/.well-known/openid-configuration)
 - JWKS Key Discovery and Key Rollover (/protocol/openid-connect/certs)
 - Authorization endpoint with PKCE challenge tracking
-- Token endpoint with PKCE S256 verifier validation, authorization code exchange, and RS256/HS256 ID token issuance.
+- Token exchange with PKCE S256 validation and RS256 ID token issuance.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import secrets
 import time
 from typing import Any
 
 from control_api.modules.identity.crypto import b64url_encode, verify_pkce
-
-
-def _is_prime(n: int, k: int = 30) -> bool:
-    if n < 2:
-        return False
-    if n in (2, 3):
-        return True
-    if n % 2 == 0:
-        return False
-    r, d = 0, n - 1
-    while d % 2 == 0:
-        r += 1
-        d //= 2
-    for _ in range(k):
-        a = secrets.randbelow(n - 4) + 2
-        x = pow(a, d, n)
-        if x in (1, n - 1):
-            continue
-        for _ in range(r - 1):
-            x = pow(x, 2, n)
-            if x == n - 1:
-                break
-        else:
-            return False
-    return True
-
-
-def _generate_prime(bits: int) -> int:
-    while True:
-        p = secrets.randbits(bits) | (1 << (bits - 1)) | 1
-        if _is_prime(p):
-            return p
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 
 class RsaKeyPair:
-    """RSA 1024-bit keypair for test OIDC JWKS signing and verification."""
+    """RSA 2048-bit test key generated and used by cryptography."""
 
     def __init__(self, kid: str = "test-key-1") -> None:
         self.kid = kid
-        # 512 + 512 = 1024-bit RSA key for fast, deterministic test runs
-        p = _generate_prime(512)
-        q = _generate_prime(512)
-        while p == q:
-            q = _generate_prime(512)
-        self.n = p * q
-        phi = (p - 1) * (q - 1)
-        self.e = 65537
-        self.d = pow(self.e, -1, phi)
+        self._private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        numbers = self._private_key.public_key().public_numbers()
+        self.n = numbers.n
+        self.e = numbers.e
 
     def to_jwk(self) -> dict[str, str]:
         n_bytes = self.n.to_bytes((self.n.bit_length() + 7) // 8, "big")
@@ -79,17 +43,7 @@ class RsaKeyPair:
 
     def sign_rs256(self, message: bytes) -> bytes:
         """Sign message using RSA PKCS#1 v1.5 with SHA-256."""
-        sha256_digest_info = bytes.fromhex("3031300d060960864801650304020105000420")
-        hash_val = hashlib.sha256(message).digest()
-        t = sha256_digest_info + hash_val
-
-        k = (self.n.bit_length() + 7) // 8
-        ps_len = k - len(t) - 3
-        em = b"\x00\x01" + (b"\xff" * ps_len) + b"\x00" + t
-
-        em_int = int.from_bytes(em, "big")
-        sig_int = pow(em_int, self.d, self.n)
-        return sig_int.to_bytes(k, "big")
+        return self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
 
 
 class OidcTestServer:
