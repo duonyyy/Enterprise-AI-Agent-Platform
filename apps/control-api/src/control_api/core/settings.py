@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     )
     session_idle_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     session_absolute_timeout_seconds: int = Field(default=28800, ge=300, le=604800)
+    session_max_accepted_absolute_lifetime_seconds: int = Field(default=28800, ge=300, le=604800)
+    session_clock_skew_seconds: int = Field(default=60, ge=0, le=600)
     session_cookie_name: str = "agent_session"
     session_cookie_secure: bool = False
     session_cookie_same_site: str = "lax"
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
             except ImportError:
                 value = "postgresql+psycopg://" + value.removeprefix("postgresql+asyncpg://")
 
-        if not (value.startswith("postgresql+asyncpg://") or value.startswith("postgresql+psycopg://")):
+        if not value.startswith(("postgresql+asyncpg://", "postgresql+psycopg://")):
             raise ValueError(
                 "DATABASE_URL must use postgresql+asyncpg or postgresql+psycopg; "
                 "local/in-memory databases are forbidden"

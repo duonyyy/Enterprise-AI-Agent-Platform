@@ -42,11 +42,11 @@ class BaseRevocationStore(ABC):
 
     @abstractmethod
     def revoke_session(self, session_id: str, expires_at: int) -> None:
-        """Revoke a specific session until its absolute expiry."""
+        """Revoke a specific session until its absolute expiry plus clock allowance."""
 
     @abstractmethod
-    def revoke_user(self, user_id: str, until_timestamp: int) -> None:
-        """Revoke all sessions for a user created before until_timestamp."""
+    def revoke_user(self, user_id: str, until_timestamp: int, max_session_lifetime: int | None = None) -> None:
+        """Revoke all sessions for a user created at or before until_timestamp."""
 
     @abstractmethod
     def is_session_revoked(self, session_id: str, user_id: str, session_created_at: int) -> bool:
@@ -63,16 +63,41 @@ class InMemoryRevocationStore(BaseRevocationStore):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._revoked_sessions: dict[str, int] = {}
-        self._revoked_users: dict[str, int] = {}
+        # Stores user_id -> (cutoff, retention_deadline)
+        self._revoked_users: dict[str, tuple[int, int]] = {}
 
     def revoke_session(self, session_id: str, expires_at: int) -> None:
+        clock_allowance = settings.session_clock_skew_seconds
+        deadline = expires_at + clock_allowance
         with self._lock:
-            self._revoked_sessions[session_id] = expires_at
+            self._revoked_sessions[session_id] = deadline
             self._purge_expired_locked()
 
-    def revoke_user(self, user_id: str, until_timestamp: int) -> None:
+    def revoke_user(self, user_id: str, until_timestamp: int, max_session_lifetime: int | None = None) -> None:
+        now = int(time.time())
+        clock_allowance = settings.session_clock_skew_seconds
+        if until_timestamp <= 0:
+            raise ValueError("Revocation cutoff must be a positive unix timestamp")
+        if until_timestamp > now + clock_allowance:
+            raise ValueError("Revocation cutoff cannot be in the future beyond clock allowance")
+
+        effective_lifetime = max_session_lifetime or max(
+            settings.session_absolute_timeout_seconds,
+            settings.session_max_accepted_absolute_lifetime_seconds,
+        )
+        retention_deadline = until_timestamp + effective_lifetime + clock_allowance
+
+        if retention_deadline <= now:
+            return
+
         with self._lock:
-            self._revoked_users[user_id] = until_timestamp
+            if user_id in self._revoked_users:
+                curr_cutoff, curr_deadline = self._revoked_users[user_id]
+                new_cutoff = max(curr_cutoff, until_timestamp)
+                new_deadline = max(curr_deadline, retention_deadline)
+                self._revoked_users[user_id] = (new_cutoff, new_deadline)
+            else:
+                self._revoked_users[user_id] = (until_timestamp, retention_deadline)
             self._purge_expired_locked()
 
     def is_session_revoked(self, session_id: str, user_id: str, session_created_at: int) -> bool:
@@ -80,22 +105,31 @@ class InMemoryRevocationStore(BaseRevocationStore):
         with self._lock:
             exp = self._revoked_sessions.get(session_id)
             if exp is not None:
-                if exp > now:
+                if exp >= now:
                     return True
                 else:
                     del self._revoked_sessions[session_id]
 
-            user_revoked_until = self._revoked_users.get(user_id)
-            if user_revoked_until is not None and session_created_at <= user_revoked_until:
-                return True
+            user_entry = self._revoked_users.get(user_id)
+            if user_entry is not None:
+                cutoff, deadline = user_entry
+                if deadline >= now:
+                    if session_created_at <= cutoff:
+                        return True
+                else:
+                    del self._revoked_users[user_id]
 
         return False
 
     def _purge_expired_locked(self) -> None:
         now = int(time.time())
-        expired_sessions = [s_id for s_id, exp in self._revoked_sessions.items() if exp <= now]
+        expired_sessions = [s_id for s_id, exp in self._revoked_sessions.items() if exp < now]
         for s_id in expired_sessions:
             del self._revoked_sessions[s_id]
+
+        expired_users = [u_id for u_id, (_, deadline) in self._revoked_users.items() if deadline < now]
+        for u_id in expired_users:
+            del self._revoked_users[u_id]
 
     def clear_all(self) -> None:
         with self._lock:
@@ -108,15 +142,40 @@ RevocationDenylist = InMemoryRevocationStore
 
 
 class RedisRevocationStore(BaseRevocationStore):
-    """Distributed Redis-backed revocation store (AU-02 / Finding R01).
+    """Distributed Redis-backed revocation store (AU-02 / Finding R01 / P0-02).
 
     Keys:
-      revocation:session:{session_id} -> expires_at (TTL = max(1, expires_at - now))
-      revocation:user:{user_id} -> until_timestamp (TTL = max(1, until_timestamp - now))
+      revocation:session:{session_id} -> expires_at (TTL = max(1, expires_at - now + clock_allowance))
+      revocation:user:{user_id} -> cutoff (TTL = retention_deadline - now)
+        where retention_deadline = cutoff + max_session_lifetime + clock_allowance
 
     Fail-closed policy:
-      If Redis is unreachable, raises HTTPException(503) so that unverified
-      credentials are NEVER mistakenly treated as valid.
+      If Redis is unreachable or times out, raises HTTPException(503) so that
+      unverified credentials are NEVER mistakenly treated as valid.
+    """
+
+    _LUA_REVOKE_USER = """
+    local key = KEYS[1]
+    local new_cutoff = tonumber(ARGV[1])
+    local new_ttl = tonumber(ARGV[2])
+
+    local current_cutoff_str = redis.call('GET', key)
+    if current_cutoff_str then
+        local current_cutoff = tonumber(current_cutoff_str)
+        if new_cutoff > current_cutoff then
+            redis.call('SET', key, tostring(new_cutoff), 'EX', new_ttl)
+            return 1
+        else
+            local current_ttl = redis.call('TTL', key)
+            if new_ttl > current_ttl then
+                redis.call('EXPIRE', key, new_ttl)
+            end
+            return 0
+        end
+    else
+        redis.call('SET', key, tostring(new_cutoff), 'EX', new_ttl)
+        return 1
+    end
     """
 
     def __init__(self, redis_url: str | None = None) -> None:
@@ -134,7 +193,8 @@ class RedisRevocationStore(BaseRevocationStore):
         import redis
 
         now = int(time.time())
-        ttl = max(1, expires_at - now)
+        clock_allowance = settings.session_clock_skew_seconds
+        ttl = max(1, (expires_at - now) + clock_allowance)
         try:
             self._client.set(f"revocation:session:{session_id}", str(expires_at), ex=ttl)
         except (redis.RedisError, OSError) as exc:
@@ -143,13 +203,33 @@ class RedisRevocationStore(BaseRevocationStore):
                 detail="Revocation store unavailable",
             ) from exc
 
-    def revoke_user(self, user_id: str, until_timestamp: int) -> None:
+    def revoke_user(self, user_id: str, until_timestamp: int, max_session_lifetime: int | None = None) -> None:
         import redis
 
         now = int(time.time())
-        ttl = max(1, until_timestamp - now)
+        clock_allowance = settings.session_clock_skew_seconds
+        if until_timestamp <= 0:
+            raise ValueError("Revocation cutoff must be a positive unix timestamp")
+        if until_timestamp > now + clock_allowance:
+            raise ValueError("Revocation cutoff cannot be in the future beyond clock allowance")
+
+        effective_lifetime = max_session_lifetime or max(
+            settings.session_absolute_timeout_seconds,
+            settings.session_max_accepted_absolute_lifetime_seconds,
+        )
+        retention_deadline = until_timestamp + effective_lifetime + clock_allowance
+        ttl = retention_deadline - now
+        if ttl <= 0:
+            return
+
         try:
-            self._client.set(f"revocation:user:{user_id}", str(until_timestamp), ex=ttl)
+            self._client.eval(
+                self._LUA_REVOKE_USER,
+                1,
+                f"revocation:user:{user_id}",
+                str(until_timestamp),
+                str(ttl),
+            )
         except (redis.RedisError, OSError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -175,7 +255,7 @@ class RedisRevocationStore(BaseRevocationStore):
 
         if sess_exp_raw is not None:
             try:
-                if int(sess_exp_raw) > now:
+                if int(sess_exp_raw) >= now:
                     return True
             except ValueError:
                 return True
@@ -380,6 +460,53 @@ class SessionManager:
         """Revoke a specific session until its absolute expiry."""
         self.denylist.revoke_session(session.session_id, session.absolute_expires_at)
 
+    def revoke_user(
+        self,
+        user_id: str,
+        cutoff: int | None = None,
+        max_session_lifetime: int | None = None,
+    ) -> None:
+        """Revoke all active sessions for a user issued at or before cutoff timestamp."""
+        now = int(time.time())
+        actual_cutoff = cutoff if cutoff is not None else now
+        self.denylist.revoke_user(user_id, actual_cutoff, max_session_lifetime=max_session_lifetime)
+
+    def revoke_session_by_token(self, token: str) -> None:
+        """Revoke a session identified by a signed JWT session token.
+
+        - If token signature/claims are invalid or malformed: no-op (idempotent local cleanup).
+        - If token is already absolute-expired: no-op (already unusable everywhere).
+        - If token is already marked revoked: no-op (idempotent).
+        - If token is active or idle-expired: writes revocation to denylist until absolute expiry.
+        - If Redis fails: raises HTTPException(503).
+        """
+        try:
+            payload = verify_jwt_hs256(token, settings.jwt_secret_key.get_secret_value())
+        except ValueError:
+            return
+
+        if payload.get("type") != "session":
+            return
+
+        session_id = str(payload.get("session_id", ""))
+        user_id = str(payload.get("sub", ""))
+        abs_exp = int(payload.get("exp", 0))
+        created_at = int(payload.get("iat", 0))
+
+        if not session_id or not user_id or not abs_exp:
+            return
+
+        now = int(time.time())
+        if now > abs_exp:
+            return
+
+        # Check existing revocation status (raises 503 if Redis is unavailable)
+        if self.denylist.is_session_revoked(session_id, user_id, created_at):
+            return
+
+        # Write revocation marker (raises 503 if Redis is unavailable)
+        self.denylist.revoke_session(session_id, abs_exp)
+
 
 session_manager = SessionManager()
 
@@ -406,3 +533,11 @@ def clear_session_cookie(response: Response) -> None:
         secure=settings.session_cookie_secure,
         samesite=settings.session_cookie_same_site,  # type: ignore[arg-type]
     )
+
+
+def get_clear_session_cookie_headers() -> dict[str, str]:
+    """Generate Set-Cookie deletion headers for clearing the session cookie on exception responses."""
+    temp_resp = Response()
+    clear_session_cookie(temp_resp)
+    cookie_val = temp_resp.headers.get("set-cookie")
+    return {"Set-Cookie": cookie_val} if cookie_val else {}

@@ -20,6 +20,7 @@ from control_api.modules.identity.oidc import oidc_client
 from control_api.modules.identity.service import identity_service
 from control_api.modules.identity.session import (
     clear_session_cookie,
+    get_clear_session_cookie_headers,
     session_manager,
     set_session_cookie,
 )
@@ -207,7 +208,11 @@ async def logout(
     request: Request,
     response: Response,
 ) -> dict[str, str]:
-    """Revoke active session token, put session_id on revocation denylist, and clear cookie."""
+    """Revoke active session token, put session_id on revocation denylist, and clear cookie.
+
+    Idempotent local cleanup for missing, expired, or invalid credentials.
+    Fails closed with HTTP 503 and client cookie deletion if revocation store is unavailable.
+    """
     verify_csrf_or_origin(request)
 
     # Read cookie or header
@@ -217,11 +222,17 @@ async def logout(
 
     if token:
         try:
-            session_data = session_manager.verify_session_token(token)
-            session_manager.revoke_session(session_data)
-        except (HTTPException, ValueError):
-            # Idempotent logout: even if token was invalid/expired, proceed with cookie cleanup
-            pass
+            session_manager.revoke_session_by_token(token)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+                headers = dict(exc.headers) if exc.headers else {}
+                headers.update(get_clear_session_cookie_headers())
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Revocation store unavailable; local session cleared but server-side revocation could not be confirmed",
+                    headers=headers,
+                ) from exc
+            raise
 
     clear_session_cookie(response)
     return {"status": "logged_out"}

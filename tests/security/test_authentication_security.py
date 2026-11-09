@@ -43,7 +43,7 @@ from control_api.modules.identity.session import (
     SessionManager,
     session_manager,
 )
-from fastapi import status
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -537,3 +537,240 @@ def test_auth_r01_revocation_shared_across_manager_instances() -> None:
     with pytest.raises(Exception) as exc:
         manager_b.verify_session_token(token)
     assert "revoked" in str(exc.value.detail).lower()
+
+
+# ==============================================================================
+# AUTH-T11 / P0-01: Logout Error Handling & Infrastructure Failure Semantics
+# ==============================================================================
+
+def test_auth_p0_01_valid_logout_revokes_and_clears_cookie(client: TestClient) -> None:
+    """Valid logout successfully revokes session in store and clears cookie."""
+    uid = str(uuid4())
+    _sess, token = session_manager.create_session(uid, "https://idp.local", "sub-logout-1")
+    client.cookies.set(settings.session_cookie_name, token)
+
+    resp = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.json()["status"] == "logged_out"
+    assert "agent_session" in resp.headers.get("set-cookie", "")
+
+    # Replay must be rejected as revoked
+    with pytest.raises(HTTPException) as exc:
+        session_manager.verify_session_token(token)
+    assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "revoked" in str(exc.value.detail).lower()
+
+
+def test_auth_p0_01_idempotent_local_logout(client: TestClient) -> None:
+    """Missing, malformed, or already-revoked tokens perform idempotent local logout."""
+    # 1. Missing credentials
+    client.cookies.clear()
+    resp_missing = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+    assert resp_missing.status_code == status.HTTP_200_OK
+    assert resp_missing.json()["status"] == "logged_out"
+    assert "agent_session" in resp_missing.headers.get("set-cookie", "")
+
+    # 2. Malformed token
+    client.cookies.set(settings.session_cookie_name, "malformed.jwt.token")
+    resp_malformed = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+    assert resp_malformed.status_code == status.HTTP_200_OK
+    assert resp_malformed.json()["status"] == "logged_out"
+    assert "agent_session" in resp_malformed.headers.get("set-cookie", "")
+
+    # 3. Already revoked session
+    uid = str(uuid4())
+    sess, token = session_manager.create_session(uid, "https://idp.local", "sub-revoked")
+    session_manager.revoke_session(sess)
+    client.cookies.set(settings.session_cookie_name, token)
+    resp_already_revoked = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+    assert resp_already_revoked.status_code == status.HTTP_200_OK
+    assert resp_already_revoked.json()["status"] == "logged_out"
+
+
+def test_auth_p0_01_redis_failure_during_verification_or_revocation(client: TestClient) -> None:
+    """Redis 503 error on check or write must return HTTP 503 and delete cookie, never falsely reporting 200."""
+    uid = str(uuid4())
+    _sess, token = session_manager.create_session(uid, "https://idp.local", "sub-redis-fail")
+    client.cookies.set(settings.session_cookie_name, token)
+
+    # 1. Store fails during revocation check
+    with patch.object(
+        session_manager.denylist,
+        "is_session_revoked",
+        side_effect=HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Revocation store unavailable"),
+    ):
+        resp_fail_check = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+        assert resp_fail_check.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        # Set-Cookie MUST be present on the 503 response
+        assert "agent_session" in resp_fail_check.headers.get("set-cookie", "")
+        assert "Max-Age=0" in resp_fail_check.headers.get("set-cookie", "")
+        # Detail must indicate failure closed without leaking secrets
+        assert "Revocation store unavailable" in resp_fail_check.json()["detail"]
+        assert token not in resp_fail_check.text
+
+    # 2. Store fails during revocation write (e.g. write error or timeout)
+    with patch.object(
+        session_manager.denylist,
+        "revoke_session",
+        side_effect=HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Revocation store write timed out"),
+    ):
+        resp_fail_write = client.post("/v1/auth/logout", headers={"Origin": "http://localhost:8000"})
+        assert resp_fail_write.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert "agent_session" in resp_fail_write.headers.get("set-cookie", "")
+        assert "Max-Age=0" in resp_fail_write.headers.get("set-cookie", "")
+        assert token not in resp_fail_write.text
+
+
+def test_auth_p0_01_csrf_rejection_does_not_clear_cookie(client: TestClient) -> None:
+    """Untrusted origin must be rejected with 403 without clearing cookies."""
+    uid = str(uuid4())
+    _sess, token = session_manager.create_session(uid, "https://idp.local", "sub-csrf")
+    client.cookies.set(settings.session_cookie_name, token)
+
+    resp = client.post("/v1/auth/logout", headers={"Origin": "http://evil-attacker.test"})
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
+    # No deletion cookie should be issued on rejected CSRF
+    assert "agent_session" not in resp.headers.get("set-cookie", "")
+
+
+# ==============================================================================
+# AUTH-T12 / P0-02: User-Wide Revocation Cutoff, Monotonicity & Bounded Retention
+# ==============================================================================
+
+def test_auth_p0_02_user_revocation_cutoff_boundaries() -> None:
+    """Exact cutoff boundaries: <= cutoff is revoked, > cutoff remains valid."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+
+    t_cutoff = 1000000
+
+    # Session 1: issued strictly before cutoff (999999 < 1000000) -> REVOKED
+    _sess1, token_before = manager.create_session(uid, "https://idp.local", "sub-u", now=t_cutoff - 1)
+    # Session 2: issued at exact cutoff (1000000 == 1000000) -> REVOKED
+    _sess2, token_exact = manager.create_session(uid, "https://idp.local", "sub-u", now=t_cutoff)
+    # Session 3: issued strictly after cutoff (1000001 > 1000000) -> VALID
+    _sess3, token_after = manager.create_session(uid, "https://idp.local", "sub-u", now=t_cutoff + 1)
+
+    # Apply user-wide revocation with cutoff = t_cutoff
+    with patch("time.time", return_value=t_cutoff):
+        manager.revoke_user(uid, cutoff=t_cutoff)
+
+    # Verification checks
+    with patch("time.time", return_value=t_cutoff + 10):
+        # Before cutoff -> Rejected
+        with pytest.raises(HTTPException) as exc1:
+            manager.verify_session_token(token_before, now=t_cutoff + 10)
+        assert exc1.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "revoked" in str(exc1.value.detail).lower()
+
+        # At exact cutoff -> Rejected
+        with pytest.raises(HTTPException) as exc2:
+            manager.verify_session_token(token_exact, now=t_cutoff + 10)
+        assert exc2.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "revoked" in str(exc2.value.detail).lower()
+
+        # Strictly after cutoff -> Accepted
+        verified_after = manager.verify_session_token(token_after, now=t_cutoff + 10)
+        assert verified_after.user_id == uid
+
+
+def test_auth_p0_02_refresh_cannot_bypass_user_revocation() -> None:
+    """Refresh maintains original session created_at and cannot bypass user revocation."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1000000
+
+    sess, _token = manager.create_session(uid, "https://idp.local", "sub-u", now=t0)
+
+    # User revocation issued at t0 + 10
+    with patch("time.time", return_value=t0 + 10):
+        manager.revoke_user(uid, cutoff=t0 + 10)
+
+    # Refresh attempt at t0 + 20 must be denied
+    with patch("time.time", return_value=t0 + 20):
+        with pytest.raises(HTTPException) as exc:
+            manager.refresh_session(sess, now=t0 + 20)
+        assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "revoked" in str(exc.value.detail).lower()
+
+
+def test_auth_p0_02_monotonic_advance_and_out_of_order_protection() -> None:
+    """Repeated or out-of-order revocations cannot move cutoff backwards or shorten retention."""
+    store = InMemoryRevocationStore()
+    uid = str(uuid4())
+    t1 = 1000000
+    t2 = 1000500
+
+    with patch("time.time", return_value=t2):
+        # 1. First revocation at t2
+        store.revoke_user(uid, until_timestamp=t2, max_session_lifetime=3600)
+        cutoff1, deadline1 = store._revoked_users[uid]
+        assert cutoff1 == t2
+
+        # 2. Out-of-order revocation with older cutoff t1
+        store.revoke_user(uid, until_timestamp=t1, max_session_lifetime=3600)
+        cutoff2, deadline2 = store._revoked_users[uid]
+        # Must retain newer cutoff t2
+        assert cutoff2 == t2
+        # Must retain non-decreasing deadline
+        assert deadline2 >= deadline1
+
+
+def test_auth_p0_02_cutoff_input_validation() -> None:
+    """Invalid cutoff timestamps (negative, zero, far future) must be rejected."""
+    store = InMemoryRevocationStore()
+    uid = str(uuid4())
+    now = int(time.time())
+
+    # Negative cutoff
+    with pytest.raises(ValueError, match="positive unix timestamp"):
+        store.revoke_user(uid, until_timestamp=-10)
+
+    # Zero cutoff
+    with pytest.raises(ValueError, match="positive unix timestamp"):
+        store.revoke_user(uid, until_timestamp=0)
+
+    # Future cutoff beyond clock skew allowance (default 60s)
+    with pytest.raises(ValueError, match="cannot be in the future beyond clock allowance"):
+        store.revoke_user(uid, until_timestamp=now + 500)
+
+
+def test_auth_p0_02_bounded_retention_and_expiry_boundary() -> None:
+    """Sessions past retention boundary are guaranteed dead by absolute expiry."""
+    store = InMemoryRevocationStore()
+    manager = SessionManager(denylist=store)
+    uid = str(uuid4())
+    t0 = 1000000
+    lifetime = 3600
+    clock_skew = settings.session_clock_skew_seconds
+
+    with patch.object(settings, "session_absolute_timeout_seconds", lifetime):
+        sess, token = manager.create_session(uid, "https://idp.local", "sub-u", now=t0)
+
+        # Revoke user at t0
+        with patch("time.time", return_value=t0):
+            store.revoke_user(uid, until_timestamp=t0, max_session_lifetime=lifetime)
+
+        # Before retention deadline: rejected as revoked
+        t_active = t0 + lifetime - 100
+        with patch("time.time", return_value=t_active):
+            with pytest.raises(HTTPException) as exc_active:
+                manager.verify_session_token(token, now=t_active)
+            assert "revoked" in str(exc_active.value.detail).lower()
+
+        # At absolute expiration boundary (now == exp): rejected as revoked or expired
+        t_exact_exp = sess.absolute_expires_at
+        with patch("time.time", return_value=t_exact_exp):
+            with pytest.raises(HTTPException) as exc_boundary:
+                manager.verify_session_token(token, now=t_exact_exp)
+            assert exc_boundary.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+        # Past retention deadline: marker may be purged, but token is permanently absolute-expired
+        t_past_retention = t0 + lifetime + clock_skew + 10
+        with patch("time.time", return_value=t_past_retention):
+            with pytest.raises(HTTPException) as exc_past:
+                manager.verify_session_token(token, now=t_past_retention)
+            assert exc_past.value.status_code == status.HTTP_401_UNAUTHORIZED
+            assert "expired" in str(exc_past.value.detail).lower()
