@@ -152,6 +152,13 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
       S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
       S3_BUCKET: ${S3_BUCKET:-agent-platform-docs}
+      AUTH_STORE_TYPE: ${AUTH_STORE_TYPE:-redis}
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8080/realms/enterprise}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-enterprise-studio}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-enterprise-studio-client-secret-dev-default-32ch}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:3000/v1/auth/callback}
+      OIDC_REDIRECT_ALLOWLIST: ${OIDC_REDIRECT_ALLOWLIST:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000}
     healthcheck:
       test:
         [
@@ -166,6 +173,8 @@ services:
       start_period: 15s
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully

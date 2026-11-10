@@ -26,7 +26,7 @@ import pytest
 from agent_runtime.auth import verify_runtime_token
 from agent_runtime.settings import RuntimeSettings
 from control_api.core.database import get_db_session
-from control_api.core.settings import settings
+from control_api.core.settings import Settings, settings
 from control_api.main import app
 from control_api.modules.identity.crypto import (
     generate_pkce_pair,
@@ -35,17 +35,19 @@ from control_api.modules.identity.crypto import (
 )
 from control_api.modules.identity.oidc import (
     InMemoryAuthTransactionStore,
+    create_auth_transaction_store,
     oidc_client,
 )
 from control_api.modules.identity.service import identity_service
 from control_api.modules.identity.session import (
     InMemoryRevocationStore,
     SessionManager,
+    create_revocation_store,
     session_manager,
 )
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fixtures.oidc_test_server import OidcTestServer
@@ -1424,4 +1426,54 @@ def test_auth_p0_02_bounded_retention_and_expiry_boundary() -> None:
                 manager.verify_session_token(token, now=t_past_retention)
             assert exc_past.value.status_code == status.HTTP_401_UNAUTHORIZED
             assert "expired" in str(exc_past.value.detail).lower()
+
+
+def test_c04_auth_store_type_hardening():
+    """Finding C04: Reject invalid auth_store_type and forbid in-memory store in prod/staging."""
+    valid_db_url = "postgresql+psycopg://platform_app:pass@127.0.0.1:5432/db"
+    valid_jwt_secret = SecretStr("x" * 32)
+
+    # 1. Invalid typo string 'redsi' raises ValidationError
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            database_url=valid_db_url,
+            jwt_secret_key=valid_jwt_secret,
+            auth_store_type="redsi",
+        )
+    assert "Invalid auth_store_type" in str(exc_info.value) or "auth_store_type" in str(exc_info.value)
+
+    # 2. Case normalization works for 'REDIS' and 'Memory'
+    s_redis = Settings(
+        database_url=valid_db_url,
+        jwt_secret_key=valid_jwt_secret,
+        auth_store_type=" REDIS ",
+        environment="development",
+    )
+    assert s_redis.auth_store_type == "redis"
+
+    s_mem = Settings(
+        database_url=valid_db_url,
+        jwt_secret_key=valid_jwt_secret,
+        auth_store_type="Memory",
+        environment="development",
+    )
+    assert s_mem.auth_store_type == "memory"
+
+    # 3. In-memory store is forbidden in production and staging
+    for env in ("production", "PRODUCTION", "staging", "Staging"):
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(
+                database_url=valid_db_url,
+                jwt_secret_key=valid_jwt_secret,
+                auth_store_type="memory",
+                environment=env,
+            )
+        assert "In-memory auth store is strictly forbidden" in str(exc_info.value)
+
+    # 4. Factories raise ValueError on unsupported store type
+    with patch.object(settings, "auth_store_type", "unknown"):
+        with pytest.raises(ValueError, match="Unsupported auth_store_type"):
+            create_revocation_store()
+        with pytest.raises(ValueError, match="Unsupported auth_store_type"):
+            create_auth_transaction_store()
 

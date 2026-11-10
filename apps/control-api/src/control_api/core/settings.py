@@ -1,4 +1,6 @@
-from pydantic import Field, SecretStr, field_validator
+from typing import Any, Literal
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,9 +20,9 @@ class Settings(BaseSettings):
     database_max_overflow: int = Field(default=10, ge=0, le=100)
     database_pool_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
 
-    # Redis & Shared Auth Store Settings (AU-02 / Finding R01)
+    # Redis & Shared Auth Store Settings (AU-02 / Finding R01 / Finding C04)
     redis_url: str = "redis://127.0.0.1:6379/0"
-    auth_store_type: str = "redis"
+    auth_store_type: Literal["redis", "memory"] = "redis"
     redis_socket_timeout_seconds: float = 2.0
     redis_connect_timeout_seconds: float = 2.0
 
@@ -67,6 +69,24 @@ class Settings(BaseSettings):
     oidc_correlation_cookie_name: str = "agent_oidc_corr"
     oidc_correlation_cookie_secure: bool = False
     oidc_correlation_cookie_same_site: str = "lax"
+
+    @field_validator("auth_store_type", mode="before")
+    @classmethod
+    def normalize_auth_store_type(cls, value: Any) -> str:
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("redis", "memory"):
+                return val
+            raise ValueError(f"Invalid auth_store_type '{value}'. Must be 'redis' or 'memory'")
+        raise ValueError(f"auth_store_type must be a string, got {type(value).__name__}")
+
+    @model_validator(mode="after")
+    def validate_production_auth_store(self) -> "Settings":
+        if self.environment.strip().lower() in ("production", "staging") and self.auth_store_type == "memory":
+            raise ValueError(
+                "In-memory auth store is strictly forbidden in production and staging environments"
+            )
+        return self
 
     @field_validator("database_url")
     @classmethod

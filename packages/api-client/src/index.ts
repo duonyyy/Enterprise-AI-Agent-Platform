@@ -90,14 +90,23 @@ export interface WorkspaceTokenResponse {
 }
 
 export class ApiClientError extends Error {
+  public readonly status: number;
+  public readonly statusText: string;
+  public readonly body?: unknown;
+  public readonly requestId?: string;
+
   constructor(
-    public readonly status: number,
-    public readonly statusText: string,
-    public readonly body?: unknown,
-    public readonly requestId?: string
+    status: number,
+    statusText: string,
+    body?: unknown,
+    requestId?: string
   ) {
     super(`API Error ${status} (${statusText})`);
     this.name = "ApiClientError";
+    this.status = status;
+    this.statusText = statusText;
+    this.body = body;
+    this.requestId = requestId;
   }
 
   get isUnauthorized(): boolean {
@@ -121,20 +130,34 @@ export interface ClientConfig {
   baseUrl?: string;
   getToken?: () => string | null | Promise<string | null>;
   timeoutMs?: number;
+  onUnauthorized?: () => void;
+  autoRefreshOn401?: boolean;
+  credentials?: RequestCredentials;
 }
 
 export class ControlApiClientV2 {
   private readonly baseUrl: string;
   private readonly getToken?: () => string | null | Promise<string | null>;
   private readonly timeoutMs: number;
+  private onUnauthorizedCallback?: () => void;
+  private readonly autoRefreshOn401: boolean;
+  private readonly defaultCredentials?: RequestCredentials;
+  private refreshPromise: Promise<boolean> | null = null;
 
   constructor(config: ClientConfig = {}) {
     this.baseUrl = config.baseUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost:8000");
     this.getToken = config.getToken;
     this.timeoutMs = config.timeoutMs || 15000;
+    this.onUnauthorizedCallback = config.onUnauthorized;
+    this.autoRefreshOn401 = config.autoRefreshOn401 ?? true;
+    this.defaultCredentials = config.credentials;
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  public setOnUnauthorized(callback: (() => void) | undefined): void {
+    this.onUnauthorizedCallback = callback;
+  }
+
+  private async request<T>(path: string, options: RequestInit = {}, isRetry: boolean = false): Promise<T> {
     const url = `${this.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
     const headers = new Headers(options.headers);
 
@@ -161,11 +184,15 @@ export class ControlApiClientV2 {
       : controller.signal;
 
     try {
-      const response = await fetch(url, {
+      const fetchInit: RequestInit = {
         ...options,
+        credentials: options.credentials ?? this.defaultCredentials ?? "same-origin",
+        cache: options.cache ?? "no-store",
         headers,
         signal: mergedSignal,
-      });
+      };
+
+      const response = await fetch(url, fetchInit);
 
       const requestId = response.headers.get("x-request-id") || undefined;
 
@@ -176,7 +203,37 @@ export class ControlApiClientV2 {
         } catch {
           errorBody = await response.text();
         }
-        throw new ApiClientError(response.status, response.statusText, errorBody, requestId);
+        const error = new ApiClientError(response.status, response.statusText, errorBody, requestId);
+
+        if (response.status === 401) {
+          const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+          const isAuthEndpoint =
+            normalizedPath.startsWith("/v1/auth/login") ||
+            normalizedPath.startsWith("/v1/auth/callback") ||
+            normalizedPath.startsWith("/v1/auth/refresh") ||
+            normalizedPath.startsWith("/v1/auth/logout");
+
+          if (this.autoRefreshOn401 && !isRetry && !isAuthEndpoint) {
+            if (!this.refreshPromise) {
+              this.refreshPromise = this.refreshSession()
+                .then(() => true)
+                .catch(() => false)
+                .finally(() => {
+                  this.refreshPromise = null;
+                });
+            }
+            const refreshed = await this.refreshPromise;
+            if (refreshed) {
+              return this.request<T>(path, options, true);
+            }
+          }
+
+          if (this.onUnauthorizedCallback && normalizedPath !== "/v1/auth/refresh") {
+            this.onUnauthorizedCallback();
+          }
+        }
+
+        throw error;
       }
 
       if (response.status === 204) {

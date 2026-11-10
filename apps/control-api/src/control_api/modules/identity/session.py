@@ -952,9 +952,13 @@ class RedisRevocationStore(BaseRevocationStore):
 
 
 def create_revocation_store() -> BaseRevocationStore:
-    if settings.auth_store_type == "redis":
+    store_type = settings.auth_store_type.lower()
+    if store_type == "redis":
         return RedisRevocationStore(settings.redis_url)
-    return InMemoryRevocationStore()
+    elif store_type == "memory":
+        return InMemoryRevocationStore()
+    else:
+        raise ValueError(f"Unsupported auth_store_type: {settings.auth_store_type}")
 
 
 # Global revocation store singleton

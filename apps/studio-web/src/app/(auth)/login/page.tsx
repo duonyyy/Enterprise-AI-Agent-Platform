@@ -1,9 +1,22 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button, BrandIcon } from "@enterprise/ui";
-import { defaultApiClient, CurrentUserResponse } from "@enterprise/api-client";
+import { defaultApiClient, CurrentUserResponse, ApiClientError } from "@enterprise/api-client";
+
+function broadcastLogout() {
+  try {
+    if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+      const channel = new BroadcastChannel("enterprise_auth_channel");
+      channel.postMessage("LOGOUT");
+      channel.close();
+    }
+    localStorage.setItem("enterprise_auth_logout", Date.now().toString());
+  } catch {
+    // Ignore environments where BroadcastChannel/localStorage is unavailable
+  }
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -11,17 +24,57 @@ function LoginForm() {
   const [isLoading, setIsLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUserResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
+  // Cross-tab logout synchronization (Finding R08 / D4-C)
   useEffect(() => {
-    // Check error in search params
+    let authChannel: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+        authChannel = new BroadcastChannel("enterprise_auth_channel");
+        authChannel.onmessage = (event) => {
+          if (event.data === "LOGOUT") {
+            setCurrentUser(null);
+            setInfoMessage("Bạn đã đăng xuất từ tab khác.");
+          }
+        };
+      }
+    } catch {
+      // Ignore channel errors
+    }
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "enterprise_auth_logout" && e.newValue) {
+        setCurrentUser(null);
+        setInfoMessage("Bạn đã đăng xuất từ tab khác.");
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      authChannel?.close();
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  const bootstrapUser = useCallback(() => {
+    // Check error & info query parameters
     const err = searchParams?.get("error");
     const desc = searchParams?.get("error_description");
+    const loggedOut = searchParams?.get("logged_out");
+
     if (err === "session_expired") {
       setErrorMessage("Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại.");
+    } else if (err === "logout_degraded") {
+      setErrorMessage("Đã xóa phiên trên trình duyệt, nhưng máy chủ tạm thời chưa thể xác nhận thu hồi phiên tập trung (503).");
     } else if (err === "unauthorized" || err === "auth_failed") {
       setErrorMessage("Xác thực không thành công hoặc phiên làm việc đã bị thu hồi.");
     } else if (err) {
       setErrorMessage(desc ? `Lỗi xác thực: ${desc}` : `Đăng nhập không thành công (${err}).`);
+    }
+
+    if (loggedOut === "1" && !err) {
+      setInfoMessage("Bạn đã đăng xuất khỏi hệ thống.");
     }
 
     // Check if user is already authenticated
@@ -30,24 +83,42 @@ function LoginForm() {
       .then((user) => {
         setCurrentUser(user);
         if (user.workspaces && user.workspaces.length > 0) {
-          const targetWorkspace = user.workspaces[0]?.workspace_id;
-          if (targetWorkspace) {
-            router.push(`/w/${targetWorkspace}/agents`);
+          const returnTo = searchParams?.get("return_to");
+          let destination: string | null = null;
+
+          if (returnTo && returnTo.startsWith("/w/")) {
+            const match = returnTo.match(/^\/w\/([^/?#]+)/);
+            if (match && match[1]) {
+              const targetWid = match[1];
+              if (user.workspaces.some((w) => w.workspace_id === targetWid)) {
+                destination = returnTo;
+              }
+            }
           }
+
+          if (!destination) {
+            destination = `/w/${user.workspaces[0]?.workspace_id}/agents`;
+          }
+
+          router.replace(destination);
         }
       })
       .catch((err: unknown) => {
-        // Distinguish unauthenticated (401) from backend infrastructure failure (503)
         setCurrentUser(null);
-        if (err && typeof err === "object" && "status" in err && (err as { status: number }).status !== 401) {
-          setErrorMessage("Dịch vụ xác thực hoặc máy chủ đang gián đoạn. Vui lòng thử lại sau.");
+        if (err instanceof ApiClientError && err.status !== 401) {
+          setErrorMessage("Dịch vụ xác thực hoặc máy chủ đang gián đoạn (503). Vui lòng thử lại sau.");
         }
       });
   }, [router, searchParams]);
 
+  useEffect(() => {
+    bootstrapUser();
+  }, [bootstrapUser]);
+
   const handleOidcLogin = async () => {
     setIsLoading(true);
     setErrorMessage(null);
+    setInfoMessage(null);
     try {
       const returnTo = searchParams?.get("return_to") || "/login";
       const { authorization_url } = await defaultApiClient.getLoginUrl(returnTo);
@@ -68,12 +139,21 @@ function LoginForm() {
 
   const handleLogout = async () => {
     setIsLoading(true);
+    setInfoMessage(null);
+    setErrorMessage(null);
     try {
       await defaultApiClient.logout();
+      broadcastLogout();
       setCurrentUser(null);
-      setErrorMessage("Đã đăng xuất thành công.");
-    } catch {
-      setErrorMessage("Lỗi khi đăng xuất.");
+      setInfoMessage("Bạn đã đăng xuất khỏi hệ thống.");
+    } catch (err: unknown) {
+      broadcastLogout();
+      setCurrentUser(null);
+      if (err instanceof ApiClientError && err.status === 503) {
+        setErrorMessage("Đã xóa phiên trên trình duyệt, nhưng máy chủ tạm thời chưa thể xác nhận thu hồi phiên tập trung (503).");
+      } else {
+        setErrorMessage("Lỗi khi đăng xuất.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -143,6 +223,24 @@ function LoginForm() {
           </div>
         </div>
 
+        {/* Info Alert */}
+        {infoMessage && (
+          <div
+            role="status"
+            style={{
+              padding: "12px 16px",
+              borderRadius: "var(--radius-md)",
+              backgroundColor: "rgba(16, 185, 129, 0.1)",
+              border: "1px solid rgba(16, 185, 129, 0.3)",
+              color: "#059669",
+              fontSize: "13px",
+              lineHeight: 1.4,
+            }}
+          >
+            {infoMessage}
+          </div>
+        )}
+
         {/* Error Alert */}
         {errorMessage && (
           <div
@@ -161,7 +259,7 @@ function LoginForm() {
           </div>
         )}
 
-        {/* Authenticated user but no workspaces */}
+        {/* Authenticated user but no workspaces (Empty Workspace State) */}
         {currentUser && currentUser.workspaces.length === 0 && (
           <div
             style={{

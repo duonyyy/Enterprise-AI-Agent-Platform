@@ -202,9 +202,13 @@ class RedisAuthTransactionStore(BaseAuthTransactionStore):
 
 
 def create_auth_transaction_store() -> BaseAuthTransactionStore:
-    if settings.auth_store_type == "redis":
+    store_type = settings.auth_store_type.lower()
+    if store_type == "redis":
         return RedisAuthTransactionStore(settings.redis_url)
-    return InMemoryAuthTransactionStore()
+    elif store_type == "memory":
+        return InMemoryAuthTransactionStore()
+    else:
+        raise ValueError(f"Unsupported auth_store_type: {settings.auth_store_type}")
 
 
 auth_transaction_store: BaseAuthTransactionStore = create_auth_transaction_store()
