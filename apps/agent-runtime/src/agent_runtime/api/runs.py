@@ -42,6 +42,8 @@ async def start_run(
             detail="Workspace scope denied: principal does not belong to requested workspace",
         )
 
+    principal.require_scope("run:start")
+
     if idempotency_key is None or not idempotency_key.strip() or len(idempotency_key) > 200:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -63,7 +65,11 @@ async def start_run(
 
     run_id = str(uuid4())
 
-    async with scoped_session(principal.tenant_id, principal.workspace_id) as session:
+    async with scoped_session(
+        principal.tenant_id,
+        principal.workspace_id,
+        principal.user_id,
+    ) as session:
         # Create run in runtime.runs
         inserted = await session.execute(
             text("""
@@ -173,6 +179,7 @@ async def get_run(
     run_id: str,
     principal: CurrentRuntimePrincipal,
 ) -> dict:
+    principal.require_scope("run:read")
     try:
         run_uuid = str(UUID(run_id))
     except ValueError as exc:
@@ -181,7 +188,11 @@ async def get_run(
             detail="Invalid run_id UUID format",
         ) from exc
 
-    async with scoped_session(principal.tenant_id, principal.workspace_id) as session:
+    async with scoped_session(
+        principal.tenant_id,
+        principal.workspace_id,
+        principal.user_id,
+    ) as session:
         result = await session.execute(
             text("""
                 SELECT id, agent_version_id, conversation_id, workflow_version_id,
@@ -222,6 +233,7 @@ async def resume_run(
     run_id: str,
     principal: CurrentRuntimePrincipal,
 ) -> dict:
+    principal.require_scope("run:start")
     try:
         run_uuid = str(UUID(run_id))
     except ValueError as exc:
@@ -230,7 +242,11 @@ async def resume_run(
             detail="Invalid run_id UUID format",
         ) from exc
 
-    async with scoped_session(principal.tenant_id, principal.workspace_id) as session:
+    async with scoped_session(
+        principal.tenant_id,
+        principal.workspace_id,
+        principal.user_id,
+    ) as session:
         # Check current run status
         result = await session.execute(
             text("""

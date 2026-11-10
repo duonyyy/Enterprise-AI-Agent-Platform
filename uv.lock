@@ -38,6 +38,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -67,6 +68,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.2.0" },
     { name = "rank-bm25", marker = "extra == 'bm25'", specifier = "==0.2.2" },
     { name = "rank-bm25", marker = "extra == 'retrieval'", specifier = "==0.2.2" },
+    { name = "redis", specifier = ">=5.0.0" },
     { name = "sentence-transformers", marker = "extra == 'retrieval'", specifier = "==5.5.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
     { name = "torch", marker = "extra == 'retrieval'", specifier = "==2.12.0" },

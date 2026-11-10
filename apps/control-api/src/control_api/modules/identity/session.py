@@ -87,6 +87,20 @@ class BaseRevocationStore(ABC):
         """
 
     @abstractmethod
+    def verify_parent_session(
+        self,
+        session_id: str,
+        user_id: str,
+        now: int | None = None,
+    ) -> tuple[str, StoredSessionState | None]:
+        """Verify that a parent browser session is active and unrevoked (D3-B).
+
+        Does not require matching rotation_version (`ver`) so parent session refresh
+        does not invalidate already-issued short-lived workspace tokens, while logout,
+        user revocation, idle timeout, or absolute timeout immediately rejects them.
+        """
+
+    @abstractmethod
     def rotate_session_state(
         self,
         session_id: str,
@@ -226,6 +240,45 @@ class InMemoryRevocationStore(BaseRevocationStore):
 
             if state.rotation_version != expected_version:
                 return "VERSION_MISMATCH", None
+
+            return "OK", state
+
+    def verify_parent_session(
+        self,
+        session_id: str,
+        user_id: str,
+        now: int | None = None,
+    ) -> tuple[str, StoredSessionState | None]:
+        current = now if now is not None else int(time.time())
+        with self._lock:
+            self._purge_expired_locked(current)
+            exp = self._revoked_sessions.get(session_id)
+            if exp is not None:
+                if exp >= current:
+                    return "REVOKED", None
+                del self._revoked_sessions[session_id]
+
+            entry = self._sessions.get(session_id)
+            if entry is None:
+                return "MISSING", None
+            state, _ = entry
+
+            if (
+                state.session_id != session_id
+                or state.user_id != user_id
+                or state.rotation_version < 1
+            ):
+                return "CORRUPT", None
+
+            if self._is_revoked_locked(session_id, state.user_id, state.created_at, current):
+                return "REVOKED", None
+
+            if current >= state.absolute_expires_at:
+                del self._sessions[session_id]
+                return "ABSOLUTE_EXPIRED", None
+
+            if current >= state.idle_expires_at:
+                return "IDLE_EXPIRED", None
 
             return "OK", state
 
@@ -691,6 +744,70 @@ class RedisRevocationStore(BaseRevocationStore):
 
         return "OK", state
 
+    def verify_parent_session(
+        self,
+        session_id: str,
+        user_id: str,
+        now: int | None = None,
+    ) -> tuple[str, StoredSessionState | None]:
+        import redis
+
+        try:
+            pipe = self._client.pipeline()
+            pipe.get(f"revocation:session:{session_id}")
+            pipe.get(f"revocation:user:{user_id}")
+            pipe.get(f"auth:session:{session_id}")
+            if now is None:
+                pipe.time()
+            results = pipe.execute()
+        except (redis.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+
+        sess_exp_raw = results[0]
+        user_until_raw = results[1]
+        raw_state = results[2]
+        if now is not None:
+            current = now
+        else:
+            redis_time = results[3]
+            current = (
+                int(redis_time[0])
+                if isinstance(redis_time, (tuple, list)) and redis_time
+                else int(time.time())
+            )
+
+        if sess_exp_raw is not None:
+            try:
+                if int(sess_exp_raw) >= current:
+                    return "REVOKED", None
+            except ValueError:
+                return "REVOKED", None
+
+        if raw_state is None:
+            return "MISSING", None
+
+        state = _parse_stored_session_state(raw_state if isinstance(raw_state, str) else None)
+        if state is None:
+            return "CORRUPT", None
+
+        if state.session_id != session_id or state.user_id != user_id:
+            return "CORRUPT", None
+
+        if user_until_raw is not None:
+            try:
+                if state.created_at <= int(user_until_raw):
+                    return "REVOKED", None
+            except ValueError:
+                return "REVOKED", None
+
+        if current >= state.absolute_expires_at:
+            return "ABSOLUTE_EXPIRED", None
+
+        if current >= state.idle_expires_at:
+            return "IDLE_EXPIRED", None
+
+        return "OK", state
+
     def rotate_session_state(
         self,
         session_id: str,
@@ -1077,6 +1194,33 @@ class SessionManager:
             absolute_expires_at=state.absolute_expires_at,
             rotation_version=state.rotation_version,
         )
+
+    def verify_parent_session_active(
+        self,
+        session_id: str,
+        user_id: str,
+        now: int | None = None,
+    ) -> StoredSessionState:
+        """Verify that a scoped workspace token's parent session is active and unrevoked (D3-B)."""
+        try:
+            UUID(session_id)
+            UUID(user_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid session identifier claims",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
+
+        status_code, state = self.denylist.verify_parent_session(
+            session_id=session_id,
+            user_id=user_id,
+            now=now,
+        )
+        if status_code != "OK" or state is None:
+            self._raise_for_store_status(status_code)
+            raise AssertionError("unreachable")
+        return state
 
     def rotate_session_by_token(self, token: str, now: int | None = None) -> tuple[SessionData, str]:
         """Verify presented session token and atomically rotate it to the next credential version."""

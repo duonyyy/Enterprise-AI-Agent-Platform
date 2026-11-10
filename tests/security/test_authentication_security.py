@@ -464,9 +464,13 @@ def test_auth_r05_scoped_token_cannot_exchange_or_reissue_after_logout(
         json={"workspace_id": wb},
         headers={"Authorization": f"Bearer {access_token_a}"},
     )
-    # MUST BE DENIED: Active application session required for token exchange!
+    # MUST BE DENIED: Active application session required for token exchange or parent session revoked!
     assert reissue_resp.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "active application session required" in reissue_resp.json()["detail"].lower()
+    detail_lower = reissue_resp.json()["detail"].lower()
+    assert (
+        "active application session required" in detail_lower
+        or "session has been revoked" in detail_lower
+    )
 
 
 # ==============================================================================
@@ -1420,3 +1424,4 @@ def test_auth_p0_02_bounded_retention_and_expiry_boundary() -> None:
                 manager.verify_session_token(token, now=t_past_retention)
             assert exc_past.value.status_code == status.HTTP_401_UNAUTHORIZED
             assert "expired" in str(exc_past.value.detail).lower()
+

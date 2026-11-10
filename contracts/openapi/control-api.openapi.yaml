@@ -177,36 +177,66 @@ paths:
   /v1/workspaces/{workspace_id}/agents:
     get:
       summary: List agents
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Success }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
     post:
       summary: Create agent draft
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '201': { description: Created }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
     post:
       summary: Atomically publish immutable agent version
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string } }
+        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: agent_id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Published }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/approvals:
     get:
       summary: List pending approval requests
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Success }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/approvals/{approval_id}/decision:
     post:
       summary: Submit CAS approval decision
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string } }
-        - { name: approval_id, in: path, required: true, schema: { type: string } }
+        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: approval_id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200': { description: Decision committed }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
 components:
   securitySchemes:
     SessionCookie:

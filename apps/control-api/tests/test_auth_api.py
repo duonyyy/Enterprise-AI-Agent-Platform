@@ -116,14 +116,26 @@ def mock_db_session(mock_db: MockDatabaseContext) -> AsyncSession:
             match = None
             for m in mock_db.memberships_db:
                 if str(m.get("user_id")) == uid and str(m.get("workspace_id")) == wid and m.get("status") == "active":
-                    match = {"tenant_id": m.get("tenant_id"), "role": m.get("role")}
+                    match = {
+                        "tenant_id": m.get("tenant_id"),
+                        "role": m.get("role"),
+                        "tenant_status": m.get("tenant_status", "active"),
+                        "workspace_status": m.get("workspace_status", "active"),
+                    }
                     break
             res.mappings = lambda: MockMappings(item=match)
             return res
 
         if ("FROM iam.memberships m" in sql and "JOIN iam.workspaces w" in sql) or "iam.get_user_workspaces" in sql:
             uid = str(params.get("user_id"))
-            user_memberships = [m for m in mock_db.memberships_db if str(m.get("user_id")) == uid and m.get("status") == "active"]
+            user_memberships = [
+                m
+                for m in mock_db.memberships_db
+                if str(m.get("user_id")) == uid
+                and m.get("status") == "active"
+                and m.get("tenant_status", "active") == "active"
+                and m.get("workspace_status", "active") == "active"
+            ]
             res.mappings = lambda: MockMappings(items=user_memberships)
             return res
 

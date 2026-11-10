@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -16,17 +17,126 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_api.core.database import get_db_session
+from control_api.core.database import get_db_session, set_rls_context
 from control_api.core.settings import settings
 from control_api.modules.identity.session import SessionData, session_manager
 
+logger = logging.getLogger(__name__)
+
 ROLE_PERMISSIONS: dict[str, list[str]] = {
-    "owner": ["agent:*", "workflow:*", "approval:*", "tool:*", "skill:*", "mcp:*"],
-    "admin": ["agent:*", "workflow:*", "approval:*", "tool:*", "skill:*", "mcp:*"],
-    "developer": ["agent:read", "agent:create", "agent:edit", "run:start", "run:read", "skill:read"],
-    "operator": ["agent:read", "run:start", "run:read", "approval:read"],
-    "viewer": ["agent:read", "run:read", "skill:read"],
+    "owner": [
+        "agent:*",
+        "workflow:*",
+        "approval:*",
+        "tool:*",
+        "skill:*",
+        "mcp:*",
+        "run:*",
+        "runs:read",
+        "runs:write",
+        "runs:execute",
+    ],
+    "admin": [
+        "agent:*",
+        "workflow:*",
+        "approval:*",
+        "tool:*",
+        "skill:*",
+        "mcp:*",
+        "run:*",
+        "runs:read",
+        "runs:write",
+        "runs:execute",
+    ],
+    "maintainer": [
+        "agent:*",
+        "workflow:*",
+        "approval:read",
+        "tool:*",
+        "skill:*",
+        "mcp:*",
+        "run:*",
+        "runs:read",
+        "runs:write",
+        "runs:execute",
+    ],
+    "developer": [
+        "agent:read",
+        "agent:create",
+        "agent:edit",
+        "agent:publish",
+        "skill:read",
+        "skill:create",
+        "skill:publish",
+        "mcp:read",
+        "mcp:connection:manage",
+        "run:start",
+        "run:read",
+        "runs:read",
+        "runs:write",
+        "runs:execute",
+    ],
+    "operator": [
+        "agent:read",
+        "skill:read",
+        "mcp:read",
+        "approval:read",
+        "approval:decide",
+        "run:start",
+        "run:read",
+        "runs:read",
+        "runs:write",
+        "runs:execute",
+    ],
+    "viewer": [
+        "agent:read",
+        "skill:read",
+        "mcp:read",
+        "run:read",
+        "runs:read",
+    ],
 }
+
+
+def compute_effective_permissions(
+    role_permissions: list[str],
+    token_scopes: list[str] | None,
+) -> list[str]:
+    """Compute effective permissions from current DB role permissions intersected with token scopes (D3-B).
+
+    A scoped token can only narrow permissions, never expand beyond the current DB role.
+    """
+    if token_scopes is None:
+        return list(role_permissions)
+
+    scope_set = {str(s) for s in token_scopes if isinstance(s, str)}
+    effective: list[str] = []
+
+    def _allowed_by_role(perm: str) -> bool:
+        ns = perm.split(":", 1)[0]
+        return perm in role_permissions or f"{ns}:*" in role_permissions
+
+    def _allowed_by_token(perm: str) -> bool:
+        ns = perm.split(":", 1)[0]
+        return perm in scope_set or f"{ns}:*" in scope_set
+
+    for perm in role_permissions:
+        if perm.endswith(":*"):
+            if perm in scope_set:
+                effective.append(perm)
+            else:
+                prefix = perm[:-1]
+                for s in sorted(scope_set):
+                    if s.startswith(prefix) and s not in effective:
+                        effective.append(s)
+        elif _allowed_by_token(perm) and perm not in effective:
+            effective.append(perm)
+
+    for s in sorted(scope_set):
+        if _allowed_by_role(s) and s not in effective:
+            effective.append(s)
+
+    return effective
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +322,13 @@ async def get_current_authenticated_user(
                 issuer=session_data.issuer,
                 subject=session_data.subject,
             )
-        # Scoped access token acting as bearer: session_data is None (confinement enforced at /token)
+        # Scoped access token acting as bearer: must carry a valid, active parent session_id (D3-B)
+        token_session_id = _required_uuid_claim(payload, "session_id")
+        session_manager.verify_parent_session_active(
+            session_id=token_session_id,
+            user_id=user_id,
+        )
+        # session_data is None so /v1/auth/token and /v1/auth/refresh reject scoped tokens
         return AuthenticatedUserContext(
             user_id=user_id,
             session_data=None,
@@ -243,7 +359,10 @@ async def get_current_principal(
     try:
         normalized_workspace_id = str(UUID(workspace_id))
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active workspace membership required",
+        ) from exc
 
     # Case A: Bearer token provided
     if authorization and authorization.startswith("Bearer "):
@@ -260,17 +379,35 @@ async def get_current_principal(
                 workspace_id=normalized_workspace_id,
             )
 
-        # Scoped API token: check token_workspace_id matches path workspace_id
+        # Scoped API token: verify parent session_id is active & unrevoked in Redis (D3-B)
+        token_session_id = _required_uuid_claim(payload, "session_id")
+        session_manager.verify_parent_session_active(
+            session_id=token_session_id,
+            user_id=user_id,
+        )
+
+        # Check token_workspace_id matches path workspace_id
         token_workspace_id = _required_uuid_claim(payload, "workspace_id")
-        tenant_id = _required_uuid_claim(payload, "tenant_id")
+        token_tenant_id = _required_uuid_claim(payload, "tenant_id")
         if normalized_workspace_id != token_workspace_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Workspace scope denied")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Workspace scope denied",
+            )
+
+        raw_scopes = payload.get("scopes")
+        token_scopes = (
+            [str(s) for s in raw_scopes if isinstance(s, str)]
+            if isinstance(raw_scopes, list)
+            else None
+        )
 
         return await _verify_membership_and_build_principal(
             session=session,
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant_id=token_tenant_id,
             workspace_id=normalized_workspace_id,
+            token_scopes=token_scopes,
         )
 
     # Case B: Session Cookie provided
@@ -291,91 +428,95 @@ async def _resolve_principal_from_user_id(
     user_id: str,
     workspace_id: str,
 ) -> AuthenticatedPrincipal:
-    """Resolve tenant_id, role, and active membership for a user in a given workspace (Finding R03)."""
-    try:
-        try:
-            stmt_func = text("SELECT * FROM iam.resolve_user_workspace_membership(:user_id, :workspace_id)")
-            row = (
-                await session.execute(stmt_func, {"user_id": user_id, "workspace_id": workspace_id})
-            ).mappings().one_or_none()
-        except SQLAlchemyError:
-            stmt = text(
-                "SELECT tenant_id, role "
-                "FROM iam.memberships "
-                "WHERE workspace_id = CAST(:workspace_id AS uuid) "
-                "  AND user_id = CAST(:user_id AS uuid) "
-                "  AND status = 'active'"
-            )
-            row = (
-                await session.execute(stmt, {"workspace_id": workspace_id, "user_id": user_id})
-            ).mappings().one_or_none()
-    except SQLAlchemyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Identity store unavailable",
-        ) from exc
-
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Active workspace membership required",
-        )
-
-    tenant_id = str(row["tenant_id"])
+    """Resolve tenant_id, role, and active membership/workspace/tenant for a user (ADR-018 / D3-A..D3-D)."""
     return await _verify_membership_and_build_principal(
         session=session,
         user_id=user_id,
-        tenant_id=tenant_id,
+        tenant_id=None,
         workspace_id=workspace_id,
+        token_scopes=None,
     )
 
 
 async def _verify_membership_and_build_principal(
     session: AsyncSession,
     user_id: str,
-    tenant_id: str,
+    tenant_id: str | None,
     workspace_id: str,
+    token_scopes: list[str] | None = None,
 ) -> AuthenticatedPrincipal:
     try:
-        await session.execute(
-            text(
-                "SELECT set_config('app.tenant_id', :tenant_id, true), "
-                "set_config('app.workspace_id', :workspace_id, true)"
-            ),
-            {"tenant_id": tenant_id, "workspace_id": workspace_id},
-        )
-        membership = (
-            await session.execute(
-                text(
-                    "SELECT role FROM iam.memberships "
-                    "WHERE tenant_id = CAST(:tenant_id AS uuid) "
-                    "AND workspace_id = CAST(:workspace_id AS uuid) "
-                    "AND user_id = CAST(:user_id AS uuid) AND status = 'active'"
-                ),
-                {"tenant_id": tenant_id, "workspace_id": workspace_id, "user_id": user_id},
-            )
-        ).scalar_one_or_none()
-    except SQLAlchemyError as exc:
+        uid = UUID(user_id)
+        wid = UUID(workspace_id)
+    except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Identity store unavailable",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active workspace membership required",
         ) from exc
 
-    if membership is None:
+    stmt_func = text("SELECT * FROM iam.resolve_user_workspace_membership(:user_id, :workspace_id)")
+    try:
+        row = (
+            await session.execute(stmt_func, {"user_id": uid, "workspace_id": wid})
+        ).mappings().one_or_none()
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "Workspace authorization lookup failed (%s)",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization service temporarily unavailable",
+        ) from exc
+
+    if (
+        row is None
+        or row.get("tenant_status", "active") != "active"
+        or row.get("workspace_status", "active") != "active"
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Active workspace membership required",
         )
 
-    role = str(membership)
-    permissions = ROLE_PERMISSIONS.get(role)
-    if permissions is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unsupported workspace role")
+    resolved_tenant_id = str(row["tenant_id"])
+    if tenant_id is not None and resolved_tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active workspace membership required",
+        )
+
+    role = str(row["role"])
+    role_permissions = ROLE_PERMISSIONS.get(role)
+    if role_permissions is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active workspace membership required",
+        )
+
+    effective_permissions = compute_effective_permissions(role_permissions, token_scopes)
+
+    try:
+        await set_rls_context(
+            session,
+            tenant_id=resolved_tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "Failed to bind RLS transaction context (%s)",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization service temporarily unavailable",
+        ) from exc
 
     return AuthenticatedPrincipal(
         user_id=user_id,
         workspace_id=workspace_id,
-        tenant_id=tenant_id,
+        tenant_id=resolved_tenant_id,
         roles=[role],
-        permissions=permissions,
+        permissions=effective_permissions,
     )
