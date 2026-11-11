@@ -15,10 +15,8 @@ from uuid import uuid4
 
 import pytest
 import redis
-from control_api.modules.identity.session import (
-    RedisRevocationStore,
-    SessionManager,
-)
+from control_api.modules.identity.repositories.session_repository import RedisRevocationStore
+from control_api.modules.identity.services.session_service import SessionManager
 from fastapi import HTTPException
 
 TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")

@@ -1,4 +1,4 @@
-"""OIDC Authorization Code Flow with PKCE S256 (RFC 7636 / OIDC Core 1.0).
+"""OIDC Provider client handling Authorization Code Flow + PKCE S256 (SPEC-AUTH-001).
 
 Implements:
 - Open redirect prevention via redirect URI allowlist
@@ -13,17 +13,21 @@ Implements:
 from __future__ import annotations
 
 import hmac
-import json
 import threading
 import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any, cast
 from urllib.parse import urlencode, urlparse
 
 import httpx
 from control_api.core.settings import settings
-from control_api.modules.identity.crypto import (
+from control_api.modules.identity.models.errors import RepositoryUnavailableError
+from control_api.modules.identity.models.session import AuthTransaction
+from control_api.modules.identity.repositories.auth_transaction_repository import (
+    BaseAuthTransactionStore,
+    auth_transaction_store,
+)
+from control_api.modules.identity.security.crypto import (
     SigningKeyError,
     generate_pkce_pair,
     generate_secure_token,
@@ -43,175 +47,6 @@ def _response_object(response: httpx.Response) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid IdP response")
     return cast(dict[str, Any], payload)
-
-
-@dataclass(frozen=True, slots=True)
-class AuthTransaction:
-    state: str
-    nonce: str
-    code_verifier: str
-    code_challenge: str
-    return_to: str
-    browser_correlation: str
-    created_at: int
-
-
-class BaseAuthTransactionStore(ABC):
-    """Abstract base class for in-flight authentication transaction stores."""
-
-    @abstractmethod
-    def save(self, tx: AuthTransaction) -> None:
-        """Store in-flight transaction with TTL."""
-
-    @abstractmethod
-    def consume(self, state: str) -> AuthTransaction | None:
-        """Atomically retrieve and delete transaction (single-use semantics)."""
-
-    @abstractmethod
-    def clear_all(self) -> None:
-        """Clear all transactions (for testing)."""
-
-
-class InMemoryAuthTransactionStore(BaseAuthTransactionStore):
-    """Thread-safe store for in-flight authentication transactions (unit testing only)."""
-
-    def __init__(self, ttl_seconds: int = 600) -> None:
-        self._lock = threading.Lock()
-        self._transactions: dict[str, AuthTransaction] = {}
-        self._ttl_seconds = ttl_seconds
-
-    def save(self, tx: AuthTransaction) -> None:
-        with self._lock:
-            self._purge_expired_locked()
-            self._transactions[tx.state] = tx
-
-    def consume(self, state: str) -> AuthTransaction | None:
-        """Retrieve and immediately remove transaction (single-use semantics)."""
-        with self._lock:
-            self._purge_expired_locked()
-            return self._transactions.pop(state, None)
-
-    def _purge_expired_locked(self) -> None:
-        now = int(time.time())
-        expired = [
-            s for s, tx in self._transactions.items() if now - tx.created_at > self._ttl_seconds
-        ]
-        for s in expired:
-            del self._transactions[s]
-
-    def clear_all(self) -> None:
-        with self._lock:
-            self._transactions.clear()
-
-
-# Alias for backward compatibility
-AuthTransactionStore = InMemoryAuthTransactionStore
-
-
-class RedisAuthTransactionStore(BaseAuthTransactionStore):
-    """Distributed Redis-backed store for in-flight auth transactions (AU-01 / Finding R01).
-
-    Guarantees atomic single-use consume via GETDEL (Redis >= 6.2) or Lua script.
-    Fail-closed: raises HTTPException(503) if Redis is unavailable.
-    """
-
-    def __init__(self, redis_url: str | None = None, ttl_seconds: int = 600) -> None:
-        import redis
-
-        self.redis_url = redis_url or settings.redis_url
-        self._ttl_seconds = ttl_seconds
-        self._client = redis.Redis.from_url(
-            self.redis_url,
-            socket_timeout=settings.redis_socket_timeout_seconds,
-            socket_connect_timeout=settings.redis_connect_timeout_seconds,
-            decode_responses=True,
-        )
-
-    def save(self, tx: AuthTransaction) -> None:
-        import redis
-
-        data = {
-            "state": tx.state,
-            "nonce": tx.nonce,
-            "code_verifier": tx.code_verifier,
-            "code_challenge": tx.code_challenge,
-            "return_to": tx.return_to,
-            "browser_correlation": tx.browser_correlation,
-            "created_at": tx.created_at,
-        }
-        try:
-            self._client.set(f"auth_tx:{tx.state}", json.dumps(data), ex=self._ttl_seconds)
-        except (redis.RedisError, OSError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Auth transaction store unavailable",
-            ) from exc
-
-    def consume(self, state: str) -> AuthTransaction | None:
-        import redis
-
-        try:
-            raw = self._client.getdel(f"auth_tx:{state}")
-        except (redis.RedisError, OSError) as exc:
-            # Fallback to lua script if GETDEL is not supported on older Redis or connection error
-            if isinstance(exc, redis.ResponseError) and "unknown command" in str(exc).lower():
-                lua = """
-                local val = redis.call('GET', KEYS[1])
-                if val then redis.call('DEL', KEYS[1]) end
-                return val
-                """
-                try:
-                    raw = self._client.eval(lua, 1, f"auth_tx:{state}")
-                except (redis.RedisError, OSError) as sub_exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Auth transaction store unavailable",
-                    ) from sub_exc
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Auth transaction store unavailable",
-                ) from exc
-
-        if not raw:
-            return None
-
-        try:
-            data = json.loads(raw)
-            return AuthTransaction(
-                state=data["state"],
-                nonce=data["nonce"],
-                code_verifier=data["code_verifier"],
-                code_challenge=data["code_challenge"],
-                return_to=data["return_to"],
-                browser_correlation=data.get("browser_correlation", ""),
-                created_at=int(data["created_at"]),
-            )
-        except (KeyError, ValueError, json.JSONDecodeError):
-            return None
-
-    def clear_all(self) -> None:
-        import redis
-
-        try:
-            keys = self._client.keys("auth_tx:*")
-            if keys:
-                self._client.delete(*keys)
-        except (redis.RedisError, OSError):
-            pass
-
-
-def create_auth_transaction_store() -> BaseAuthTransactionStore:
-    store_type = settings.auth_store_type.lower()
-    if store_type == "redis":
-        return RedisAuthTransactionStore(settings.redis_url)
-    elif store_type == "memory":
-        return InMemoryAuthTransactionStore()
-    else:
-        raise ValueError(f"Unsupported auth_store_type: {settings.auth_store_type}")
-
-
-auth_transaction_store: BaseAuthTransactionStore = create_auth_transaction_store()
 
 
 class OidcClient:
@@ -265,7 +100,7 @@ class OidcClient:
             browser_correlation=browser_correlation,
             created_at=int(time.time()),
         )
-        self.store.save(tx)
+        self._run_store_op(lambda: self.store.save(tx))
 
         issuer = settings.oidc_issuer.rstrip("/")
         auth_endpoint = f"{issuer}/protocol/openid-connect/auth"
@@ -282,6 +117,20 @@ class OidcClient:
         }
         authorization_url = f"{auth_endpoint}?{urlencode(params)}"
         return authorization_url, state
+
+    def _run_store_op[T](self, op: Callable[[], T]) -> T:
+        """Execute a transaction store operation and map store outages to HTTP 503."""
+        try:
+            return op()
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+    def consume_transaction(self, state: str) -> AuthTransaction | None:
+        """Consume a single-use OIDC transaction while translating store outages to HTTP 503."""
+        return self._run_store_op(lambda: self.store.consume(state))
 
     async def fetch_jwks(self, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
         """Fetch and cache JWKS keys with rollover support."""
@@ -328,7 +177,7 @@ class OidcClient:
     ) -> tuple[dict[str, Any], AuthTransaction]:
         """Handle OIDC Callback, verify state/nonce/PKCE, browser binding, and ID token."""
         # 1. Single-use state verification
-        tx = self.store.consume(state)
+        tx = self.consume_transaction(state)
         if not tx:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

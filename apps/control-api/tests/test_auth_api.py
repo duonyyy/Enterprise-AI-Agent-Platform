@@ -13,16 +13,14 @@ import pytest
 from control_api.core.database import get_db_session
 from control_api.core.settings import settings
 from control_api.main import app
-from control_api.modules.identity.crypto import generate_pkce_pair
-from control_api.modules.identity.oidc import (
-    AuthTransaction,
+from control_api.modules.identity.models.session import AuthTransaction
+from control_api.modules.identity.providers.oidc_client import oidc_client
+from control_api.modules.identity.repositories.auth_transaction_repository import (
     InMemoryAuthTransactionStore,
-    oidc_client,
 )
-from control_api.modules.identity.session import (
-    InMemoryRevocationStore,
-    session_manager,
-)
+from control_api.modules.identity.repositories.session_repository import InMemoryRevocationStore
+from control_api.modules.identity.security.crypto import generate_pkce_pair
+from control_api.modules.identity.services.session_service import session_manager
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -234,7 +232,7 @@ def test_callback_exchange_success_and_cookie_set(
             client_secret=settings.oidc_client_secret.get_secret_value(),
             redirect_uri=settings.oidc_redirect_uri,
         )
-        from control_api.modules.identity.crypto import verify_jwt_rs256_jwks
+        from control_api.modules.identity.security.crypto import verify_jwt_rs256_jwks
         claims = verify_jwt_rs256_jwks(token_res["id_token"], idp_server.get_jwks())
         return claims, consumed_tx
 

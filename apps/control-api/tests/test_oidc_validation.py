@@ -12,8 +12,11 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 from control_api.core.settings import settings
-from control_api.modules.identity.crypto import b64url_encode, sign_jwt_hs256
-from control_api.modules.identity.oidc import InMemoryAuthTransactionStore, OidcClient
+from control_api.modules.identity.providers.oidc_client import OidcClient
+from control_api.modules.identity.repositories.auth_transaction_repository import (
+    InMemoryAuthTransactionStore,
+)
+from control_api.modules.identity.security.crypto import b64url_encode, sign_jwt_hs256
 from fastapi import HTTPException
 
 from tests.fixtures.oidc_test_server import OidcTestServer, RsaKeyPair

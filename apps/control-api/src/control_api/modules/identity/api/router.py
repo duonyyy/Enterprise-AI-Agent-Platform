@@ -8,7 +8,13 @@ from urllib.parse import quote_plus
 from control_api.core.auth import verify_csrf_or_origin
 from control_api.core.dependencies import CurrentAuthenticatedUser, DBSession
 from control_api.core.settings import settings
-from control_api.modules.identity.crypto import generate_secure_token
+from control_api.modules.identity.api.dependencies import (
+    clear_correlation_cookie,
+    clear_session_cookie,
+    get_clear_session_cookie_headers,
+    set_correlation_cookie,
+    set_session_cookie,
+)
 from control_api.modules.identity.dto import (
     CallbackResponse,
     CurrentUserResponse,
@@ -16,14 +22,11 @@ from control_api.modules.identity.dto import (
     TokenRequestDTO,
     TokenResponseDTO,
 )
-from control_api.modules.identity.oidc import oidc_client
-from control_api.modules.identity.service import identity_service
-from control_api.modules.identity.session import (
-    clear_session_cookie,
-    get_clear_session_cookie_headers,
-    session_manager,
-    set_session_cookie,
-)
+from control_api.modules.identity.models.errors import RepositoryUnavailableError
+from control_api.modules.identity.providers.oidc_client import oidc_client
+from control_api.modules.identity.security.crypto import generate_secure_token
+from control_api.modules.identity.services.auth_service import identity_service
+from control_api.modules.identity.services.session_service import session_manager
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 
@@ -38,31 +41,19 @@ async def login(
 ) -> Any:
     """Initiate OIDC Authorization Code Flow with PKCE S256 and browser correlation (Finding R02)."""
     correlation_id = generate_secure_token(32)
-    auth_url, state = oidc_client.initiate_login(return_to=return_to, browser_correlation=correlation_id)
+    auth_url, state = oidc_client.initiate_login(
+        return_to=return_to, browser_correlation=correlation_id
+    )
 
     if redirect:
-        redirect_res = RedirectResponse(url=auth_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-        redirect_res.set_cookie(
-            key=settings.oidc_correlation_cookie_name,
-            value=correlation_id,
-            max_age=600,
-            httponly=True,
-            secure=settings.oidc_correlation_cookie_secure,
-            samesite=settings.oidc_correlation_cookie_same_site,  # type: ignore[arg-type]
-            path="/v1/auth/callback",
+        redirect_res = RedirectResponse(
+            url=auth_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT
         )
+        set_correlation_cookie(redirect_res, correlation_id)
         return redirect_res
 
     if response is not None:
-        response.set_cookie(
-            key=settings.oidc_correlation_cookie_name,
-            value=correlation_id,
-            max_age=600,
-            httponly=True,
-            secure=settings.oidc_correlation_cookie_secure,
-            samesite=settings.oidc_correlation_cookie_same_site,  # type: ignore[arg-type]
-            path="/v1/auth/callback",
-        )
+        set_correlation_cookie(response, correlation_id)
     return LoginInitiateResponse(authorization_url=auth_url, state=state)
 
 
@@ -77,34 +68,24 @@ async def callback(
     session: DBSession = None,  # type: ignore[assignment]
 ) -> Any:
     """Handle callback from IdP with authorization code, verify browser correlation, and establish session."""
-    def _clean_corr(res: Response | None) -> None:
-        if res is not None:
-            res.delete_cookie(
-                key=settings.oidc_correlation_cookie_name,
-                path="/v1/auth/callback",
-                httponly=True,
-                secure=settings.oidc_correlation_cookie_secure,
-                samesite=settings.oidc_correlation_cookie_same_site,  # type: ignore[arg-type]
-            )
-
     if error:
-        oidc_client.store.consume(state)
+        oidc_client.consume_transaction(state)
         accept = request.headers.get("accept", "") if request else ""
         if "text/html" in accept:
             redirect_url = f"/login?error={quote_plus(error)}"
             if error_description:
                 redirect_url += f"&error_description={quote_plus(error_description)}"
             redirect_res = RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
-            _clean_corr(redirect_res)
+            clear_correlation_cookie(redirect_res)
             return redirect_res
-        _clean_corr(response)
+        clear_correlation_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Identity Provider returned error: {error}",
         )
 
     if not code:
-        _clean_corr(response)
+        clear_correlation_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing authorization code from Identity Provider",
@@ -148,7 +129,7 @@ async def callback(
             session_token,
             absolute_expires_at=session_data.absolute_expires_at,
         )
-        _clean_corr(redirect_res)
+        clear_correlation_cookie(redirect_res)
         return redirect_res
 
     # Otherwise set cookie on JSON response
@@ -157,7 +138,7 @@ async def callback(
         session_token,
         absolute_expires_at=session_data.absolute_expires_at,
     )
-    _clean_corr(response)
+    clear_correlation_cookie(response)
     return CallbackResponse(
         user_id=user_id,
         issuer=issuer,
@@ -236,16 +217,19 @@ async def logout(
     if token:
         try:
             session_manager.revoke_session_by_token(token)
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
-                headers = dict(exc.headers) if exc.headers else {}
-                headers.update(get_clear_session_cookie_headers())
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Revocation store unavailable; local session cleared but server-side revocation could not be confirmed",
-                    headers=headers,
-                ) from exc
-            raise
+        except (HTTPException, RepositoryUnavailableError) as exc:
+            if (
+                isinstance(exc, HTTPException)
+                and exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE
+            ):
+                raise
+            headers = dict(exc.headers) if isinstance(exc, HTTPException) and exc.headers else {}
+            headers.update(get_clear_session_cookie_headers())
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Revocation store unavailable; local session cleared but server-side revocation could not be confirmed",
+                headers=headers,
+            ) from exc
 
     clear_session_cookie(response)
     return {"status": "logged_out"}

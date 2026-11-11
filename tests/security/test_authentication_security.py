@@ -28,21 +28,23 @@ from agent_runtime.settings import RuntimeSettings
 from control_api.core.database import get_db_session
 from control_api.core.settings import Settings, settings
 from control_api.main import app
-from control_api.modules.identity.crypto import (
+from control_api.modules.identity.providers.oidc_client import oidc_client
+from control_api.modules.identity.repositories.auth_transaction_repository import (
+    InMemoryAuthTransactionStore,
+    create_auth_transaction_store,
+)
+from control_api.modules.identity.repositories.session_repository import (
+    InMemoryRevocationStore,
+    create_revocation_store,
+)
+from control_api.modules.identity.security.crypto import (
     generate_pkce_pair,
     verify_jwt_rs256_jwks,
     verify_pkce,
 )
-from control_api.modules.identity.oidc import (
-    InMemoryAuthTransactionStore,
-    create_auth_transaction_store,
-    oidc_client,
-)
-from control_api.modules.identity.service import identity_service
-from control_api.modules.identity.session import (
-    InMemoryRevocationStore,
+from control_api.modules.identity.services.auth_service import identity_service
+from control_api.modules.identity.services.session_service import (
     SessionManager,
-    create_revocation_store,
     session_manager,
 )
 from fastapi import HTTPException, status
@@ -1123,7 +1125,7 @@ def test_task02_redis_lua_rotation_and_revocation_semantics() -> None:
     """Verify RedisRevocationStore methods and Lua state transitions against a stateful Redis command evaluator."""
     import json as _json
 
-    from control_api.modules.identity.session import RedisRevocationStore
+    from control_api.modules.identity.repositories.session_repository import RedisRevocationStore
 
     store_dict: dict[str, tuple[str, int]] = {}
     current_redis_time = [1700000000]
@@ -1256,7 +1258,7 @@ def test_task02_redis_lua_rotation_and_revocation_semantics() -> None:
 
 def test_task02_legacy_token_without_ver_claim_rejected() -> None:
     """Pre-TASK-02 tokens lacking the 'ver' claim are deterministically rejected with 401 and never lazy-registered."""
-    from control_api.modules.identity.crypto import sign_jwt_hs256
+    from control_api.modules.identity.security.crypto import sign_jwt_hs256
 
     store = InMemoryRevocationStore()
     manager = SessionManager(denylist=store)

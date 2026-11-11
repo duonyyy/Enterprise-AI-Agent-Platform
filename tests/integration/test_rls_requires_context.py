@@ -547,7 +547,7 @@ def test_task03_revoked_projection_privilege_fails_closed_503_without_aborted_tx
     import asyncio
 
     from control_api.core.auth import _resolve_principal_from_user_id
-    from control_api.modules.identity.service import identity_service
+    from control_api.modules.identity.services.auth_service import identity_service
     from fastapi import HTTPException
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 

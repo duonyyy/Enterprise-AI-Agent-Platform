@@ -14,7 +14,7 @@ import secrets
 import time
 from typing import Any
 
-from control_api.modules.identity.crypto import b64url_encode, verify_pkce
+from control_api.modules.identity.security.crypto import b64url_encode, verify_pkce
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 

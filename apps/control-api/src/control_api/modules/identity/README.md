@@ -1,7 +1,7 @@
 # `identity/` — Phân hệ Xác thực, Danh tính & Quản lý Phiên (Step 02 — Authentication)
 
 > **Trạng thái:** `IMPLEMENTED / REMEDIATED` (Đã khắc phục toàn diện findings R01–R09; hoàn tất các bản sửa lỗi bảo mật P0-01 và P0-02)  
-> **Mã nguồn đã rà soát:** [`crypto.py`](crypto.py), [`dto.py`](dto.py), [`oidc.py`](oidc.py), [`router.py`](router.py), [`service.py`](service.py), [`session.py`](session.py), [`__init__.py`](__init__.py)  
+> **Mã nguồn đã rà soát:** `api/`, `dto/`, `models/`, `providers/`, `repositories/`, `security/`, `services/`, `__init__.py`  
 > **Tài liệu SPEC liên quan:** [`SPEC-AUTH-001.md`](../../../../../../docs/04-module-specs/auth/SPEC-AUTH-001.md), [`AUTH_DESIGN_DECISIONS.md`](../../../../../../docs/04-module-specs/auth/AUTH_DESIGN_DECISIONS.md), [`SPEC-SECURITY-001.md`](../../../../../../docs/04-module-specs/security/SPEC-SECURITY-001.md), [`ADR-018`](../../../../../../docs/02-architecture/adr/ADR-018-identity-discovery-projection.md), [`DECISIONS.md`](../../../../../../docs/09-implementation/task-packets/STEP-02-AUTHENTICATION/DECISIONS.md)
 
 ---
@@ -42,40 +42,80 @@ Package `identity/` cung cấp toàn bộ nền tảng quản lý danh tính, x�
 
 | Khả năng | Trạng thái | Bằng chứng mã nguồn |
 |---|---|---|
-| OIDC Code Flow + PKCE S256 | `IMPLEMENTED` | [`oidc.py::OidcClient.initiate_login`](oidc.py#L82), [`oidc.py::OidcClient.handle_callback`](oidc.py#L112) |
-| Browser Correlation (RFC 9700 §2.1.1) | `IMPLEMENTED` | [`router.py::login`](router.py#L38), [`router.py::callback`](router.py#L90), [`oidc.py::handle_callback`](oidc.py#L125) |
-| Lưu trữ giao dịch OIDC Redis phân tán | `IMPLEMENTED` | [`oidc.py::RedisAuthTransactionStore`](oidc.py#L35) (Atomic `GETDEL` / Lua) |
-| Ánh xạ người dùng `(issuer, subject)` | `IMPLEMENTED` | [`service.py::IdentityService.provision_user`](service.py#L42) |
-| Phiên làm việc không trạng thái (JWT HS256) | `IMPLEMENTED` | [`session.py::SessionManager.create_session`](session.py#L318) |
-| Kiểm soát hết hạn kép (Idle 30m / Absolute 8h) | `IMPLEMENTED` | [`session.py::SessionData.is_idle_expired`](session.py#L31), [`session.py::SessionManager.verify_session_token`](session.py#L363) |
-| Thu hồi phiên phân tán Fail-Closed (HTTP 503) | `IMPLEMENTED` | [`session.py::RedisRevocationStore.is_session_revoked`](session.py#L238) |
-| Thu hồi diện rộng (User Cutoff & Monotonic Lua) | `IMPLEMENTED` | [`session.py::RedisRevocationStore._LUA_REVOKE_USER`](session.py#L125), [`session.py::RedisRevocationStore.revoke_user`](session.py#L205) |
-| Bảo vệ xóa cookie khi Logout gặp lỗi 503 | `IMPLEMENTED` | [`router.py::logout`](router.py#L225), [`session.py::get_clear_session_cookie_headers`](session.py#L540) |
-| CSRF & Origin Guard cho Cookie Mutations | `IMPLEMENTED` | [`core/auth.py::verify_csrf_or_origin`](../../core/auth.py#L28), [`router.py`](router.py#L218) |
-| Scoped Workspace Token Delegation (Runtime Key) | `IMPLEMENTED` | [`service.py::IdentityService.issue_workspace_token`](service.py#L210), [`router.py::exchange_workspace_token`](router.py#L250) |
-| Discovery an toàn với DB-56 | `PROPOSED` | [`ADR-018`](../../../../../../docs/02-architecture/adr/ADR-018-identity-discovery-projection.md) (Hiện dùng SQL projection an toàn phía service) |
+| OIDC Code Flow + PKCE S256 | `IMPLEMENTED` | [`providers/oidc_client.py::OidcClient.initiate_login`](providers/oidc_client.py), [`providers/oidc_client.py::OidcClient.handle_callback`](providers/oidc_client.py) |
+| Browser Correlation (RFC 9700 §2.1.1) | `IMPLEMENTED` | [`api/router.py::login`](api/router.py), [`api/router.py::callback`](api/router.py), [`providers/oidc_client.py::handle_callback`](providers/oidc_client.py) |
+| Lưu trữ giao dịch OIDC Redis phân tán | `IMPLEMENTED` | [`repositories/auth_transaction_repository.py::RedisAuthTransactionStore`](repositories/auth_transaction_repository.py) (Atomic `GETDEL` / Lua) |
+| Ánh xạ người dùng `(issuer, subject)` | `IMPLEMENTED` | [`services/auth_service.py::IdentityService.get_or_provision_user`](services/auth_service.py), [`repositories/user_repository.py::UserRepository`](repositories/user_repository.py) |
+| Phiên làm việc không trạng thái (JWT HS256) | `IMPLEMENTED` | [`services/session_service.py::SessionManager.create_session`](services/session_service.py) |
+| Kiểm soát hết hạn kép (Idle 30m / Absolute 8h) | `IMPLEMENTED` | [`models/session.py::SessionData.is_idle_expired`](models/session.py), [`services/session_service.py::SessionManager.verify_session_token`](services/session_service.py) |
+| Thu hồi phiên phân tán Fail-Closed (HTTP 503) | `IMPLEMENTED` | [`repositories/session_repository.py::RedisRevocationStore.is_session_revoked`](repositories/session_repository.py) |
+| Thu hồi diện rộng (User Cutoff & Monotonic Lua) | `IMPLEMENTED` | [`repositories/session_repository.py::RedisRevocationStore._LUA_REVOKE_USER`](repositories/session_repository.py), [`repositories/session_repository.py::RedisRevocationStore.revoke_user`](repositories/session_repository.py) |
+| Bảo vệ xóa cookie khi Logout gặp lỗi 503 | `IMPLEMENTED` | [`api/router.py::logout`](api/router.py), [`api/dependencies.py::get_clear_session_cookie_headers`](api/dependencies.py) |
+| CSRF & Origin Guard cho Cookie Mutations | `IMPLEMENTED` | [`core/auth.py::verify_csrf_or_origin`](../../core/auth.py), [`api/router.py`](api/router.py) |
+| Scoped Workspace Token Delegation (Runtime Key) | `IMPLEMENTED` | [`services/auth_service.py::IdentityService.issue_workspace_token`](services/auth_service.py), [`api/router.py::exchange_workspace_token`](api/router.py) |
+| Discovery an toàn với DB-56 | `PROPOSED` | [`ADR-018`](../../../../../../docs/02-architecture/adr/ADR-018-identity-discovery-projection.md) (Hiện dùng SQL projection an toàn phía service & repository) |
 
 ---
 
-## 4. Sơ đồ File và Ký hiệu (Symbol Map)
+## 4. Sơ đồ Cấu trúc Phân tầng & Ký hiệu (Symbol Map)
 
-| Tệp tin | Ký hiệu (Symbol) | Trách nhiệm |
-|---|---|---|
-| [`crypto.py`](crypto.py) | `generate_pkce_pair()` | Tạo chuỗi ngẫu nhiên `code_verifier` và hàm băm URL-safe Base64 SHA-256 `code_challenge`. |
-| [`crypto.py`](crypto.py) | `sign_jwt_hs256()`, `verify_jwt_hs256()` | Ký và xác thực chữ ký token đối xứng HS256 với cơ chế xác thực claims chuẩn thời gian thực. |
-| [`crypto.py`](crypto.py) | `verify_jwt_rs256_jwks()` | Xác thực ID Token bất đối xứng RS256 đối soát với JWKS endpoint của IdP, hỗ trợ xoay khóa (`kid`). |
-| [`dto.py`](dto.py) | `LoginInitiateResponse`, `CallbackResponse` | Định nghĩa schema dữ liệu trả về cho API khởi tạo đăng nhập và tiếp nhận callback. |
-| [`dto.py`](dto.py) | `CurrentUserResponse`, `WorkspaceMembershipDTO`| Định nghĩa hợp đồng DTO cho endpoint `/v1/auth/me` với hỗ trợ trường nullable chuẩn OpenAPI 3.1. |
-| [`dto.py`](dto.py) | `TokenRequestDTO`, `TokenResponseDTO` | Hợp đồng yêu cầu và kết quả phát hành Scoped Access Token cho workspace. |
-| [`oidc.py`](oidc.py) | `OidcClient` | Client thực hiện giao thức OIDC, khám phá cấu hình IdP, khởi tạo URL và đổi mã code lấy token. |
-| [`oidc.py`](oidc.py) | `RedisAuthTransactionStore` | Lưu trữ và hủy nguyên tử giao dịch xác thực (`state`, `nonce`, `code_verifier`, `correlation_id`). |
-| [`router.py`](router.py) | `router` | Khai báo các route FastAPI `/v1/auth`: `login`, `callback`, `me`, `refresh`, `logout`, `token`. |
-| [`service.py`](service.py) | `IdentityService` | Tầng nghiệp vụ ánh xạ người dùng, tra cứu danh sách workspace và phát hành token ủy nhiệm. |
-| [`session.py`](session.py) | `SessionData` | Cấu trúc dữ liệu bất biến biểu diễn phiên làm việc: `session_id`, `user_id`, thời điểm cấp và hết hạn. |
-| [`session.py`](session.py) | `RedisRevocationStore` | Kho lưu trữ danh sách đen thu hồi phiên phân tán trên Redis với chính sách Fail-Closed. |
-| [`session.py`](session.py) | `InMemoryRevocationStore` | Bản sao chép bộ nhớ trong (RAM) đồng nhất hợp đồng hành vi phục vụ riêng cho Unit Tests. |
-| [`session.py`](session.py) | `SessionManager` | Đối tượng điều phối trung tâm quản lý tạo phiên, xác minh đồng nhất, làm mới và thu hồi. |
-| [`session.py`](session.py) | `get_clear_session_cookie_headers()` | Sinh header `Set-Cookie` xóa cookie để gắn trực tiếp vào các phản hồi lỗi HTTP 503. |
+```text
+apps/control-api/src/control_api/modules/identity/
+├── __init__.py
+├── README.md
+├── adapters/
+│   ├── __init__.py
+│   └── memory_session_store.py
+├── api/
+│   ├── __init__.py
+│   ├── router.py
+│   └── dependencies.py
+├── dto/
+│   ├── __init__.py
+│   ├── requests.py
+│   └── responses.py
+├── services/
+│   ├── __init__.py
+│   ├── auth_service.py
+│   └── session_service.py
+├── repositories/
+│   ├── __init__.py
+│   ├── user_repository.py
+│   ├── session_base.py
+│   ├── memory_session_store.py
+│   ├── session_repository.py
+│   └── auth_transaction_repository.py
+├── providers/
+│   ├── __init__.py
+│   └── oidc_client.py
+├── security/
+│   ├── __init__.py
+│   └── crypto.py
+└── models/
+    ├── __init__.py
+    ├── errors.py
+    └── session.py
+```
+
+| Tầng | Tệp tin | Ký hiệu (Symbol) | Trách nhiệm |
+|---|---|---|---|
+| `security/` | [`security/crypto.py`](security/crypto.py) | `generate_pkce_pair()`, `verify_pkce()` | Tạo chuỗi ngẫu nhiên `code_verifier` và hàm băm URL-safe Base64 SHA-256 `code_challenge`. |
+| `security/` | [`security/crypto.py`](security/crypto.py) | `sign_jwt_hs256()`, `verify_jwt_hs256()` | Ký và xác thực chữ ký token đối xứng HS256 với cơ chế xác thực claims chuẩn thời gian thực. |
+| `security/` | [`security/crypto.py`](security/crypto.py) | `verify_jwt_rs256_jwks()`, `verify_oidc_id_token_rs256()` | Xác thực ID Token bất đối xứng RS256 đối soát với JWKS endpoint của IdP, hỗ trợ xoay khóa (`kid`). |
+| `models/` | [`models/session.py`](models/session.py) | `SessionVerificationStatus`, `SessionData`, `StoredSessionState`, `AuthTransaction` | Enum trạng thái xác minh phiên (`StrEnum`) và cấu trúc dữ liệu nội bộ bất biến biểu diễn phiên làm việc, trạng thái lưu trữ và giao dịch OIDC. |
+| `models/` | [`models/errors.py`](models/errors.py) | `IdentityError`, `RepositoryUnavailableError`, `AuthorizationDatabaseUnavailableError`, `RevocationStoreUnavailableError`, `AuthTransactionStoreUnavailableError`, `SessionExpiredError` | Ngoại lệ miền lưu trữ và phiên thuần túy (Clean Architecture, không phụ thuộc FastAPI `HTTPException`). |
+| `dto/` | [`dto/requests.py`](dto/requests.py), [`dto/responses.py`](dto/responses.py) | `LoginInitiateResponse`, `CallbackResponse`, `CurrentUserResponse`, `WorkspaceMembershipDTO`, `TokenRequestDTO`, `TokenResponseDTO` | Hợp đồng DTO cho các endpoint `/v1/auth/*` với hỗ trợ extra="forbid" và OpenAPI 3.1. |
+| `repositories/` | [`repositories/session_base.py`](repositories/session_base.py) | `BaseRevocationStore` (ABC) | Giao diện hợp đồng trừu tượng (Port) cho authoritative session state và revocation storage. |
+| `repositories/` | [`repositories/memory_session_store.py`](repositories/memory_session_store.py) | `InMemoryRevocationStore`, `RevocationDenylist` | Adapter lưu trữ session in-memory thread-safe chuyên biệt phục vụ unit testing cô lập. |
+| `adapters/` | [`adapters/memory_session_store.py`](adapters/memory_session_store.py) | `InMemoryRevocationStore`, `RevocationDenylist` | Điểm truy cập adapter test in-memory cho các module và test bên ngoài. |
+| `repositories/` | [`repositories/user_repository.py`](repositories/user_repository.py) | `UserRepository`, `user_repository` | Tầng truy cập CSDL PostgreSQL cho người dùng và hàm phân quyền workspace. |
+| `repositories/` | [`repositories/session_repository.py`](repositories/session_repository.py) | `RedisRevocationStore`, `InMemoryRevocationStore`, `BaseRevocationStore`, `revocation_denylist` | Kho lưu trữ trạng thái phiên và danh sách thu hồi phân tán trên Redis với Fail-Closed & Lua scripts. |
+| `repositories/` | [`repositories/auth_transaction_repository.py`](repositories/auth_transaction_repository.py) | `RedisAuthTransactionStore`, `InMemoryAuthTransactionStore`, `auth_transaction_store` | Lưu trữ và hủy nguyên tử giao dịch xác thực OIDC (`state`, `nonce`, `code_verifier`). |
+| `providers/` | [`providers/oidc_client.py`](providers/oidc_client.py) | `OidcClient`, `oidc_client` | Client thực hiện giao thức OIDC, khám phá cấu hình IdP, khởi tạo URL và đổi mã code lấy ID token. |
+| `services/` | [`services/session_service.py`](services/session_service.py) | `SessionManager`, `session_manager` | Đối tượng điều phối trung tâm quản lý tạo phiên, xác minh đồng nhất, làm mới và thu hồi. |
+| `services/` | [`services/auth_service.py`](services/auth_service.py) | `IdentityService`, `identity_service`, `WorkspaceAccessDeniedError` | Tầng nghiệp vụ ánh xạ người dùng, tra cứu danh sách workspace và phát hành token ủy nhiệm. |
+| `api/` | [`api/dependencies.py`](api/dependencies.py) | `set_session_cookie()`, `clear_session_cookie()`, `get_clear_session_cookie_headers()`, `set_correlation_cookie()`, `clear_correlation_cookie()` | Tiện ích quản lý cookie HTTP-Only cho phiên làm việc và correlation. |
+| `api/` | [`api/router.py`](api/router.py) | `router` | Khai báo các route FastAPI `/v1/auth`: `login`, `callback`, `me`, `refresh`, `logout`, `token`. |
 
 ---
 

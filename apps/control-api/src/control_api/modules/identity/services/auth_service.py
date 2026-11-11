@@ -12,24 +12,44 @@ Token confinement & delegation signing profile aligned with Agent Runtime (Findi
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from control_api.core.auth import ROLE_PERMISSIONS
 from control_api.core.settings import settings
-from control_api.modules.identity.crypto import sign_jwt_hs256
 from control_api.modules.identity.dto import TokenResponseDTO, WorkspaceMembershipDTO
+from control_api.modules.identity.models.errors import RepositoryUnavailableError
+from control_api.modules.identity.repositories.user_repository import (
+    UserRepository,
+    user_repository,
+)
+from control_api.modules.identity.security.crypto import sign_jwt_hs256
 from fastapi import HTTPException, status
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
-    from control_api.modules.identity.session import SessionData
+    from control_api.modules.identity.models.session import SessionData
 
 logger = logging.getLogger(__name__)
+
+
+def _translate_repository_errors[**P, R](
+    fn: Callable[P, Awaitable[R]],
+) -> Callable[P, Awaitable[R]]:
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await fn(*args, **kwargs)
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+    return wrapper
 
 
 class WorkspaceAccessDeniedError(HTTPException):
@@ -39,20 +59,13 @@ class WorkspaceAccessDeniedError(HTTPException):
         super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
-def _authz_unavailable(exc: Exception) -> HTTPException:
-    logger.warning(
-        "Authorization database projection or lookup failed (%s)",
-        type(exc).__name__,
-    )
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Authorization service temporarily unavailable",
-    )
-
-
 class IdentityService:
     """Manages identity lookup, safe provisioning, workspace discovery, and token issuance."""
 
+    def __init__(self, user_repo: UserRepository | None = None) -> None:
+        self.user_repo = user_repo or user_repository
+
+    @_translate_repository_errors
     async def get_or_provision_user(
         self,
         session: AsyncSession,
@@ -69,64 +82,36 @@ class IdentityService:
         email_normalized = email.strip().lower() if email and email.strip() else None
         clean_display_name = display_name.strip() if display_name and display_name.strip() else None
 
-        try:
-            # 1. Lookup user by exact (issuer, subject)
-            stmt_find = text(
-                "SELECT id, issuer, subject, display_name, email_normalized "
-                "FROM iam.users "
-                "WHERE issuer = :issuer AND subject = :subject"
-            )
-            row = (
-                await session.execute(stmt_find, {"issuer": issuer, "subject": subject})
-            ).mappings().one_or_none()
-
-            if row is not None:
-                user_dict = dict(row)
-                # Update display_name or email if changed
-                if (
-                    clean_display_name != user_dict["display_name"]
-                    or email_normalized != user_dict["email_normalized"]
-                ):
-                    stmt_update = text(
-                        "UPDATE iam.users "
-                        "SET display_name = COALESCE(:display_name, display_name), "
-                        "    email_normalized = COALESCE(:email_normalized, email_normalized) "
-                        "WHERE id = :id"
-                    )
-                    await session.execute(
-                        stmt_update,
-                        {
-                            "id": user_dict["id"],
-                            "display_name": clean_display_name,
-                            "email_normalized": email_normalized,
-                        },
-                    )
-                    user_dict["display_name"] = clean_display_name or user_dict["display_name"]
-                    user_dict["email_normalized"] = email_normalized or user_dict["email_normalized"]
-                return user_dict
-
-            # 2. Safe Provisioning of new user
-            stmt_insert = text(
-                "INSERT INTO iam.users (issuer, subject, display_name, email_normalized) "
-                "VALUES (:issuer, :subject, :display_name, :email_normalized) "
-                "RETURNING id, issuer, subject, display_name, email_normalized"
-            )
-            new_row = (
-                await session.execute(
-                    stmt_insert,
-                    {
-                        "issuer": issuer,
-                        "subject": subject,
-                        "display_name": clean_display_name,
-                        "email_normalized": email_normalized,
-                    },
+        # 1. Lookup user by exact (issuer, subject)
+        row = await self.user_repo.get_by_issuer_subject(session, issuer, subject)
+        if row is not None:
+            user_dict = dict(row)
+            # Update display_name or email if changed
+            if (
+                clean_display_name != user_dict["display_name"]
+                or email_normalized != user_dict["email_normalized"]
+            ):
+                await self.user_repo.update_user(
+                    session,
+                    user_dict["id"],
+                    clean_display_name,
+                    email_normalized,
                 )
-            ).mappings().one()
-        except SQLAlchemyError as exc:
-            raise _authz_unavailable(exc) from exc
+                user_dict["display_name"] = clean_display_name or user_dict["display_name"]
+                user_dict["email_normalized"] = email_normalized or user_dict["email_normalized"]
+            return user_dict
 
+        # 2. Safe Provisioning of new user
+        new_row = await self.user_repo.create_user(
+            session,
+            issuer,
+            subject,
+            clean_display_name,
+            email_normalized,
+        )
         return dict(new_row)
 
+    @_translate_repository_errors
     async def get_user_by_id(
         self,
         session: AsyncSession,
@@ -138,17 +123,10 @@ class IdentityService:
         except ValueError:
             return None
 
-        stmt = text(
-            "SELECT id, issuer, subject, display_name, email_normalized "
-            "FROM iam.users "
-            "WHERE id = :id"
-        )
-        try:
-            row = (await session.execute(stmt, {"id": uid})).mappings().one_or_none()
-        except SQLAlchemyError as exc:
-            raise _authz_unavailable(exc) from exc
+        row = await self.user_repo.get_by_id(session, uid)
         return dict(row) if row else None
 
+    @_translate_repository_errors
     async def get_user_workspaces(
         self,
         session: AsyncSession,
@@ -160,12 +138,7 @@ class IdentityService:
         except ValueError:
             return []
 
-        stmt_func = text("SELECT * FROM iam.get_user_workspaces(:user_id)")
-        try:
-            rows = (await session.execute(stmt_func, {"user_id": uid})).mappings().all()
-        except SQLAlchemyError as exc:
-            raise _authz_unavailable(exc) from exc
-
+        rows = await self.user_repo.get_user_workspaces(session, uid)
         return [
             WorkspaceMembershipDTO(
                 tenant_id=str(r["tenant_id"]),
@@ -180,6 +153,7 @@ class IdentityService:
             if r.get("membership_status", "active") == "active"
         ]
 
+    @_translate_repository_errors
     async def issue_workspace_token(
         self,
         session: AsyncSession,
@@ -216,13 +190,7 @@ class IdentityService:
                 detail="Active application session required to issue workspace token",
             )
 
-        stmt_func = text("SELECT * FROM iam.resolve_user_workspace_membership(:user_id, :workspace_id)")
-        try:
-            row = (
-                await session.execute(stmt_func, {"user_id": uid, "workspace_id": wid})
-            ).mappings().one_or_none()
-        except SQLAlchemyError as exc:
-            raise _authz_unavailable(exc) from exc
+        row = await self.user_repo.resolve_user_workspace_membership(session, uid, wid)
 
         if (
             row is None
@@ -233,6 +201,8 @@ class IdentityService:
 
         tenant_id = str(row["tenant_id"])
         role = str(row["role"])
+        from control_api.core.auth import ROLE_PERMISSIONS
+
         permissions = ROLE_PERMISSIONS.get(role)
         if permissions is None:
             raise WorkspaceAccessDeniedError()

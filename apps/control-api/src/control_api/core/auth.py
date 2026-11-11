@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_api.core.database import get_db_session, set_rls_context
 from control_api.core.settings import settings
-from control_api.modules.identity.session import SessionData, session_manager
+from control_api.modules.identity.models.session import SessionData
+from control_api.modules.identity.services.session_service import session_manager
 
 logger = logging.getLogger(__name__)
 

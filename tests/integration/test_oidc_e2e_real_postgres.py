@@ -25,8 +25,12 @@ from agent_runtime.settings import RuntimeSettings
 from control_api.core.database import get_db_session
 from control_api.core.settings import settings
 from control_api.main import app
-from control_api.modules.identity.oidc import InMemoryAuthTransactionStore, oidc_client
-from control_api.modules.identity.session import InMemoryRevocationStore, session_manager
+from control_api.modules.identity.providers.oidc_client import oidc_client
+from control_api.modules.identity.repositories.auth_transaction_repository import (
+    InMemoryAuthTransactionStore,
+)
+from control_api.modules.identity.repositories.session_repository import InMemoryRevocationStore
+from control_api.modules.identity.services.session_service import session_manager
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

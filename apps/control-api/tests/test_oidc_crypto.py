@@ -8,7 +8,7 @@ from typing import Any
 
 import jwt
 import pytest
-from control_api.modules.identity.crypto import (
+from control_api.modules.identity.security.crypto import (
     b64url_encode,
     sign_jwt_hs256,
     verify_jwt_hs256,
@@ -83,7 +83,7 @@ def test_valid_token_and_compatibility_helpers(signing_key: RsaKeyPair) -> None:
         == expired
     )  # Legacy helper intentionally checks only the signature.
     signed_input, signature = token.rsplit(".", 1)
-    from control_api.modules.identity.crypto import b64url_decode
+    from control_api.modules.identity.security.crypto import b64url_decode
 
     jwk = signing_key.to_jwk()
     assert verify_rsa_pkcs1v15_sha256(

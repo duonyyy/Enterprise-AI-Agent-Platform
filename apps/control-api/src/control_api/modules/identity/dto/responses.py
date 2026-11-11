@@ -1,4 +1,4 @@
-"""Pydantic v2 DTOs for Identity and Authentication endpoints (SPEC-AUTH-001)."""
+"""Response DTOs for Identity endpoints (SPEC-AUTH-001)."""
 
 from __future__ import annotations
 
@@ -44,12 +44,6 @@ class CurrentUserResponse(BaseModel):
     display_name: str | None = None
     email_normalized: str | None = None
     workspaces: list[WorkspaceMembershipDTO] = Field(default_factory=list)
-
-
-class TokenRequestDTO(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workspace_id: str
 
 
 class TokenResponseDTO(BaseModel):
