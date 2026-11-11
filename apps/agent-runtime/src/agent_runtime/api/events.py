@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from uuid import UUID
 
@@ -20,6 +19,7 @@ async def stream_events(
     principal: CurrentRuntimePrincipal,
     last_event_id: int = Query(default=0, ge=0),
 ) -> StreamingResponse:
+    principal.require_scope("run:read")
     try:
         run_uuid = str(UUID(run_id))
     except ValueError as exc:
@@ -30,7 +30,11 @@ async def stream_events(
 
     async def event_generator():
         # First verify the run exists and belongs to the principal
-        async with scoped_session(principal.tenant_id, principal.workspace_id) as session:
+        async with scoped_session(
+            principal.tenant_id,
+            principal.workspace_id,
+            principal.user_id,
+        ) as session:
             check_result = await session.execute(
                 text("""
                     SELECT id FROM runtime.runs

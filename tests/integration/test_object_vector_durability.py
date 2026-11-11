@@ -20,6 +20,10 @@ pytestmark = pytest.mark.integration
 
 @contextlib.contextmanager
 def owned_service(image, port, target, command=(), env=()):
+    try:
+        docker("info")
+    except RuntimeError as exc:
+        pytest.skip(f"Docker daemon unavailable for container storage fixture: {exc}")
     run_id = uuid4().hex
     resource = {"run_id": run_id, "volume": f"step01-storage-{run_id}"}
     evidence = Path(__file__).resolve().parents[2] / "artifacts/evidence/step01-fixtures" / run_id

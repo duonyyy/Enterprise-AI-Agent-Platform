@@ -1,13 +1,21 @@
 import asyncio
 import time
-from fastapi import FastAPI, Response, status
+
+from fastapi import FastAPI, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
+
 from control_api.core.database import engine
 from control_api.core.settings import settings
 from control_api.modules.agents.api.router import router as agents_router
 from control_api.modules.approvals.router import router as approvals_router
-from control_api.modules.skills.api.router import router as skills_router
+from control_api.modules.identity.api.router import router as identity_router
+from control_api.modules.identity.models.errors import (
+    RepositoryUnavailableError,
+    SessionExpiredError,
+)
 from control_api.modules.mcp.api.router import router as mcp_router
+from control_api.modules.skills.api.router import router as skills_router
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
 
@@ -26,6 +34,7 @@ def health_live():
 async def health_ready(response: Response):
     start = time.perf_counter()
     try:
+
         async def _check_db() -> bool:
             async with engine.connect() as conn:
                 result = await conn.execute(text("SELECT 1"))
@@ -85,6 +94,32 @@ async def health_ready(response: Response):
     }
 
 
+@app.exception_handler(RepositoryUnavailableError)
+async def repository_unavailable_handler(
+    _request: Request,
+    exc: RepositoryUnavailableError,
+) -> JSONResponse:
+    """Translate backing-store unavailability errors from repositories into HTTP 503."""
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": str(exc)},
+    )
+
+
+@app.exception_handler(SessionExpiredError)
+async def session_expired_handler(
+    _request: Request,
+    exc: SessionExpiredError,
+) -> JSONResponse:
+    """Translate domain session-expiration errors into HTTP 401 Bearer challenges."""
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": str(exc)},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+app.include_router(identity_router)
 app.include_router(agents_router)
 app.include_router(approvals_router)
 app.include_router(skills_router)

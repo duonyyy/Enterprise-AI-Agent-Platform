@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   PageHeader,
   DataTable,
@@ -72,6 +73,7 @@ export default function AgentsPage({
   params: { workspaceId: string };
 }) {
   const workspaceId = params.workspaceId || "default";
+  const router = useRouter();
 
   // Data & State
   const [agents, setAgents] = useState<AgentResponse[]>([]);
@@ -125,6 +127,10 @@ export default function AgentsPage({
         setViewState("ready");
       }
     } catch (err: unknown) {
+      if (err instanceof ApiClientError && err.isUnauthorized) {
+        router.replace(`/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`);
+        return;
+      }
       if (err instanceof ApiClientError && err.isForbidden) {
         setViewState("forbidden");
         return;
@@ -136,7 +142,7 @@ export default function AgentsPage({
     } finally {
       setIsRefreshing(false);
     }
-  }, [workspaceId]);
+  }, [workspaceId, router]);
 
   useEffect(() => {
     fetchAgents();
@@ -195,6 +201,10 @@ export default function AgentsPage({
       showToast(`Đã tạo bản nháp Tác tử "${created.display_name}" thành công.`);
       if (viewState === "empty") setViewState("ready");
     } catch (err: unknown) {
+      if (err instanceof ApiClientError && err.isUnauthorized) {
+        router.replace(`/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`);
+        return;
+      }
       if (err instanceof ApiClientError && err.status === 403) {
         setCreateError("Từ chối truy cập: Bạn không có quyền khởi tạo Tác tử.");
         return;
@@ -244,7 +254,15 @@ export default function AgentsPage({
 
       showToast(`Đã công bố phiên bản bất biến cho Tác tử "${publishTargetAgent.display_name}".`);
       setPublishTargetAgent(null);
-    } catch {
+    } catch (err: unknown) {
+      if (err instanceof ApiClientError && err.isUnauthorized) {
+        router.replace(`/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`);
+        return;
+      }
+      if (err instanceof ApiClientError && err.status === 403) {
+        showToast("Từ chối truy cập: Bạn không có quyền công bố Tác tử.");
+        return;
+      }
       // Optimistic update for presentation if backend mock returns standard response
       setAgents((prev) =>
         prev.map((ag) =>

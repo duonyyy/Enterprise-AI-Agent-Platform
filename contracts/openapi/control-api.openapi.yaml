@@ -3,6 +3,172 @@ info:
   title: Control Plane API v2.0
   version: 2.0.0
 paths:
+  /v1/auth/login:
+    get:
+      summary: Initiate OIDC Authorization Code Flow with PKCE S256
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Authorization transaction initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorization_url, state]
+                properties:
+                  authorization_url: { type: string }
+                  state: { type: string }
+        '307':
+          description: Temporary redirect to Identity Provider
+  /v1/auth/callback:
+    get:
+      summary: Process OIDC Callback with Authorization Code and PKCE verification
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+        - name: error
+          in: query
+          required: false
+          schema: { type: string }
+        - name: error_description
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Authentication successful, session cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, issuer, subject]
+                properties:
+                  user_id: { type: string, format: uuid }
+                  issuer: { type: string }
+                  subject: { type: string }
+                  display_name:
+                    type: [string, "null"]
+                  email_normalized:
+                    type: [string, "null"]
+                  redirect_url: { type: string }
+        '302':
+          description: Redirect to Studio with session cookie
+        '400':
+          description: Invalid authorization code, state, or PKCE verifier mismatch
+        '401':
+          description: OIDC token verification failed
+        '503':
+          description: Auth or session store unavailable
+  /v1/auth/me:
+    get:
+      summary: Get current authenticated user profile and allowed workspaces
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user profile and memberships
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, issuer, subject, workspaces]
+                properties:
+                  user_id: { type: string, format: uuid }
+                  issuer: { type: string }
+                  subject: { type: string }
+                  display_name:
+                    type: [string, "null"]
+                  email_normalized:
+                    type: [string, "null"]
+                  workspaces:
+                    type: array
+                    items:
+                      type: object
+                      required: [tenant_id, workspace_id, role]
+                      properties:
+                        tenant_id: { type: string, format: uuid }
+                        tenant_slug: { type: string }
+                        tenant_name: { type: string }
+                        workspace_id: { type: string, format: uuid }
+                        workspace_slug: { type: string }
+                        workspace_name: { type: string }
+                        role: { type: string }
+        '401':
+          description: Missing, expired, revoked, or superseded session
+        '503':
+          description: Session or identity store unavailable
+  /v1/auth/refresh:
+    post:
+      summary: Atomically rotate active session within absolute lifetime
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Session rotated, new cookie set with bounded Max-Age
+        '401':
+          description: Session expired, revoked, superseded, or invalid
+        '403':
+          description: Cross-origin or cross-site request rejected
+        '503':
+          description: Session store unavailable
+  /v1/auth/logout:
+    post:
+      summary: Revoke session and clear session cookie
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Session revoked successfully or local session cleared
+        '403':
+          description: Cross-origin or cross-site request rejected
+        '503':
+          description: Revocation store unavailable; local session cleared but server-side revocation could not be confirmed
+  /v1/auth/token:
+    post:
+      summary: Exchange active session for short-lived workspace scoped API token
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace_id]
+              properties:
+                workspace_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Scoped access token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in]
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_in: { type: integer, example: 900 }
+        '401':
+          description: Missing, expired, revoked, or superseded parent session
+        '403':
+          description: User lacks active membership in specified workspace or CSRF rejected
+        '503':
+          description: Session or identity store unavailable
   /v1/workspaces:
     post:
       summary: Create workspace
@@ -11,33 +177,73 @@ paths:
   /v1/workspaces/{workspace_id}/agents:
     get:
       summary: List agents
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Success }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
     post:
       summary: Create agent draft
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '201': { description: Created }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
     post:
       summary: Atomically publish immutable agent version
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string } }
+        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: agent_id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Published }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/approvals:
     get:
       summary: List pending approval requests
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Success }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/workspaces/{workspace_id}/approvals/{approval_id}/decision:
     post:
       summary: Submit CAS approval decision
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string } }
-        - { name: approval_id, in: path, required: true, schema: { type: string } }
+        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: approval_id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200': { description: Decision committed }
+        '401': { description: Missing, invalid, expired, or revoked credentials }
+        '403': { description: Workspace access denied or insufficient permissions }
+        '503': { description: Authorization or session store temporarily unavailable }
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: agent_session
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
