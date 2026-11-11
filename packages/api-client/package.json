@@ -1,1 +1,10 @@
-{"name":"@enterprise/api-client","version":"2.0.0","private":true,"main":"./src/index.ts"}
+{
+  "name": "@enterprise/api-client",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/index.test.ts"
+  }
+}

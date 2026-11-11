@@ -37,6 +37,7 @@ markers = [
     "integration: requires real external infrastructure such as PostgreSQL",
 ]
 pythonpath = [
+    ".",
     "libs/python/platform-common/src",
     "libs/python/agent-contracts/src",
     "apps/control-api/src",

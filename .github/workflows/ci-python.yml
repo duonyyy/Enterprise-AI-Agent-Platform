@@ -145,9 +145,12 @@ jobs:
           JWT_SECRET_KEY: ci-jwt-secret-key-at-least-32-characters-long
           JWT_ISSUER: http://localhost:8080/realms/enterprise
           JWT_AUDIENCE: enterprise-control-api
+          RUNTIME_JWT_SECRET: ci-runtime-jwt-secret-at-least-32-characters
+          RUNTIME_JWT_ISSUER: http://localhost:8080/realms/enterprise
           REDIS_URL: redis://localhost:6379/0
+          TEST_REDIS_URL: redis://localhost:6379/15
         run: |
-          uv run pytest tests/contract/ tests/integration/ apps/control-api/tests apps/jobs-worker/tests -v
+          uv run pytest tests/contract/ tests/security/ tests/integration/ apps/control-api/tests apps/agent-runtime/tests apps/jobs-worker/tests -v
 
       - name: Retain sanitized database test evidence
         if: always()

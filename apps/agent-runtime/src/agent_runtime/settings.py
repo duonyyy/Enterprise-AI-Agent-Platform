@@ -12,6 +12,10 @@ class RuntimeSettings(BaseSettings):
 
     environment: str = "development"
     database_url: str = ""
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    auth_store_type: str = "redis"
+    redis_socket_timeout_seconds: float = 2.0
+    redis_connect_timeout_seconds: float = 2.0
     runtime_jwt_secret: str = ""
     runtime_jwt_issuer: str = ""
     runtime_jwt_audience: str = "agent-runtime"

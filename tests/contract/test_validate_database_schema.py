@@ -48,7 +48,9 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
     assert "PASS static checks:" in result.stdout
     assert "reviewed 0002 content fingerprint" in result.stdout
     assert "reviewed 0003 content fingerprint" in result.stdout
+    assert "reviewed 0004 content fingerprint" in result.stdout
     assert "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy" in result.stdout
+    assert "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections" in result.stdout
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -65,7 +67,7 @@ def test_missing_migration_file_fails(tmp_path: Path) -> None:
 def test_non_sequential_or_duplicate_migration_filename_fails(tmp_path: Path) -> None:
     validator = _load_validator_module()
     migrations_dir = _copy_migrations(tmp_path)
-    (migrations_dir / "0005_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
+    (migrations_dir / "0006_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Non-sequential migration numbering" in e for e in errors)
@@ -193,6 +195,26 @@ def test_corrupted_restore_workspaces_rls_migration_fails(tmp_path: Path) -> Non
     errors = validator.validate_database_schema(migrations_dir)
     assert any("0003_restore_workspaces_rls.sql must not contain CREATE TABLE" in e for e in errors)
     assert any("differs from the reviewed authored SQL fingerprint" in e for e in errors)
+
+
+def test_corrupted_identity_projection_migration_fails(tmp_path: Path) -> None:
+    validator = _load_validator_module()
+    migrations_dir = _copy_migrations(tmp_path)
+    projection_path = migrations_dir / "0004_identity_discovery_projection.sql"
+    sql = projection_path.read_text(encoding="utf-8")
+
+    corrupted = sql.replace(
+        "REVOKE ALL ON FUNCTION iam.get_user_workspaces(uuid) FROM PUBLIC;",
+        "CREATE TABLE iam.extra_session_table (id uuid);",
+    )
+    projection_path.write_text(corrupted, encoding="utf-8")
+
+    errors = validator.validate_database_schema(migrations_dir)
+    assert any(
+        "0004_identity_discovery_projection.sql must not contain CREATE TABLE" in e for e in errors
+    )
+    assert any("differs from the reviewed authored SQL fingerprint" in e for e in errors)
+    assert any("REVOKE ALL ON FUNCTION iam.get_user_workspaces FROM PUBLIC" in e for e in errors)
 
 
 @pytest.mark.parametrize("wrapper", ["comment", "block", "string", "dollar"])
