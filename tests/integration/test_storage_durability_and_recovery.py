@@ -172,9 +172,9 @@ def test_backup_and_restore_recovery(
                 )
                 assert cur.fetchone()[0] == 56
 
-                # 1 technical migration history table with 3 applied migrations
+                # 1 technical migration history table with 4 applied migrations
                 cur.execute("SELECT count(*) FROM public.schema_migrations")
-                assert cur.fetchone()[0] == 3
+                assert cur.fetchone()[0] == 4
 
                 # Verify RLS is enabled and forced on all 55 non-global domain tables (iam.users is global)
                 cur.execute(

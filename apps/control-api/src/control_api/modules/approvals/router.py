@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from control_api.core.authorization import require_permission
 from control_api.core.dependencies import CurrentUser, DBSession
 from control_api.modules.approvals.schemas import DecisionInputDTO
-from platform_common.principal import AuthenticatedPrincipal
+from fastapi import APIRouter, HTTPException, status
+from sqlalchemy import text
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/approvals", tags=["approvals"])
 
@@ -20,6 +18,7 @@ async def list_pending_approvals(
     principal: CurrentUser,
     session: DBSession,
 ) -> list[dict]:
+    require_permission(principal, "approval:read")
     query = text("""
         SELECT id, run_id, step_key, action_hash, status, approver_role, revision, expires_at, created_at
         FROM runtime.approval_requests
@@ -98,7 +97,7 @@ async def commit_decision(
         )
 
     # Validate expiration
-    now_dt = datetime.now(timezone.utc)
+    now_dt = datetime.now(UTC)
     if record["expires_at"] <= now_dt:
         await session.execute(
             text("""

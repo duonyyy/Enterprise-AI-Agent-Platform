@@ -40,13 +40,15 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "SELECT version, name, checksum, applied_by FROM public.schema_migrations ORDER BY version"
         )
         rows = cur.fetchall()
-        assert len(rows) == 3
+        assert len(rows) == 4
         assert rows[0][0] == "0001"
         assert rows[0][1] == "0001_baseline.sql"
         assert rows[1][0] == "0002"
         assert rows[1][1] == "0002_fail_closed_rls.sql"
         assert rows[2][0] == "0003"
         assert rows[2][1] == "0003_restore_workspaces_rls.sql"
+        assert rows[3][0] == "0004"
+        assert rows[3][1] == "0004_identity_discovery_projection.sql"
 
         # 2. Verify exactly 56 domain tables across 7 schemas
         cur.execute(
@@ -116,7 +118,7 @@ def test_migration_upgrade_preserves_data(isolated_database, tmp_path):
             "INSERT INTO iam.workspaces (tenant_id,id,slug,name) VALUES (%s,%s,%s,%s)",
             (tenant, workspace, "upgrade-ws", "Upgrade Workspace"),
         )
-    assert run_migrations(db_url) == ["0003"]
+    assert run_migrations(db_url) == ["0003", "0004"]
     with psycopg.connect(db_url) as conn:
         assert conn.execute(
             "SELECT name FROM iam.workspaces WHERE id=%s", (workspace,)
@@ -185,7 +187,7 @@ def test_migration_advisory_locking(isolated_database):
         ).fetchone() == (True,)
         with pytest.raises(MigrationLockError):
             run_migrations(db_url)
-    assert run_migrations(db_url) == ["0001", "0002", "0003"]
+    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004"]
 
 
 @pytest.mark.integration
@@ -207,7 +209,7 @@ def test_legacy_database_without_history_is_not_replayed(isolated_database):
 @pytest.mark.integration
 def test_check_and_dry_run_do_not_create_history(isolated_database):
     db_url = isolated_database["owner_url"]
-    assert run_migrations(db_url, dry_run=True) == ["0001", "0002", "0003"]
+    assert run_migrations(db_url, dry_run=True) == ["0001", "0002", "0003", "0004"]
     from run_migrations import MigrationError
 
     with pytest.raises(MigrationError, match="pending"):
@@ -220,21 +222,50 @@ def test_check_and_dry_run_do_not_create_history(isolated_database):
 def test_generated_docker_bootstrap_has_matching_history(isolated_database, tmp_path):
     path = tmp_path / "bootstrap.sql"
     write_bootstrap_sql(Path(__file__).resolve().parents[2] / "database/migrations", path)
-    container = isolated_database["container_id"]
-    docker("cp", str(path.resolve()), f"{container}:/tmp/bootstrap.sql")
-    docker(
-        "exec",
-        container,
-        "psql",
-        "-U",
-        "platform_owner",
-        "-d",
-        isolated_database["primary_db"],
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-f",
-        "/tmp/bootstrap.sql",
-    )
+    if isolated_database.get("local_mode"):
+        import os
+        import subprocess
+
+        bin_dir = isolated_database["bin_dir"]
+        psql_bin = str(bin_dir / ("psql.exe" if (bin_dir / "psql.exe").exists() else "psql"))
+        env = {**os.environ, "PGPASSWORD": str(isolated_database.get("owner_password", ""))}
+        subprocess.run(
+            [
+                psql_bin,
+                "-h",
+                str(isolated_database.get("host", "127.0.0.1")),
+                "-p",
+                str(isolated_database["port"]),
+                "-U",
+                "platform_owner",
+                "-d",
+                isolated_database["primary_db"],
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-f",
+                str(path.resolve()),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    else:
+        container = isolated_database["container_id"]
+        docker("cp", str(path.resolve()), f"{container}:/tmp/bootstrap.sql")
+        docker(
+            "exec",
+            container,
+            "psql",
+            "-U",
+            "platform_owner",
+            "-d",
+            isolated_database["primary_db"],
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            "/tmp/bootstrap.sql",
+        )
     assert run_migrations(isolated_database["owner_url"]) == []
 
 

@@ -18,6 +18,7 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0001_baseline.sql",
     "0002_fail_closed_rls.sql",
     "0003_restore_workspaces_rls.sql",
+    "0004_identity_discovery_projection.sql",
 )
 
 # Pin the reviewed authored program, not its database effects. Whitespace and
@@ -27,6 +28,9 @@ REVIEWED_POLICY_FINGERPRINT: Final[str] = (
 )
 REVIEWED_RESTORE_RLS_FINGERPRINT: Final[str] = (
     "e078a8dadd4a793ed6237ce6402f7ff2fdb23cfc421feeb9ff722af013fb9a22"
+)
+REVIEWED_IDENTITY_PROJECTION_FINGERPRINT: Final[str] = (
+    "f02197eba774ea5bade4dcb6218ad76ccf8d59ba2df57b3d5366453213abe2ec"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -613,6 +617,54 @@ def _validate_restore_workspaces_rls_sql(sql: str) -> list[str]:
     return errors
 
 
+def _validate_identity_projection_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    executable, fingerprint = _sql_structure(sql)
+
+    if FORBIDDEN_DDL_IN_POLICY_MIGRATION_RE.search(executable):
+        errors.append(
+            "0004_identity_discovery_projection.sql must not contain CREATE TABLE or DROP TABLE"
+        )
+
+    if fingerprint != REVIEWED_IDENTITY_PROJECTION_FINGERPRINT:
+        errors.append(
+            "0004_identity_discovery_projection.sql differs from the reviewed authored SQL fingerprint; "
+            "projection changes require review"
+        )
+
+    for func_name in ("iam.get_user_workspaces", "iam.resolve_user_workspace_membership"):
+        if not re.search(rf"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)}\b", executable):
+            errors.append(
+                f"0004_identity_discovery_projection.sql must declare function {func_name}"
+            )
+        if not re.search(
+            rf"REVOKE\s+ALL\s+ON\s+FUNCTION\s+{re.escape(func_name)}\s*\([^)]+\)\s+FROM\s+PUBLIC\b",
+            executable,
+        ):
+            errors.append(
+                f"0004_identity_discovery_projection.sql must REVOKE ALL ON FUNCTION {func_name} FROM PUBLIC"
+            )
+        if not re.search(
+            rf"GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+{re.escape(func_name)}\s*\([^)]+\)\s+TO\s+platform_app\b",
+            executable,
+        ):
+            errors.append(
+                f"0004_identity_discovery_projection.sql must GRANT EXECUTE ON FUNCTION {func_name} TO platform_app"
+            )
+
+    if len(re.findall(r"\bSECURITY\s+DEFINER\b", executable)) != 2:
+        errors.append(
+            "0004_identity_discovery_projection.sql must declare SECURITY DEFINER on both projection functions"
+        )
+
+    if len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable)) != 2:
+        errors.append(
+            "0004_identity_discovery_projection.sql must pin SET search_path = pg_catalog, iam, pg_temp on both functions"
+        )
+
+    return errors
+
+
 def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     """Validate the canonical SQL migration directory and return a list of errors."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -630,6 +682,11 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
 
     restore_sql = (target_dir / "0003_restore_workspaces_rls.sql").read_text(encoding="utf-8-sig")
     errors.extend(_validate_restore_workspaces_rls_sql(restore_sql))
+
+    projection_sql = (target_dir / "0004_identity_discovery_projection.sql").read_text(
+        encoding="utf-8-sig"
+    )
+    errors.extend(_validate_identity_projection_sql(projection_sql))
 
     return errors
 
@@ -654,13 +711,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 3 ordered migrations, 7 schemas, 56 canonical tables, "
+        "PASS static checks: 4 ordered migrations, 7 schemas, 56 canonical tables, "
         "recognized FK/UNIQUE declarations, 55 baseline RLS declarations, "
         "10 immutable trigger declarations + 1 document guard, "
-        "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint."
+        "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
+        "reviewed 0004 content fingerprint."
     )
     print(
         "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy (DEC-DB-01)."
+    )
+    print(
+        "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections (ADR-018 / D3-A)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

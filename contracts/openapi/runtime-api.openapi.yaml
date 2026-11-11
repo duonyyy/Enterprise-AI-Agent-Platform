@@ -6,6 +6,8 @@ paths:
   /v1/runs:
     post:
       summary: Start run with pinned agent version
+      security:
+        - BearerAuth: []
       parameters:
         - name: Idempotency-Key
           in: header
@@ -13,21 +15,46 @@ paths:
           schema: { type: string, minLength: 1, maxLength: 200 }
       responses:
         '202': { description: Queued }
+        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
+        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/runs/{run_id}:
     get:
       summary: Get run status
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - BearerAuth: []
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Success }
+        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
+        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
+        '503': { description: Authorization or session store temporarily unavailable }
   /v1/runs/{run_id}/events:
     get:
       summary: Reconnectable SSE events stream
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - BearerAuth: []
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Stream }
+        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
+        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
+        '503': { description: Authorization or session store temporarily unavailable }
   /internal/v1/runs/{run_id}/resume:
     post:
       summary: Private service resume with signed approval decision proof
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string } }]
+      security:
+        - BearerAuth: []
+      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
         '200': { description: Resumed }
+        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
+        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
+        '503': { description: Authorization or session store temporarily unavailable }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
