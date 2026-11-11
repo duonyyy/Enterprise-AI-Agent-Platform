@@ -21,7 +21,7 @@ from agent_runtime.auth import (
     set_parent_session_verifier,
     verify_runtime_token,
 )
-from agent_runtime.settings import RuntimeSettings
+from agent_runtime.settings import RuntimeSettings, get_settings
 from control_api.core.database import get_db_session
 from control_api.core.settings import settings
 from control_api.main import app
@@ -42,6 +42,7 @@ from tests.fixtures.oidc_http_server import run_oidc_http_server
 @pytest.mark.integration
 def test_oidc_e2e_full_lifecycle_real_postgres_and_http_idp(
     migrated_database: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Full user journey:
     1. Login initiation -> gets correlation cookie and authorization url with PKCE challenge
@@ -296,6 +297,14 @@ def test_oidc_e2e_full_lifecycle_real_postgres_and_http_idp(
             assert str(rt_principal.user_id) == str(created_user_id)
 
             # Test DB resolution in Agent Runtime
+            monkeypatch.setenv("RUNTIME_JWT_SECRET", expected_secret)
+            monkeypatch.setenv(
+                "RUNTIME_JWT_ISSUER",
+                settings.runtime_jwt_issuer or settings.jwt_issuer,
+            )
+            monkeypatch.setenv("RUNTIME_JWT_AUDIENCE", settings.runtime_jwt_audience)
+            get_settings.cache_clear()
+
             async def _check_runtime_db():
                 async with db_session_factory() as sess, sess.begin():
                     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=scoped_token)
@@ -305,6 +314,7 @@ def test_oidc_e2e_full_lifecycle_real_postgres_and_http_idp(
                     )
                     assert active_p.roles == ("developer",)
                     assert "run:read" in active_p.scopes
+
             asyncio.run(_check_runtime_db())
 
             # -------------------------------------------------------------
@@ -357,8 +367,11 @@ def test_oidc_e2e_full_lifecycle_real_postgres_and_http_idp(
             with pytest.raises(Exception) as rt_exc:
                 asyncio.run(_check_runtime_db())
             assert "401" in str(rt_exc.value)
+            assert "parent_session_revoked_or_expired" in str(rt_exc.value)
 
         finally:
+            monkeypatch.undo()
+            get_settings.cache_clear()
             app.dependency_overrides.clear()
             set_parent_session_verifier(None)
             oidc_client.store = orig_tx_store
