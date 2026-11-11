@@ -176,5 +176,95 @@ describe("ControlApiClientV2 Unit Tests", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("workspace endpoints (createWorkspace, listWorkspaces, getWorkspace) serialize and parse payloads", async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const method = init?.method || "GET";
+      calls.push({ url: urlStr, method, body: init?.body ? String(init.body) : undefined });
+
+      if (urlStr.endsWith("/v1/workspaces") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            workspace_id: "00000000-0000-0000-0000-000000000010",
+            tenant_id: "00000000-0000-0000-0000-000000000001",
+            tenant_slug: "vinai",
+            tenant_name: "VinAI Enterprise",
+            workspace_slug: "core-platform",
+            workspace_name: "Core Platform",
+            status: "active",
+            role: "owner",
+            initial_owner_user_id: "00000000-0000-0000-0000-000000000099",
+            audit_event_id: "00000000-0000-0000-0000-000000000088",
+            created_at: "2026-11-12T00:00:00Z",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/v1/workspaces") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                workspace_id: "00000000-0000-0000-0000-000000000010",
+                tenant_id: "00000000-0000-0000-0000-000000000001",
+                tenant_slug: "vinai",
+                tenant_name: "VinAI Enterprise",
+                workspace_slug: "core-platform",
+                workspace_name: "Core Platform",
+                status: "active",
+                role: "owner",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/v1/workspaces/00000000-0000-0000-0000-000000000010") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            workspace_id: "00000000-0000-0000-0000-000000000010",
+            tenant_id: "00000000-0000-0000-0000-000000000001",
+            tenant_slug: "vinai",
+            tenant_name: "VinAI Enterprise",
+            workspace_slug: "core-platform",
+            workspace_name: "Core Platform",
+            status: "active",
+            role: "owner",
+            initial_owner_user_id: null,
+            audit_event_id: null,
+            created_at: "2026-11-12T00:00:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const created = await client.createWorkspace({
+        name: "Core Platform",
+        slug: "core-platform",
+        tenant_id: "00000000-0000-0000-0000-000000000001",
+      });
+      assert.equal(created.workspace_id, "00000000-0000-0000-0000-000000000010");
+      assert.equal(created.workspace_slug, "core-platform");
+      assert.equal(created.role, "owner");
+
+      const list = await client.listWorkspaces();
+      assert.equal(list.items.length, 1);
+      assert.equal(list.items[0].workspace_slug, "core-platform");
+      assert.equal(list.items[0].status, "active");
+
+      const detail = await client.getWorkspace("00000000-0000-0000-0000-000000000010");
+      assert.equal(detail.workspace_slug, "core-platform");
+      assert.equal(calls.length, 3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

@@ -16,6 +16,7 @@ from control_api.modules.identity.models.errors import (
 )
 from control_api.modules.mcp.api.router import router as mcp_router
 from control_api.modules.skills.api.router import router as skills_router
+from control_api.modules.workspaces.api.router import router as workspaces_router
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
 
@@ -120,6 +121,7 @@ async def session_expired_handler(
 
 
 app.include_router(identity_router)
+app.include_router(workspaces_router)
 app.include_router(agents_router)
 app.include_router(approvals_router)
 app.include_router(skills_router)

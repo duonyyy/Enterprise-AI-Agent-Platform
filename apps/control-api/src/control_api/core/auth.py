@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "owner": [
+        "workspace:*",
         "agent:*",
         "workflow:*",
         "approval:*",
@@ -38,6 +39,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "runs:execute",
     ],
     "admin": [
+        "workspace:*",
         "agent:*",
         "workflow:*",
         "approval:*",
@@ -50,6 +52,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "runs:execute",
     ],
     "maintainer": [
+        "workspace:read",
         "agent:*",
         "workflow:*",
         "approval:read",
@@ -62,6 +65,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "runs:execute",
     ],
     "developer": [
+        "workspace:read",
         "agent:read",
         "agent:create",
         "agent:edit",
@@ -78,6 +82,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "runs:execute",
     ],
     "operator": [
+        "workspace:read",
         "agent:read",
         "skill:read",
         "mcp:read",
@@ -90,6 +95,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "runs:execute",
     ],
     "viewer": [
+        "workspace:read",
         "agent:read",
         "skill:read",
         "mcp:read",

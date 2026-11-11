@@ -89,6 +89,44 @@ export interface WorkspaceTokenResponse {
   expires_in: number;
 }
 
+export interface CreateWorkspaceRequestDTO {
+  name: string;
+  slug: string;
+  tenant_id?: string | null;
+  tenant_slug?: string | null;
+  tenant_name?: string | null;
+  initial_owner_user_id?: string | null;
+}
+
+export interface WorkspaceResponseDTO {
+  workspace_id: string;
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_slug: string;
+  workspace_name: string;
+  status: string;
+  role: string;
+  initial_owner_user_id?: string | null;
+  audit_event_id?: string | null;
+  created_at: string;
+}
+
+export interface WorkspaceSummaryDTO {
+  workspace_id: string;
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_slug: string;
+  workspace_name: string;
+  status: string;
+  role: string;
+}
+
+export interface WorkspaceListResponseDTO {
+  items: WorkspaceSummaryDTO[];
+}
+
 export class ApiClientError extends Error {
   public readonly status: number;
   public readonly statusText: string;
@@ -349,6 +387,38 @@ export class ControlApiClientV2 {
       body: JSON.stringify({ workspace_id: workspaceId }),
       signal,
     });
+  }
+
+  // --- Workspaces API (SPEC-WORKSPACE-001 / Step 03-A) ---
+  async createWorkspace(
+    dto: CreateWorkspaceRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceResponseDTO> {
+    return this.request<WorkspaceResponseDTO>("/v1/workspaces", {
+      method: "POST",
+      body: JSON.stringify(dto),
+      signal,
+    });
+  }
+
+  async listWorkspaces(signal?: AbortSignal): Promise<WorkspaceListResponseDTO> {
+    return this.request<WorkspaceListResponseDTO>("/v1/workspaces", {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async getWorkspace(
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceResponseDTO> {
+    return this.request<WorkspaceResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}`,
+      {
+        method: "GET",
+        signal,
+      }
+    );
   }
 }
 

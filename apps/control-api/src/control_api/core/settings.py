@@ -70,6 +70,28 @@ class Settings(BaseSettings):
     oidc_correlation_cookie_secure: bool = False
     oidc_correlation_cookie_same_site: str = "lax"
 
+    # Workspace & Tenant Bootstrap Authority Allowlist (SPEC-WORKSPACE-001 / WS-D01)
+    # Entries may be "<issuer>|<subject>" or "<subject>" (bound to oidc_issuer).
+    bootstrap_operator_subjects: list[str] = Field(default_factory=list, max_length=64)
+
+    def is_bootstrap_operator(self, issuer: str, subject: str) -> bool:
+        """Check whether (issuer, subject) matches an authorized bootstrap operator entry (WS-D01)."""
+        clean_iss = issuer.strip()
+        clean_sub = subject.strip()
+        if not clean_iss or not clean_sub:
+            return False
+        for raw_entry in self.bootstrap_operator_subjects:
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            if "|" in entry:
+                cfg_iss, cfg_sub = entry.split("|", 1)
+                if cfg_iss.strip() == clean_iss and cfg_sub.strip() == clean_sub:
+                    return True
+            elif clean_iss == self.oidc_issuer.strip() and entry == clean_sub:
+                return True
+        return False
+
     @field_validator("auth_store_type", mode="before")
     @classmethod
     def normalize_auth_store_type(cls, value: Any) -> str:

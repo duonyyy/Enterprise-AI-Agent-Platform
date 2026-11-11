@@ -170,10 +170,179 @@ paths:
         '503':
           description: Session or identity store unavailable
   /v1/workspaces:
-    post:
-      summary: Create workspace
+    get:
+      summary: List active workspaces for the current authenticated user
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
       responses:
-        '201': { description: Created }
+        '200':
+          description: Active allowed workspaces
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - workspace_id
+                        - tenant_id
+                        - tenant_slug
+                        - tenant_name
+                        - workspace_slug
+                        - workspace_name
+                        - status
+                        - role
+                      properties:
+                        workspace_id: { type: string, format: uuid }
+                        tenant_id: { type: string, format: uuid }
+                        tenant_slug: { type: string }
+                        tenant_name: { type: string }
+                        workspace_slug: { type: string }
+                        workspace_name: { type: string }
+                        status: { type: string, enum: [active, archived] }
+                        role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+        '401':
+          description: Missing, expired, revoked, or superseded session
+        '403':
+          description: Scoped workspace token cannot list global workspaces
+        '503':
+          description: Workspace or authorization store temporarily unavailable
+    post:
+      summary: Atomically provision a workspace and initial active Owner membership
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [slug, name]
+              properties:
+                slug:
+                  type: string
+                  minLength: 2
+                  maxLength: 63
+                  pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                tenant_id:
+                  type: [string, "null"]
+                  format: uuid
+                tenant_slug:
+                  type: [string, "null"]
+                  minLength: 3
+                  maxLength: 63
+                  pattern: '^[a-z0-9][a-z0-9-]{2,62}$'
+                tenant_name:
+                  type: [string, "null"]
+                  minLength: 1
+                  maxLength: 255
+                initial_owner_user_id:
+                  type: [string, "null"]
+                  format: uuid
+      responses:
+        '201':
+          description: Workspace and initial Owner membership created atomically
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - workspace_id
+                  - tenant_id
+                  - tenant_slug
+                  - tenant_name
+                  - workspace_slug
+                  - workspace_name
+                  - status
+                  - role
+                  - created_at
+                properties:
+                  workspace_id: { type: string, format: uuid }
+                  tenant_id: { type: string, format: uuid }
+                  tenant_slug: { type: string }
+                  tenant_name: { type: string }
+                  workspace_slug: { type: string }
+                  workspace_name: { type: string }
+                  status: { type: string, enum: [active, archived] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                  initial_owner_user_id:
+                    type: [string, "null"]
+                    format: uuid
+                  audit_event_id:
+                    type: [string, "null"]
+                    format: uuid
+                  created_at: { type: string, format: date-time }
+        '401':
+          description: Missing, expired, revoked, or superseded session
+        '403':
+          description: Actor lacks tenant provisioning/owner authority, forged owner designation, or CSRF rejected
+        '409':
+          description: Workspace slug or tenant slug already exists
+        '422':
+          description: Invalid slug, name, UUID, or forbidden mass-assignment fields
+        '503':
+          description: Workspace persistence or authorization store temporarily unavailable
+  /v1/workspaces/{workspace_id}:
+    get:
+      summary: Get active workspace details within authorized RLS scope
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Workspace details
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - workspace_id
+                  - tenant_id
+                  - tenant_slug
+                  - tenant_name
+                  - workspace_slug
+                  - workspace_name
+                  - status
+                  - role
+                  - created_at
+                properties:
+                  workspace_id: { type: string, format: uuid }
+                  tenant_id: { type: string, format: uuid }
+                  tenant_slug: { type: string }
+                  tenant_name: { type: string }
+                  workspace_slug: { type: string }
+                  workspace_name: { type: string }
+                  status: { type: string, enum: [active, archived] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                  initial_owner_user_id:
+                    type: [string, "null"]
+                    format: uuid
+                  audit_event_id:
+                    type: [string, "null"]
+                    format: uuid
+                  created_at: { type: string, format: date-time }
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or active membership required
+        '503':
+          description: Authorization or workspace store temporarily unavailable
   /v1/workspaces/{workspace_id}/agents:
     get:
       summary: List agents
