@@ -15,9 +15,14 @@ from control_api.modules.workspaces.models.errors import (
     InvitationForbiddenError,
     InvitationValidationError,
 )
-from control_api.modules.workspaces.repositories.invitation_repository import (
+from control_api.modules.workspaces.models.ports import InvitationRepositoryPort
+from control_api.modules.workspaces.models.rbac import (
+    can_invite_target_role,
+    can_manage_invitations,
+)
+from control_api.modules.workspaces.models.records import (
     InvitationPolicyConfig,
-    InvitationRepository,
+    InvitationRecord,
 )
 from platform_common.invitations import (
     InvitationCryptoError,
@@ -27,14 +32,13 @@ from platform_common.invitations import (
     validate_public_app_origin,
 )
 from platform_common.principal import AuthenticatedPrincipal
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class InvitationService:
     """Orchestrates workspace invitation create, list, resend, and revoke use cases."""
 
-    def __init__(self, repository: InvitationRepository | None = None) -> None:
-        self._repository = repository or InvitationRepository()
+    def __init__(self, repository: InvitationRepositoryPort) -> None:
+        self._repository = repository
 
     @staticmethod
     def _ensure_invitations_enabled() -> None:
@@ -71,7 +75,7 @@ class InvitationService:
     @staticmethod
     def _require_owner_or_admin(principal: AuthenticatedPrincipal) -> str:
         role = principal.roles[0] if principal.roles else ""
-        if role not in {"owner", "admin"}:
+        if not can_manage_invitations(role):
             raise InvitationForbiddenError(
                 "invitation_forbidden",
                 "Only workspace owners and admins can manage invitations",
@@ -79,12 +83,11 @@ class InvitationService:
         return role
 
     @staticmethod
-    def _to_response_dto(record: dict[str, object]) -> WorkspaceInvitationResponseDTO:
+    def _to_response_dto(record: InvitationRecord) -> WorkspaceInvitationResponseDTO:
         return WorkspaceInvitationResponseDTO.model_validate(record)
 
     async def create_invitation(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         actor_issuer: str,
@@ -92,18 +95,12 @@ class InvitationService:
         request_id: str,
         trace_id: str,
     ) -> WorkspaceInvitationResponseDTO:
+        """Validate RBAC policy, encrypt invitation proof, and enqueue durable outbox delivery."""
         protector = self._build_proof_protector()
         actor_role = self._require_owner_or_admin(principal)
-        if payload.role == "owner":
-            raise InvitationForbiddenError(
-                "owner_invite_forbidden",
-                "Workspace owner role cannot be assigned via invitations",
-            )
-        if actor_role == "admin" and payload.role == "admin":
-            raise InvitationForbiddenError(
-                "admin_cannot_invite_admin",
-                "Workspace admins can invite developer, operator, or viewer roles only",
-            )
+        allowed, err_code, err_msg = can_invite_target_role(actor_role, str(payload.role))
+        if not allowed:
+            raise InvitationForbiddenError(err_code, err_msg)
         try:
             normalized_email = normalize_invitation_email(payload.email)
         except InvitationEmailError as exc:
@@ -116,7 +113,6 @@ class InvitationService:
             )
 
         record = await self._repository.create_invitation(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             actor_user_id=UUID(principal.user_id),
@@ -132,12 +128,12 @@ class InvitationService:
 
     async def list_invitations(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         limit: int,
         cursor: str | None,
     ) -> WorkspaceInvitationListResponseDTO:
+        """List workspace invitations ordered newest-first with opaque keyset cursor."""
         self._ensure_invitations_enabled()
         self._require_owner_or_admin(principal)
         if limit < 1 or limit > 100:
@@ -146,7 +142,6 @@ class InvitationService:
                 "limit must be between 1 and 100",
             )
         items, next_cursor = await self._repository.list_invitations(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             actor_user_id=UUID(principal.user_id),
@@ -160,17 +155,16 @@ class InvitationService:
 
     async def resend_invitation(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         invitation_id: UUID,
         request_id: str,
         trace_id: str,
     ) -> WorkspaceInvitationResponseDTO:
+        """Rotate proof generation and queue a new outbox delivery for an active invitation."""
         protector = self._build_proof_protector()
         self._require_owner_or_admin(principal)
         record = await self._repository.resend_invitation(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             invitation_id=invitation_id,
@@ -184,17 +178,16 @@ class InvitationService:
 
     async def revoke_invitation(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         invitation_id: UUID,
         request_id: str,
         trace_id: str,
     ) -> WorkspaceInvitationResponseDTO:
+        """Revoke a pending workspace invitation idempotently and cancel queued delivery."""
         self._ensure_invitations_enabled()
         self._require_owner_or_admin(principal)
         record = await self._repository.revoke_invitation(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             invitation_id=invitation_id,
@@ -204,3 +197,5 @@ class InvitationService:
         )
         return self._to_response_dto(record)
 
+
+__all__ = ["InvitationService"]

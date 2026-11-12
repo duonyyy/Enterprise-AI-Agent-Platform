@@ -5,7 +5,7 @@ Pure Python exception hierarchy free of Web/HTTP framework dependencies (AGENT_C
 
 from __future__ import annotations
 
-from control_api.modules.identity.models.errors import RepositoryUnavailableError
+from control_api.core.errors import RepositoryUnavailableError
 
 
 class WorkspaceError(Exception):
@@ -109,4 +109,3 @@ __all__ = [
     "WorkspaceDatabaseUnavailableError",
     "WorkspaceError",
 ]
-

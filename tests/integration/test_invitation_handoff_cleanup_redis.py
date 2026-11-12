@@ -7,7 +7,7 @@ import time
 from uuid import uuid4
 
 import pytest
-from control_api.modules.workspaces.services.handoff_store import (
+from control_api.modules.workspaces.repositories.handoff_store import (
     InvitationHandoffProtector,
     RedisInvitationHandoffStore,
     generate_browser_binding_token,

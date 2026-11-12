@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from control_api.modules.workspaces.models.rbac import MembershipStatus, WorkspaceRole
+from control_api.modules.workspaces.models.enums import (
+    AcceptOutcomeState,
+    InvitableRole,
+    InvitationDeliveryState,
+    InvitationPreviewStatus,
+    InvitationStatus,
+    MembershipRevokeOutcome,
+    MembershipRoleUpdateOutcome,
+    MembershipStatus,
+    PreviewAcceptanceState,
+    WorkspaceRole,
+)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class WorkspaceResponseDTO(BaseModel):
     """Canonical representation of a provisioned or retrieved workspace."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     workspace_id: str
     tenant_id: str
@@ -29,7 +38,7 @@ class WorkspaceResponseDTO(BaseModel):
 class WorkspaceSummaryDTO(BaseModel):
     """Summary projection of an allowed active workspace for a user."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     workspace_id: str
     tenant_id: str
@@ -44,7 +53,7 @@ class WorkspaceSummaryDTO(BaseModel):
 class WorkspaceListResponseDTO(BaseModel):
     """Response container for GET /v1/workspaces."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     items: list[WorkspaceSummaryDTO] = Field(default_factory=list)
 
@@ -52,24 +61,17 @@ class WorkspaceListResponseDTO(BaseModel):
 class WorkspaceInvitationResponseDTO(BaseModel):
     """Canonical safe projection of iam.workspace_invitations (never exposes proof, link, or hashes)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     invitation_id: str
     tenant_id: str
     workspace_id: str
     recipient_email_normalized: str
     recipient_issuer: str
-    role: Literal["admin", "developer", "operator", "viewer"]
-    status: Literal["pending", "accepted", "revoked", "expired"]
+    role: InvitableRole
+    status: InvitationStatus
     generation: int
-    delivery_state: Literal[
-        "queued",
-        "sending",
-        "provider_accepted",
-        "failed",
-        "unknown",
-        "cancelled",
-    ]
+    delivery_state: InvitationDeliveryState
     delivery_error_code: str | None = None
     created_by_user_id: str
     delivery_requested_by_user_id: str
@@ -88,7 +90,7 @@ class WorkspaceInvitationResponseDTO(BaseModel):
 class WorkspaceInvitationListResponseDTO(BaseModel):
     """Cursor-paginated response container for GET /v1/workspaces/{workspace_id}/invitations."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     items: list[WorkspaceInvitationResponseDTO] = Field(default_factory=list)
     next_cursor: str | None = None
@@ -97,7 +99,7 @@ class WorkspaceInvitationListResponseDTO(BaseModel):
 class InvitationHandoffResponseDTO(BaseModel):
     """Generic acknowledgement for POST /v1/invitations/{invitation_id}/handoff (ADR-020)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     expires_at: str
 
@@ -105,7 +107,7 @@ class InvitationHandoffResponseDTO(BaseModel):
 class InvitationPreviewResponseDTO(BaseModel):
     """Safe verified invitation preview metadata returned by POST /v1/invitations/{invitation_id}/preview."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     invitation_id: str
     tenant_id: str
@@ -115,17 +117,17 @@ class InvitationPreviewResponseDTO(BaseModel):
     workspace_slug: str
     workspace_name: str
     role: WorkspaceRole
-    status: Literal["pending", "accepted"]
+    status: InvitationPreviewStatus
     expires_at: str
     can_accept: bool
-    acceptance_state: Literal["ready", "already_accepted"]
+    acceptance_state: PreviewAcceptanceState
 
     @model_validator(mode="after")
     def validate_owner_already_accepted_only(self) -> InvitationPreviewResponseDTO:
         """Allow owner role strictly in already_accepted receipts after post-join promotion."""
-        if self.role == "owner" and (
-            self.acceptance_state != "already_accepted"
-            or self.status != "accepted"
+        if self.role == WorkspaceRole.OWNER and (
+            self.acceptance_state != PreviewAcceptanceState.ALREADY_ACCEPTED
+            or self.status != InvitationPreviewStatus.ACCEPTED
             or self.can_accept
         ):
             raise ValueError(
@@ -137,7 +139,7 @@ class InvitationPreviewResponseDTO(BaseModel):
 class InvitationAcceptResponseDTO(BaseModel):
     """Authoritative response after invitation acceptance commit or same-user replay."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     invitation_id: str
     tenant_id: str
@@ -145,13 +147,16 @@ class InvitationAcceptResponseDTO(BaseModel):
     workspace_slug: str
     workspace_name: str
     role: WorkspaceRole
-    acceptance_state: Literal["accepted", "already_accepted"]
+    acceptance_state: AcceptOutcomeState
     redirect_url: str
 
     @model_validator(mode="after")
     def validate_owner_already_accepted_only(self) -> InvitationAcceptResponseDTO:
         """Allow owner role strictly in already_accepted receipts after post-join promotion."""
-        if self.role == "owner" and self.acceptance_state != "already_accepted":
+        if (
+            self.role == WorkspaceRole.OWNER
+            and self.acceptance_state != AcceptOutcomeState.ALREADY_ACCEPTED
+        ):
             raise ValueError(
                 "owner role is only valid in already_accepted invitation acceptance receipts"
             )
@@ -161,7 +166,7 @@ class InvitationAcceptResponseDTO(BaseModel):
 class WorkspaceMembershipRecordDTO(BaseModel):
     """Minimal scoped membership projection returned by member management endpoints (ADR-021)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     membership_id: str
     user_id: str
@@ -174,7 +179,7 @@ class WorkspaceMembershipRecordDTO(BaseModel):
 class WorkspaceMembershipListResponseDTO(BaseModel):
     """Paginated response for GET /v1/workspaces/{workspace_id}/memberships."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     items: list[WorkspaceMembershipRecordDTO] = Field(default_factory=list)
     next_cursor: str | None = None
@@ -183,12 +188,12 @@ class WorkspaceMembershipListResponseDTO(BaseModel):
 class WorkspaceMembershipRoleUpdateResponseDTO(WorkspaceMembershipRecordDTO):
     """Committed response for PATCH /v1/workspaces/{workspace_id}/memberships/{membership_id}/role."""
 
-    outcome: Literal["updated", "no_op"]
+    outcome: MembershipRoleUpdateOutcome
     audit_event_id: str | None = None
 
 
 class WorkspaceMembershipRevokeResponseDTO(WorkspaceMembershipRecordDTO):
     """Committed response for POST /v1/workspaces/{workspace_id}/memberships/{membership_id}/revoke."""
 
-    outcome: Literal["revoked", "already_revoked"]
+    outcome: MembershipRevokeOutcome
     audit_event_id: str | None = None

@@ -36,16 +36,21 @@ from control_api.modules.workspaces.models.errors import (
     InvitationForbiddenError,
     InvitationGoneError,
 )
+from control_api.modules.workspaces.models.records import InvitationAcceptRecord
+from control_api.modules.workspaces.repositories import (
+    _invitation_acceptance,
+)
+from control_api.modules.workspaces.repositories import (
+    handoff_store as handoff_store_module,
+)
+from control_api.modules.workspaces.repositories.handoff_store import RedisInvitationHandoffStore
 from control_api.modules.workspaces.repositories.invitation_repository import (
     InvitationPolicyConfig,
     InvitationRepository,
 )
-from control_api.modules.workspaces.services import handoff_store as handoff_store_module
-from control_api.modules.workspaces.services.handoff_store import RedisInvitationHandoffStore
 from control_api.modules.workspaces.services.invitation_acceptance_service import (
     InvitationAcceptanceService,
 )
-from control_api.modules.workspaces.services.invitation_service import InvitationService
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from jobs_worker.invitation_consumer import InvitationOutboxConsumer
@@ -110,13 +115,13 @@ def _configure_real_stack(
     monkeypatch.setattr(control_db, "AsyncSessionLocal", async_session_factory)
     monkeypatch.setattr(
         workspaces_router,
-        "invitation_service",
-        InvitationService(InvitationRepository(PostgresOutboxEventBus(async_session_factory))),
+        "invitation_repository",
+        InvitationRepository(PostgresOutboxEventBus(async_session_factory)),
     )
     monkeypatch.setattr(
         accept_router,
-        "acceptance_service",
-        InvitationAcceptanceService(InvitationRepository()),
+        "acceptance_repository",
+        InvitationRepository(),
     )
 
     monkeypatch.setattr(settings, "oidc_issuer", issuer_url)
@@ -253,7 +258,14 @@ def test_migration_0006_upgrade_and_rls_privilege_isolation(
         #    and returns ONLY 3 columns (invitation_id, tenant_id, workspace_id) - zero tenant/workspace metadata!
         scope_row = conn.execute(
             "SELECT * FROM iam.resolve_invitation_accept_scope(%s, %s, %s, %s, %s, %s)",
-            (inv_id, valid_hash, recipient_id, "https://idp.test", "sub-target", "target@example.com"),
+            (
+                inv_id,
+                valid_hash,
+                recipient_id,
+                "https://idp.test",
+                "sub-target",
+                "target@example.com",
+            ),
         ).fetchone()
         assert scope_row is not None
         assert len(scope_row) == 3
@@ -261,14 +273,56 @@ def test_migration_0006_upgrade_and_rls_privilege_isolation(
 
         # 1b. Every mismatched/missing/malformed proof, user_id, issuer, subject, email, or unknown ID returns 0 rows
         bad_cases = [
-            (inv_id, "b" * 64, recipient_id, "https://idp.test", "sub-target", "target@example.com"),
-            (inv_id, "malformed", recipient_id, "https://idp.test", "sub-target", "target@example.com"),
+            (
+                inv_id,
+                "b" * 64,
+                recipient_id,
+                "https://idp.test",
+                "sub-target",
+                "target@example.com",
+            ),
+            (
+                inv_id,
+                "malformed",
+                recipient_id,
+                "https://idp.test",
+                "sub-target",
+                "target@example.com",
+            ),
             (inv_id, None, recipient_id, "https://idp.test", "sub-target", "target@example.com"),
             (inv_id, valid_hash, uuid4(), "https://idp.test", "sub-target", "target@example.com"),
-            (inv_id, valid_hash, recipient_id, "https://evil.test", "sub-target", "target@example.com"),
-            (inv_id, valid_hash, recipient_id, "https://idp.test", "wrong-sub", "target@example.com"),
-            (inv_id, valid_hash, recipient_id, "https://idp.test", "sub-target", "other@example.com"),
-            (uuid4(), valid_hash, recipient_id, "https://idp.test", "sub-target", "target@example.com"),
+            (
+                inv_id,
+                valid_hash,
+                recipient_id,
+                "https://evil.test",
+                "sub-target",
+                "target@example.com",
+            ),
+            (
+                inv_id,
+                valid_hash,
+                recipient_id,
+                "https://idp.test",
+                "wrong-sub",
+                "target@example.com",
+            ),
+            (
+                inv_id,
+                valid_hash,
+                recipient_id,
+                "https://idp.test",
+                "sub-target",
+                "other@example.com",
+            ),
+            (
+                uuid4(),
+                valid_hash,
+                recipient_id,
+                "https://idp.test",
+                "sub-target",
+                "target@example.com",
+            ),
         ]
         for params in bad_cases:
             assert (
@@ -469,14 +523,15 @@ def test_e2e_invitation_acceptance_real_postgres_redis_and_oidc(
                     ).fetchone()[0]
                     assert mem_count == 0
 
-                # 6. Inject post-commit Redis failure ONCE on convert_to_consumed_receipt -> DB still commits cleanly, retry works!
+                # 6. Inject post-commit Redis failure ONCE on convert_to_consumed_receipt_async -> DB still commits cleanly, retry works!
                 real_store = handoff_store_module.invitation_handoff_store
-                orig_convert = real_store.convert_to_consumed_receipt
+                assert real_store is not None
+                orig_convert = real_store.convert_to_consumed_receipt_async
 
-                def _fail_once(**kwargs: Any) -> None:
+                async def _fail_once(**kwargs: Any) -> None:
                     raise RepositoryUnavailableError("simulated redis blip")
 
-                monkeypatch.setattr(real_store, "convert_to_consumed_receipt", _fail_once)
+                monkeypatch.setattr(real_store, "convert_to_consumed_receipt_async", _fail_once)
                 acc_resp = await browser.post(
                     f"/v1/invitations/{inv_id_str}/accept",
                     headers={"Origin": "http://localhost:3000"},
@@ -486,7 +541,7 @@ def test_e2e_invitation_acceptance_real_postgres_redis_and_oidc(
                 assert acc_resp.json()["redirect_url"] == f"/w/{seed['ws_a']}/agents"
 
                 # Restore real convert and retry -> returns already_accepted, converts to consumed_receipt!
-                monkeypatch.setattr(real_store, "convert_to_consumed_receipt", orig_convert)
+                monkeypatch.setattr(real_store, "convert_to_consumed_receipt_async", orig_convert)
                 acc_retry = await browser.post(
                     f"/v1/invitations/{inv_id_str}/accept",
                     headers={"Origin": "http://localhost:3000"},
@@ -618,7 +673,7 @@ def test_failure_injection_db_rollback_and_redis_outage_fail_closed(
                 trace_id="tr-rb-1",
             )
             await db_sess.commit()
-        inv_id = created["invitation_id"]
+        inv_id = created.invitation_id
         with psycopg.connect(owner_url) as conn:
             cipher = conn.execute(
                 "SELECT proof_ciphertext FROM iam.workspace_invitations WHERE id = %s",
@@ -665,10 +720,7 @@ def test_failure_injection_db_rollback_and_redis_outage_fail_closed(
             # Inject SQLAlchemy DB error AFTER INSERT iam.memberships (on audit event insert!)
             from sqlalchemy.exc import OperationalError
 
-            accept_router = importlib.import_module(
-                "control_api.modules.workspaces.api.invitation_accept_router"
-            )
-            orig_audit = accept_router.acceptance_service._repository._insert_audit_event
+            orig_audit = _invitation_acceptance.insert_invitation_audit_event
 
             async def _boom_audit(*args: Any, **kwargs: Any) -> None:
                 raise OperationalError(
@@ -676,7 +728,7 @@ def test_failure_injection_db_rollback_and_redis_outage_fail_closed(
                 )
 
             monkeypatch.setattr(
-                accept_router.acceptance_service._repository, "_insert_audit_event", _boom_audit
+                _invitation_acceptance, "insert_invitation_audit_event", _boom_audit
             )
             r_503_db = await client.post(
                 f"/v1/invitations/{inv_id}/accept",
@@ -692,9 +744,7 @@ def test_failure_injection_db_rollback_and_redis_outage_fail_closed(
                 ).fetchone()[0]
                 assert cnt == 0
 
-            monkeypatch.setattr(
-                accept_router.acceptance_service._repository, "_insert_audit_event", orig_audit
-            )
+            monkeypatch.setattr(_invitation_acceptance, "insert_invitation_audit_event", orig_audit)
             acc_ok = await client.post(
                 f"/v1/invitations/{inv_id}/accept",
                 headers={"Origin": "http://localhost:3000"},
@@ -774,7 +824,7 @@ def test_concurrency_accept_vs_accept_revoke_resend_and_worker(
                         trace_id=f"tr-{tag}",
                     )
                     await s.commit()
-                    return UUID(str(res["invitation_id"]))
+                    return UUID(str(res.invitation_id))
             finally:
                 await eng.dispose()
 
@@ -792,7 +842,7 @@ def test_concurrency_accept_vs_accept_revoke_resend_and_worker(
             sf = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
             repo = InvitationRepository()
             try:
-                async with sf() as s:
+                async with sf() as s, s.begin():
                     res = await repo.accept_invitation(
                         s,
                         invitation_id=inv_id,
@@ -804,7 +854,7 @@ def test_concurrency_accept_vs_accept_revoke_resend_and_worker(
                         request_id=f"req-acc-{uuid4().hex[:6]}",
                         trace_id=f"tr-acc-{uuid4().hex[:6]}",
                     )
-                    return str(res["acceptance_state"])
+                    return str(res.acceptance_state)
             finally:
                 await eng.dispose()
 
@@ -960,7 +1010,7 @@ def test_concurrency_accept_vs_accept_revoke_resend_and_worker(
                     trace_id="tr-aw-b",
                 )
                 await s.commit()
-                return UUID(str(res["invitation_id"]))
+                return UUID(str(res.invitation_id))
         finally:
             await eng.dispose()
 
@@ -1053,7 +1103,17 @@ def test_r02_expiry_after_lock_wait_boundary_and_rollback(
                 "VALUES (%s, %s, %s, %s, %s, 'developer', %s, 'cipher', 'v1', 'pending', 1, 'queued', "
                 "        %s, %s, clock_timestamp() - interval '10 seconds', clock_timestamp() - interval '10 seconds', "
                 "        clock_timestamp() + (%s * interval '1 second'))",
-                (inv_id, seed["tenant_a"], seed["ws_a"], email, issuer, th, seed["admin_a"], seed["admin_a"], expires_offset_seconds),
+                (
+                    inv_id,
+                    seed["tenant_a"],
+                    seed["ws_a"],
+                    email,
+                    issuer,
+                    th,
+                    seed["admin_a"],
+                    seed["admin_a"],
+                    expires_offset_seconds,
+                ),
             )
         return uid, sub, email, inv_id, th
 
@@ -1072,15 +1132,15 @@ def test_r02_expiry_after_lock_wait_boundary_and_rollback(
         th: str,
         app_name: str,
         identity_deadline: int | None = None,
-    ) -> dict[str, Any]:
-        async def _go() -> dict[str, Any]:
+    ) -> InvitationAcceptRecord:
+        async def _go() -> InvitationAcceptRecord:
             eng = create_async_engine(
                 _to_async_pg_url(app_url),
                 connect_args={"server_settings": {"application_name": app_name}},
             )
             sf = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
             try:
-                async with sf() as s:
+                async with sf() as s, s.begin():
                     return await InvitationRepository().accept_invitation(
                         s,
                         invitation_id=inv_id,
@@ -1222,7 +1282,7 @@ def test_r02_expiry_after_lock_wait_boundary_and_rollback(
         app_name="r02-normal",
         identity_deadline=int(time.time()) + 900,
     )
-    assert res_ok["acceptance_state"] == "accepted"
+    assert res_ok.acceptance_state == "accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -1242,8 +1302,12 @@ def test_r04_real_redis_atomic_handoff_idempotency_and_cas_cleanup(
     store1._client.flushdb()
     monkeypatch.setattr(settings, "invitations_enabled", True)
     handoff_key = Fernet.generate_key().decode("ascii")
-    monkeypatch.setattr(settings.invitation_handoff_encryption_key, "get_secret_value", lambda: handoff_key)
-    monkeypatch.setattr(settings.invitation_proof_encryption_key, "get_secret_value", lambda: "distinct-proof-key")
+    monkeypatch.setattr(
+        settings.invitation_handoff_encryption_key, "get_secret_value", lambda: handoff_key
+    )
+    monkeypatch.setattr(
+        settings.invitation_proof_encryption_key, "get_secret_value", lambda: "distinct-proof-key"
+    )
 
     try:
         svc1 = InvitationAcceptanceService(store=store1)
@@ -1257,7 +1321,9 @@ def test_r04_real_redis_atomic_handoff_idempotency_and_cas_cleanup(
             existing_browser_cookie=None,
             client_ip="127.0.0.51",
         )
-        from control_api.modules.workspaces.services.handoff_store import hash_browser_binding_token
+        from control_api.modules.workspaces.repositories.handoff_store import (
+            hash_browser_binding_token,
+        )
 
         rkey = f"invite:handoff:{iid}:{hash_browser_binding_token(cookie_a)}"
         original_entry = store1.get_handoff_entry(
@@ -1281,7 +1347,7 @@ def test_r04_real_redis_atomic_handoff_idempotency_and_cas_cleanup(
 
         # 2. Concurrent creation across two independent Redis store instances shares one deadline
         iid_conc = uuid4()
-        from control_api.modules.workspaces.services.handoff_store import (
+        from control_api.modules.workspaces.repositories.handoff_store import (
             generate_browser_binding_token,
         )
 
@@ -1415,13 +1481,16 @@ def test_r01_privacy_safe_wrong_user_api_returns_generic_404(
         wrong_email = f"r01-wrong-{seed['tenant_a'].hex[:6]}@example.com"
 
         async def _go() -> None:
-            async with AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://localhost:3000",
-            ) as admin_cli, AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://localhost:3000",
-            ) as attacker_cli:
+            async with (
+                AsyncClient(
+                    transport=ASGITransport(app=app),
+                    base_url="http://localhost:3000",
+                ) as admin_cli,
+                AsyncClient(
+                    transport=ASGITransport(app=app),
+                    base_url="http://localhost:3000",
+                ) as attacker_cli,
+            ):
                 c_resp = await admin_cli.post(
                     f"/v1/workspaces/{seed['ws_a']}/invitations",
                     json={"email": target_email, "role": "developer"},

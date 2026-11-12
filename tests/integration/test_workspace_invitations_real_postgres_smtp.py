@@ -20,7 +20,6 @@ from control_api.main import app
 from control_api.modules.identity.repositories.memory_session_store import InMemoryRevocationStore
 from control_api.modules.identity.services.session_service import session_manager
 from control_api.modules.workspaces.repositories.invitation_repository import InvitationRepository
-from control_api.modules.workspaces.services.invitation_service import InvitationService
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from jobs_worker.invitation_consumer import InvitationOutboxConsumer
@@ -227,19 +226,23 @@ def _configure_control_api_for_db(
     store = InMemoryRevocationStore()
     monkeypatch.setattr(session_manager, "denylist", store)
     async_engine = create_async_engine(_to_async_pg_url(app_url), pool_size=5, max_overflow=5)
-    async_session_factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async_session_factory = async_sessionmaker(
+        async_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     monkeypatch.setattr(control_db, "engine", async_engine)
     monkeypatch.setattr(control_db, "AsyncSessionLocal", async_session_factory)
     monkeypatch.setattr(
         workspaces_router,
-        "invitation_service",
-        InvitationService(InvitationRepository(PostgresOutboxEventBus(async_session_factory))),
+        "invitation_repository",
+        InvitationRepository(PostgresOutboxEventBus(async_session_factory)),
     )
     monkeypatch.setattr(settings, "invitations_enabled", True)
     monkeypatch.setattr(settings, "invitation_public_app_origin", "http://localhost:3000")
     monkeypatch.setattr(settings, "invitation_proof_key_id", "v1")
-    monkeypatch.setattr(settings.invitation_proof_encryption_key, "get_secret_value", lambda: fernet_key)
+    monkeypatch.setattr(
+        settings.invitation_proof_encryption_key, "get_secret_value", lambda: fernet_key
+    )
     monkeypatch.setattr(settings, "invitation_ttl_hours", 72)
     monkeypatch.setattr(settings, "invitation_resend_cooldown_seconds", 60)
     monkeypatch.setattr(settings, "invitation_recipient_hourly_limit", 5)
@@ -350,7 +353,9 @@ def test_end_to_end_http_outbox_worker_cli_and_real_tcp_smtp_sink(
                 seeded["bootstrap_only"], seeded["issuer"], seeded["bootstrap_subject"]
             )
 
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as client:
                 # Scoped workspace API token denied on invitations
                 scoped_resp = await client.post(
                     "/v1/auth/token",
@@ -501,7 +506,19 @@ def test_end_to_end_http_outbox_worker_cli_and_real_tcp_smtp_sink(
             ).fetchall()
             assert len(invs) == 2
             for row in invs:
-                inv_id, email_norm, _role, status_val, deliv_state, ct, kid, lt, lu, tok_hash, accepted_at = row
+                (
+                    inv_id,
+                    email_norm,
+                    _role,
+                    status_val,
+                    deliv_state,
+                    ct,
+                    kid,
+                    lt,
+                    lu,
+                    tok_hash,
+                    accepted_at,
+                ) = row
                 assert status_val == "pending"
                 assert deliv_state == "provider_accepted"
                 assert ct is None and kid is None and lt is None and lu is None
@@ -512,7 +529,10 @@ def test_end_to_end_http_outbox_worker_cli_and_real_tcp_smtp_sink(
                 decoded_body = parsed_mime.get_payload(decode=True)
                 assert decoded_body is not None
                 body_text = decoded_body.decode("utf-8")
-                m_tok = re.search(rf"http://localhost:3000/invitations/{inv_id}/accept#token=([^\s\r\n]+)", body_text)
+                m_tok = re.search(
+                    rf"http://localhost:3000/invitations/{inv_id}/accept#token=([^\s\r\n]+)",
+                    body_text,
+                )
                 assert m_tok is not None
                 raw_proof = m_tok.group(1)
                 assert hashlib.sha256(raw_proof.encode("utf-8")).hexdigest() == tok_hash
@@ -531,11 +551,13 @@ def test_end_to_end_http_outbox_worker_cli_and_real_tcp_smtp_sink(
                     (seeded["ws_a"],),
                 ).fetchall()
                 assert len(outbox_rows) == 2 and all(r[0] == "delivered" for r in outbox_rows)
-                assert len(receipts) == 2 and all(r[0] == "workspace_invitation_email_v1" for r in receipts)
+                assert len(receipts) == 2 and all(
+                    r[0] == "workspace_invitation_email_v1" for r in receipts
+                )
                 for (details_txt,) in audit_rows:
                     assert raw_proof not in details_txt
                     assert tok_hash not in details_txt
-                for (_state, payload_txt) in outbox_rows:
+                for _state, payload_txt in outbox_rows:
                     assert raw_proof not in payload_txt
                     assert tok_hash not in payload_txt
                     assert email_norm not in payload_txt
@@ -564,7 +586,9 @@ def test_concurrency_atomic_rollback_and_resend_revocation_races(
             owner_headers = _issue_session_cookie_header(
                 seeded["owner_a"], seeded["issuer"], f"owner-{seeded['owner_a']}"
             )
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as client:
                 # 1. Parallel duplicate create -> exactly one 201 and one 409
                 r1, r2 = await asyncio.gather(
                     client.post(
@@ -616,13 +640,15 @@ def test_concurrency_atomic_rollback_and_resend_revocation_races(
 
                 # 4. Atomic rollback if outbox insert raises
                 broken_bus = PostgresOutboxEventBus(async_session_factory)
+
                 async def _boom(*_args: Any, **_kwargs: Any) -> str:
                     raise RuntimeError("Injected outbox failure")
+
                 monkeypatch.setattr(broken_bus, "publish_in_transaction", _boom)
                 monkeypatch.setattr(
                     workspaces_router,
-                    "invitation_service",
-                    InvitationService(InvitationRepository(broken_bus)),
+                    "invitation_repository",
+                    InvitationRepository(broken_bus),
                 )
                 r_boom = await client.post(
                     f"/v1/workspaces/{seeded['ws_a']}/invitations",
@@ -682,7 +708,9 @@ def test_worker_crash_lease_expiry_fencing_dedupe_and_smtp_failures(
                 seeded["owner_a"], seeded["issuer"], f"owner-{seeded['owner_a']}"
             )
             created: list[dict[str, Any]] = []
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as client:
                 for email in emails:
                     r = await client.post(
                         f"/v1/workspaces/{seeded['ws_a']}/invitations",
@@ -762,6 +790,7 @@ def test_worker_crash_lease_expiry_fencing_dedupe_and_smtp_failures(
 
         # Stale worker wakes up and attempts CAS completion -> fenced, 0 side effects!
         from jobs_worker.smtp_adapter import SmtpSendResult
+
         c_ok._complete_delivery_cas(claim, SmtpSendResult(outcome="provider_accepted"))
         with psycopg.connect(owner_url) as conn:
             assert conn.execute(
@@ -880,7 +909,9 @@ def test_rate_limits_and_worker_requester_revocation_recheck(
             owner_headers = _issue_session_cookie_header(
                 seeded["owner_a"], seeded["issuer"], f"owner-{seeded['owner_a']}"
             )
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as client:
                 r1 = await client.post(
                     f"/v1/workspaces/{seeded['ws_a']}/invitations",
                     headers=owner_headers,

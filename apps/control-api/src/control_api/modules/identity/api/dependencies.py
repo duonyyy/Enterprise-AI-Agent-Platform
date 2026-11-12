@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 
+from control_api.core.cookies import (
+    clear_invitation_handoff_cookie,
+    set_invitation_handoff_cookie,
+)
 from control_api.core.settings import settings
 from fastapi import Response
 
@@ -60,41 +64,6 @@ def get_clear_session_cookie_headers() -> dict[str, str]:
     return {"Set-Cookie": cookie_val} if cookie_val else {}
 
 
-def set_invitation_handoff_cookie(
-    response: Response,
-    browser_token: str,
-    *,
-    max_age: int | None = None,
-) -> None:
-    """Set hardened HttpOnly browser-binding cookie for invitation handoffs (ADR-020)."""
-    effective_max_age = (
-        max(0, min(max_age, settings.invitation_handoff_ttl_seconds))
-        if max_age is not None
-        else settings.invitation_handoff_ttl_seconds
-    )
-    response.set_cookie(
-        key=settings.invitation_handoff_cookie_name,
-        value=browser_token,
-        max_age=effective_max_age,
-        httponly=True,
-        secure=settings.invitation_handoff_cookie_secure,
-        samesite=settings.invitation_handoff_cookie_same_site,  # type: ignore[arg-type]
-        path=settings.invitation_handoff_cookie_path,
-    )
-
-
-def clear_invitation_handoff_cookie(response: Response | None) -> None:
-    """Clear browser-binding handoff cookie without touching session cookies."""
-    if response is not None:
-        response.delete_cookie(
-            key=settings.invitation_handoff_cookie_name,
-            path=settings.invitation_handoff_cookie_path,
-            httponly=True,
-            secure=settings.invitation_handoff_cookie_secure,
-            samesite=settings.invitation_handoff_cookie_same_site,  # type: ignore[arg-type]
-        )
-
-
 def set_correlation_cookie(response: Response, correlation_id: str) -> None:
     """Set browser correlation cookie for OIDC state protection."""
     response.set_cookie(
@@ -118,3 +87,14 @@ def clear_correlation_cookie(response: Response | None) -> None:
             secure=settings.oidc_correlation_cookie_secure,
             samesite=settings.oidc_correlation_cookie_same_site,  # type: ignore[arg-type]
         )
+
+
+__all__ = [
+    "clear_correlation_cookie",
+    "clear_invitation_handoff_cookie",
+    "clear_session_cookie",
+    "get_clear_session_cookie_headers",
+    "set_correlation_cookie",
+    "set_invitation_handoff_cookie",
+    "set_session_cookie",
+]

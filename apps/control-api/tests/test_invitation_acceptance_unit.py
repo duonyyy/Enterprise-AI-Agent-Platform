@@ -31,15 +31,19 @@ from control_api.modules.workspaces.models.errors import (
     InvitationGoneError,
     InvitationNotFoundError,
 )
-from control_api.modules.workspaces.repositories.invitation_repository import (
-    InvitationRepository,
+from control_api.modules.workspaces.models.records import (
+    InvitationAcceptRecord,
+    InvitationPreviewRecord,
 )
-from control_api.modules.workspaces.services import handoff_store as handoff_store_module
-from control_api.modules.workspaces.services.handoff_store import (
+from control_api.modules.workspaces.repositories import handoff_store as handoff_store_module
+from control_api.modules.workspaces.repositories.handoff_store import (
     InMemoryInvitationHandoffStore,
     InvitationHandoffProtector,
     generate_browser_binding_token,
     hash_browser_binding_token,
+)
+from control_api.modules.workspaces.repositories.invitation_repository import (
+    InvitationRepository,
 )
 from cryptography.fernet import Fernet
 from fastapi import status
@@ -338,24 +342,24 @@ def test_legacy_session_without_evidence_and_workspace_scoped_token_rejected(
     )
     assert handoff_resp.status_code == status.HTTP_201_CREATED
 
-    async def fake_preview(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "invitation_id": str(inv_id),
-            "tenant_id": str(uuid4()),
-            "tenant_slug": "vinai",
-            "tenant_name": "VinAI",
-            "workspace_id": str(uuid4()),
-            "workspace_slug": "alpha",
-            "workspace_name": "Alpha",
-            "role": "developer",
-            "status": "pending",
-            "expires_at": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
-            "can_accept": True,
-            "acceptance_state": "ready",
-        }
+    async def fake_preview(*args: Any, **kwargs: Any) -> InvitationPreviewRecord:
+        return InvitationPreviewRecord(
+            invitation_id=str(inv_id),
+            tenant_id=str(uuid4()),
+            tenant_slug="vinai",
+            tenant_name="VinAI",
+            workspace_id=str(uuid4()),
+            workspace_slug="alpha",
+            workspace_name="Alpha",
+            role="developer",
+            status="pending",
+            expires_at=(datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+            can_accept=True,
+            acceptance_state="ready",
+        )
 
-    orig_preview = accept_router_module.acceptance_service._repository.preview_invitation
-    accept_router_module.acceptance_service._repository.preview_invitation = fake_preview
+    orig_preview = accept_router_module.acceptance_repository.preview_invitation
+    accept_router_module.acceptance_repository.preview_invitation = fake_preview
     try:
         resp_bearer = client.post(
             f"/v1/invitations/{inv_id}/preview",
@@ -363,7 +367,7 @@ def test_legacy_session_without_evidence_and_workspace_scoped_token_rejected(
         )
         assert resp_bearer.status_code == status.HTTP_200_OK
     finally:
-        accept_router_module.acceptance_service._repository.preview_invitation = orig_preview
+        accept_router_module.acceptance_repository.preview_invitation = orig_preview
 
     # 3. Scoped workspace token (session_data is None) -> 403 credential_type_not_allowed
     from control_api.modules.identity.security.crypto import sign_jwt_hs256
@@ -1090,11 +1094,14 @@ def test_r04_handoff_idempotency_original_deadline_cookie_max_age_and_cas_cleanu
             now=t0 + ttl + 35,
         )
     assert exc_conf.value.code == "invitation_already_accepted"
-    assert store.get_handoff_entry(
-        invitation_id=str(inv_id),
-        browser_binding_digest=digest3,
-        now=t0 + ttl + 35,
-    )["kind"] == "consumed_receipt"
+    assert (
+        store.get_handoff_entry(
+            invitation_id=str(inv_id),
+            browser_binding_digest=digest3,
+            now=t0 + ttl + 35,
+        )["kind"]
+        == "consumed_receipt"
+    )
 
 
 def test_r04_http_handoff_replay_shrinks_cookie_max_age_to_remaining_ttl(
@@ -1149,34 +1156,37 @@ def test_r01_service_propagates_subject_to_repository_and_r02_enforces_post_lock
     captured: list[dict[str, Any]] = []
 
     class _FakeRepo:
-        async def preview_invitation(self, session: Any, **kwargs: Any) -> dict[str, Any]:
+        async def preview_invitation(self, **kwargs: Any) -> InvitationPreviewRecord:
             captured.append({"op": "preview", **kwargs})
-            return {
-                "invitation_id": str(kwargs["invitation_id"]),
-                "tenant_id": str(uuid4()),
-                "tenant_slug": "t",
-                "tenant_name": "T",
-                "workspace_id": str(uuid4()),
-                "workspace_slug": "w",
-                "workspace_name": "W",
-                "role": "developer",
-                "status": "pending",
-                "expires_at": datetime.now(UTC).isoformat(),
-                "can_accept": True,
-                "acceptance_state": "ready",
-            }
+            return InvitationPreviewRecord(
+                invitation_id=str(kwargs["invitation_id"]),
+                tenant_id=str(uuid4()),
+                tenant_slug="t",
+                tenant_name="T",
+                workspace_id=str(uuid4()),
+                workspace_slug="w",
+                workspace_name="W",
+                role="developer",
+                status="pending",
+                expires_at=datetime.now(UTC).isoformat(),
+                can_accept=True,
+                acceptance_state="ready",
+            )
 
-        async def accept_invitation(self, session: Any, **kwargs: Any) -> dict[str, Any]:
+        async def accept_invitation(self, **kwargs: Any) -> InvitationAcceptRecord:
             captured.append({"op": "accept", **kwargs})
-            return {
-                "invitation_id": str(kwargs["invitation_id"]),
-                "tenant_id": str(uuid4()),
-                "workspace_id": str(uuid4()),
-                "workspace_slug": "w",
-                "workspace_name": "W",
-                "role": "developer",
-                "acceptance_state": "accepted",
-            }
+            return InvitationAcceptRecord(
+                invitation_id=str(kwargs["invitation_id"]),
+                tenant_id=str(uuid4()),
+                workspace_id=str(uuid4()),
+                workspace_slug="w",
+                workspace_name="W",
+                role="developer",
+                acceptance_state="accepted",
+            )
+
+        async def commit(self) -> None:
+            return None
 
     uid = str(uuid4())
     now_i = int(time.time())
@@ -1208,7 +1218,6 @@ def test_r01_service_propagates_subject_to_repository_and_r02_enforces_post_lock
 
     asyncio.run(
         service.preview_invitation(
-            AsyncMock(),
             invitation_id=inv_id,
             session_data=session_data,
             issuer=settings.oidc_issuer,
@@ -1220,7 +1229,6 @@ def test_r01_service_propagates_subject_to_repository_and_r02_enforces_post_lock
     )
     asyncio.run(
         service.accept_invitation(
-            AsyncMock(),
             invitation_id=inv_id,
             session_data=session_data,
             issuer=settings.oidc_issuer,
@@ -1239,3 +1247,118 @@ def test_r01_service_propagates_subject_to_repository_and_r02_enforces_post_lock
     )
     assert captured[1]["handoff_expires_at"] is not None
     assert captured[1]["enforce_wall_clock_deadlines"] is True
+
+
+def test_extract_trusted_client_ip_handles_invalid_cidr_after_matching_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from control_api.modules.workspaces.api.invitation_accept_router import (
+        _extract_trusted_client_ip,
+    )
+    from starlette.requests import Request
+
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", ["10.0.0.0/8", "not-a-cidr"])
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/invitations/test/handoff",
+        "client": ("10.1.2.3", 12345),
+        "headers": [(b"x-forwarded-for", b"203.0.113.9, 10.1.2.3")],
+    }
+    req = Request(scope)
+    assert _extract_trusted_client_ip(req) == "10.1.2.3"
+
+
+def test_accept_invitation_forwards_injected_now_to_consumed_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from control_api.modules.workspaces.models.records import InvitationAcceptRecord
+    from control_api.modules.workspaces.services.invitation_acceptance_service import (
+        InvitationAcceptanceService,
+    )
+    from pydantic import SecretStr
+
+    store = InMemoryInvitationHandoffStore()
+    monkeypatch.setattr(settings, "invitations_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "invitation_handoff_encryption_key",
+        SecretStr(Fernet.generate_key().decode("ascii")),
+    )
+    monkeypatch.setattr(
+        settings,
+        "invitation_proof_encryption_key",
+        SecretStr(Fernet.generate_key().decode("ascii")),
+    )
+
+    fixed_now = 1_750_000_000
+    uid = str(uuid4())
+    inv_id = uuid4()
+    observed_now: list[int | None] = []
+
+    class _FakeRepo:
+        async def accept_invitation(self, **kwargs: Any) -> InvitationAcceptRecord:
+            return InvitationAcceptRecord(
+                invitation_id=str(kwargs["invitation_id"]),
+                tenant_id=str(uuid4()),
+                workspace_id=str(uuid4()),
+                workspace_slug="w",
+                workspace_name="W",
+                role="developer",
+                acceptance_state="accepted",
+            )
+
+        async def commit(self) -> None:
+            return None
+
+    orig_convert = store.convert_to_consumed_receipt_async
+
+    async def _spy_convert(**kwargs: Any) -> None:
+        observed_now.append(kwargs.get("now"))
+        await orig_convert(**kwargs)
+
+    monkeypatch.setattr(store, "convert_to_consumed_receipt_async", _spy_convert)
+
+    session_data = type(
+        "Sess",
+        (),
+        {
+            "identity_evidence": VerifiedIdentityEvidence(
+                issuer=settings.oidc_issuer,
+                subject="sub-deterministic",
+                user_id=uid,
+                email_normalized="det@example.com",
+                email_verified=True,
+                id_token_issued_at=fixed_now - 10,
+                observed_at=fixed_now - 10,
+            )
+        },
+    )()
+
+    service = InvitationAcceptanceService(
+        repository=_FakeRepo(),  # type: ignore[arg-type]
+        store=store,
+    )
+    _, cookie = service.create_handoff(
+        invitation_id=inv_id,
+        raw_token="det-token-123",
+        existing_browser_cookie=None,
+        client_ip="127.0.0.1",
+        now=fixed_now,
+    )
+    asyncio.run(
+        service.accept_invitation(
+            invitation_id=inv_id,
+            session_data=session_data,
+            issuer=settings.oidc_issuer,
+            subject="sub-deterministic",
+            user_id=uid,
+            browser_cookie=cookie,
+            request_id="req-det",
+            trace_id="tr-det",
+            now=fixed_now,
+        )
+    )
+    assert observed_now == [fixed_now]

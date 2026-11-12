@@ -9,14 +9,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from control_api.core.database import engine
+from control_api.core.errors import RepositoryUnavailableError
 from control_api.core.settings import settings
 from control_api.modules.agents.api.router import router as agents_router
 from control_api.modules.approvals.router import router as approvals_router
 from control_api.modules.identity.api.router import router as identity_router
-from control_api.modules.identity.models.errors import (
-    RepositoryUnavailableError,
-    SessionExpiredError,
-)
+from control_api.modules.identity.models.errors import SessionExpiredError
 from control_api.modules.mcp.api.router import router as mcp_router
 from control_api.modules.skills.api.router import router as skills_router
 from control_api.modules.workspaces.api.invitation_accept_router import (

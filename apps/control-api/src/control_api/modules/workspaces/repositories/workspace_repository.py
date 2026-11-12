@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID
 
 from control_api.core.database import set_rls_context
@@ -19,6 +18,15 @@ from control_api.modules.workspaces.models.errors import (
     WorkspaceConflictError,
     WorkspaceDatabaseUnavailableError,
 )
+from control_api.modules.workspaces.models.ports import WorkspaceRepositoryPort
+from control_api.modules.workspaces.models.records import (
+    WorkspaceRecord,
+    WorkspaceSummaryRecord,
+)
+from control_api.modules.workspaces.repositories._db_helpers import (
+    db_unavailable,
+    is_unique_violation,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,21 +34,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 
-def _is_unique_violation(exc: IntegrityError) -> bool:
-    orig = getattr(exc, "orig", None)
-    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-    if sqlstate == "23505":
-        return True
-    msg = str(orig or exc).lower()
-    return "unique" in msg or "duplicate key" in msg
-
-
 def _db_unavailable(exc: Exception) -> WorkspaceDatabaseUnavailableError:
-    logger.warning(
-        "Workspace database operation failed (%s)",
-        type(exc).__name__,
+    return db_unavailable(
+        exc,
+        operation="workspace_persistence",
+        message="Workspace persistence service temporarily unavailable",
     )
-    return WorkspaceDatabaseUnavailableError("Workspace persistence service temporarily unavailable")
 
 
 class WorkspaceRepository:
@@ -63,14 +62,26 @@ class WorkspaceRepository:
         self,
         session: AsyncSession,
         user_id: UUID,
-    ) -> list[dict[str, Any]]:
+    ) -> list[WorkspaceSummaryRecord]:
         """Fetch active workspaces for user via narrow projection iam.get_user_workspaces (ADR-018)."""
         stmt = text("SELECT * FROM iam.get_user_workspaces(:user_id)")
         try:
             rows = (await session.execute(stmt, {"user_id": user_id})).mappings().all()
         except SQLAlchemyError as exc:
             raise _db_unavailable(exc) from exc
-        return [dict(r) for r in rows]
+        return [
+            WorkspaceSummaryRecord(
+                workspace_id=str(r["workspace_id"]),
+                tenant_id=str(r["tenant_id"]),
+                tenant_slug=str(r["tenant_slug"]),
+                tenant_name=str(r["tenant_name"]),
+                workspace_slug=str(r["workspace_slug"]),
+                workspace_name=str(r["workspace_name"]),
+                role=str(r["role"]),
+                membership_status=str(r.get("membership_status", "active")),
+            )
+            for r in rows
+        ]
 
     async def lock_authorizing_owner_membership(
         self,
@@ -109,15 +120,19 @@ class WorkspaceRepository:
                 user_id=str(user_id),
             )
             row = (
-                await session.execute(
-                    stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": authorizing_workspace_id,
-                        "user_id": user_id,
-                    },
+                (
+                    await session.execute(
+                        stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": authorizing_workspace_id,
+                            "user_id": user_id,
+                        },
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         except SQLAlchemyError as exc:
             raise _db_unavailable(exc) from exc
         return row is not None
@@ -137,7 +152,7 @@ class WorkspaceRepository:
         tenant_name: str | None = None,
         request_id: str | None = None,
         trace_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> WorkspaceRecord:
         """Atomically persist (optional tenant +) workspace + initial active owner + audit event.
 
         Executes within the caller's active database transaction under transaction-local RLS context.
@@ -158,32 +173,38 @@ class WorkspaceRepository:
                     "RETURNING id, slug, name, status"
                 )
                 tenant_row = (
-                    await session.execute(
-                        stmt_tenant,
-                        {
-                            "tenant_id": tenant_id,
-                            "tenant_slug": tenant_slug,
-                            "tenant_name": tenant_name,
-                        },
+                    (
+                        await session.execute(
+                            stmt_tenant,
+                            {
+                                "tenant_id": tenant_id,
+                                "tenant_slug": tenant_slug,
+                                "tenant_name": tenant_name,
+                            },
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 audit_action = "workspace.bootstrap"
                 tenant_bootstrapped = True
             else:
                 stmt_check_tenant = text(
-                    "SELECT id, slug, name, status "
-                    "FROM iam.tenants "
-                    "WHERE id = :tenant_id "
-                    "FOR SHARE"
+                    "SELECT id, slug, name, status FROM iam.tenants WHERE id = :tenant_id FOR SHARE"
                 )
-                tenant_row = (
-                    await session.execute(
-                        stmt_check_tenant,
-                        {"tenant_id": tenant_id},
+                existing_tenant_row = (
+                    (
+                        await session.execute(
+                            stmt_check_tenant,
+                            {"tenant_id": tenant_id},
+                        )
                     )
-                ).mappings().one_or_none()
-                if tenant_row is None or str(tenant_row["status"]) != "active":
+                    .mappings()
+                    .one_or_none()
+                )
+                if existing_tenant_row is None or str(existing_tenant_row["status"]) != "active":
                     raise WorkspaceAccessDeniedError("Target tenant is not active or accessible")
+                tenant_row = existing_tenant_row
                 audit_action = "workspace.create"
                 tenant_bootstrapped = False
 
@@ -193,16 +214,20 @@ class WorkspaceRepository:
                 "RETURNING tenant_id, id, slug, name, status, created_at"
             )
             ws_row = (
-                await session.execute(
-                    stmt_workspace,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "slug": workspace_slug,
-                        "name": workspace_name,
-                    },
+                (
+                    await session.execute(
+                        stmt_workspace,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "slug": workspace_slug,
+                            "name": workspace_name,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
             stmt_membership = text(
                 "INSERT INTO iam.memberships (tenant_id, workspace_id, user_id, role, status) "
@@ -210,15 +235,19 @@ class WorkspaceRepository:
                 "RETURNING id, user_id, role, status, joined_at"
             )
             membership_row = (
-                await session.execute(
-                    stmt_membership,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "owner_user_id": owner_user_id,
-                    },
+                (
+                    await session.execute(
+                        stmt_membership,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "owner_user_id": owner_user_id,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
             details_payload = json.dumps(
                 {
@@ -244,26 +273,30 @@ class WorkspaceRepository:
                 ") RETURNING id, occurred_at"
             )
             audit_row = (
-                await session.execute(
-                    stmt_audit,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "actor_subject": str(actor_user_id),
-                        "action": audit_action,
-                        "resource_id": str(workspace_id),
-                        "request_id": request_id,
-                        "trace_id": trace_id,
-                        "reason_code": reason_code,
-                        "details_redacted": details_payload,
-                    },
+                (
+                    await session.execute(
+                        stmt_audit,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "actor_subject": str(actor_user_id),
+                            "action": audit_action,
+                            "resource_id": str(workspace_id),
+                            "request_id": request_id,
+                            "trace_id": trace_id,
+                            "reason_code": reason_code,
+                            "details_redacted": details_payload,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
         except WorkspaceAccessDeniedError:
             raise
         except IntegrityError as exc:
-            if _is_unique_violation(exc):
+            if is_unique_violation(exc):
                 raise WorkspaceConflictError(
                     "Workspace slug or tenant slug already exists"
                 ) from exc
@@ -278,19 +311,19 @@ class WorkspaceRepository:
             else datetime.now(UTC).isoformat()
         )
 
-        return {
-            "workspace_id": str(ws_row["id"]),
-            "tenant_id": str(ws_row["tenant_id"]),
-            "tenant_slug": str(tenant_row["slug"]),
-            "tenant_name": str(tenant_row["name"]),
-            "workspace_slug": str(ws_row["slug"]),
-            "workspace_name": str(ws_row["name"]),
-            "status": str(ws_row["status"]),
-            "role": str(membership_row["role"]),
-            "initial_owner_user_id": str(membership_row["user_id"]),
-            "audit_event_id": str(audit_row["id"]),
-            "created_at": created_at_iso,
-        }
+        return WorkspaceRecord(
+            workspace_id=str(ws_row["id"]),
+            tenant_id=str(ws_row["tenant_id"]),
+            tenant_slug=str(tenant_row["slug"]),
+            tenant_name=str(tenant_row["name"]),
+            workspace_slug=str(ws_row["slug"]),
+            workspace_name=str(ws_row["name"]),
+            status=str(ws_row["status"]),
+            role=str(membership_row["role"]),
+            initial_owner_user_id=str(membership_row["user_id"]),
+            audit_event_id=str(audit_row["id"]),
+            created_at=created_at_iso,
+        )
 
     async def get_workspace_in_scope(
         self,
@@ -299,7 +332,7 @@ class WorkspaceRepository:
         tenant_id: UUID,
         workspace_id: UUID,
         user_id: UUID,
-    ) -> dict[str, Any] | None:
+    ) -> WorkspaceRecord | None:
         """Read a workspace within the caller's verified RLS transaction context."""
         stmt = text(
             "SELECT "
@@ -327,15 +360,19 @@ class WorkspaceRepository:
         )
         try:
             row = (
-                await session.execute(
-                    stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "user_id": user_id,
-                    },
+                (
+                    await session.execute(
+                        stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "user_id": user_id,
+                        },
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         except SQLAlchemyError as exc:
             raise _db_unavailable(exc) from exc
 
@@ -348,20 +385,95 @@ class WorkspaceRepository:
             if hasattr(raw_created_at, "isoformat")
             else str(raw_created_at)
         )
-        return {
-            "workspace_id": str(row["workspace_id"]),
-            "tenant_id": str(row["tenant_id"]),
-            "tenant_slug": str(row["tenant_slug"]),
-            "tenant_name": str(row["tenant_name"]),
-            "workspace_slug": str(row["workspace_slug"]),
-            "workspace_name": str(row["workspace_name"]),
-            "status": str(row["status"]),
-            "role": str(row["role"]),
-            "initial_owner_user_id": None,
-            "audit_event_id": None,
-            "created_at": created_at_iso,
-        }
+        return WorkspaceRecord(
+            workspace_id=str(row["workspace_id"]),
+            tenant_id=str(row["tenant_id"]),
+            tenant_slug=str(row["tenant_slug"]),
+            tenant_name=str(row["tenant_name"]),
+            workspace_slug=str(row["workspace_slug"]),
+            workspace_name=str(row["workspace_name"]),
+            status=str(row["status"]),
+            role=str(row["role"]),
+            initial_owner_user_id=None,
+            audit_event_id=None,
+            created_at=created_at_iso,
+        )
+
+    def bind(self, session: AsyncSession) -> WorkspaceRepositoryPort:
+        """Bind an AsyncSession into a session-free WorkspaceRepositoryPort adapter."""
+        return SessionBoundWorkspaceRepository(repository=self, session=session)
+
+
+class SessionBoundWorkspaceRepository:
+    """Session-scoped adapter implementing WorkspaceRepositoryPort for pure services."""
+
+    def __init__(self, repository: WorkspaceRepository, session: AsyncSession) -> None:
+        self._repository = repository
+        self._session = session
+
+    async def user_exists(self, user_id: UUID) -> bool:
+        return await self._repository.user_exists(self._session, user_id)
+
+    async def get_user_workspaces(self, user_id: UUID) -> list[WorkspaceSummaryRecord]:
+        return await self._repository.get_user_workspaces(self._session, user_id)
+
+    async def lock_authorizing_owner_membership(
+        self,
+        *,
+        tenant_id: UUID,
+        authorizing_workspace_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        return await self._repository.lock_authorizing_owner_membership(
+            self._session,
+            tenant_id=tenant_id,
+            authorizing_workspace_id=authorizing_workspace_id,
+            user_id=user_id,
+        )
+
+    async def create_workspace_atomic(
+        self,
+        *,
+        actor_user_id: UUID,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        workspace_slug: str,
+        workspace_name: str,
+        reason_code: str,
+        tenant_slug: str | None = None,
+        tenant_name: str | None = None,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> WorkspaceRecord:
+        return await self._repository.create_workspace_atomic(
+            self._session,
+            actor_user_id=actor_user_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            workspace_slug=workspace_slug,
+            workspace_name=workspace_name,
+            reason_code=reason_code,
+            tenant_slug=tenant_slug,
+            tenant_name=tenant_name,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+
+    async def get_workspace_in_scope(
+        self,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        user_id: UUID,
+    ) -> WorkspaceRecord | None:
+        return await self._repository.get_workspace_in_scope(
+            self._session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
 
 
 workspace_repository = WorkspaceRepository()
-

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Annotated
-from uuid import UUID, uuid4
 
 from control_api.core.auth import verify_csrf_or_origin
 from control_api.core.authorization import require_permission
@@ -12,6 +11,12 @@ from control_api.core.dependencies import (
     CurrentSessionWorkspace,
     CurrentUser,
     DBSession,
+)
+from control_api.core.errors import RepositoryUnavailableError
+from control_api.modules.workspaces.api._http_helpers import (
+    extract_correlation_ids,
+    parse_uuid_path_param,
+    translate_domain_error,
 )
 from control_api.modules.workspaces.dto import (
     CreateInvitationRequestDTO,
@@ -26,169 +31,45 @@ from control_api.modules.workspaces.dto import (
     WorkspaceMembershipRoleUpdateResponseDTO,
     WorkspaceResponseDTO,
 )
+from control_api.modules.workspaces.models.enums import MembershipStatus
 from control_api.modules.workspaces.models.errors import (
-    InvitationConfigurationError,
-    InvitationConflictError,
-    InvitationForbiddenError,
-    InvitationNotFoundError,
-    InvitationRateLimitError,
-    InvitationValidationError,
-    MembershipConflictError,
-    MembershipForbiddenError,
-    MembershipNotFoundError,
-    MembershipValidationError,
+    InvitationError,
+    MembershipError,
     WorkspaceAccessDeniedError,
     WorkspaceConflictError,
     WorkspaceDatabaseUnavailableError,
 )
-from control_api.modules.workspaces.models.rbac import MembershipStatus
+from control_api.modules.workspaces.repositories.invitation_repository import InvitationRepository
+from control_api.modules.workspaces.repositories.membership_repository import MembershipRepository
+from control_api.modules.workspaces.repositories.workspace_repository import workspace_repository
 from control_api.modules.workspaces.services.invitation_service import InvitationService
 from control_api.modules.workspaces.services.membership_service import MembershipService
-from control_api.modules.workspaces.services.workspace_service import workspace_service
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from control_api.modules.workspaces.services.workspace_service import WorkspaceService
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
-invitation_service = InvitationService()
-membership_service = MembershipService()
+invitation_repository = InvitationRepository()
+membership_repository = MembershipRepository()
 
 
-def _translate_workspace_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, WorkspaceAccessDeniedError):
-        return HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        )
-    if isinstance(exc, WorkspaceConflictError):
-        return HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        )
-    if isinstance(exc, WorkspaceDatabaseUnavailableError):
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        )
-    return HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Unexpected workspace operation error",
-    )
+def get_workspace_service(session: DBSession) -> WorkspaceService:
+    """Resolve the session-bound workspace service for FastAPI dependency injection."""
+    return WorkspaceService(workspace_repository.bind(session))
 
 
-def _parse_invitation_uuid(invitation_id: str) -> UUID:
-    try:
-        return UUID(invitation_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "invalid_invitation_id",
-                "message": "invitation_id must be a valid UUID",
-            },
-        ) from exc
+def get_invitation_service(session: DBSession) -> InvitationService:
+    """Resolve the session-bound invitation service for FastAPI dependency injection."""
+    return InvitationService(invitation_repository.bind(session))
 
 
-def _translate_invitation_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, InvitationNotFoundError):
-        return HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, InvitationForbiddenError):
-        return HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, WorkspaceAccessDeniedError):
-        return HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "workspace_access_denied", "message": str(exc)},
-        )
-    if isinstance(exc, InvitationConflictError):
-        return HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, InvitationRateLimitError):
-        return HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"code": exc.code, "message": exc.message},
-            headers={"Retry-After": str(exc.retry_after_seconds)},
-        )
-    if isinstance(exc, InvitationValidationError):
-        return HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, InvitationConfigurationError):
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, WorkspaceDatabaseUnavailableError):
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "invitation_store_unavailable", "message": str(exc)},
-        )
-    return HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail={
-            "code": "invitation_unexpected_error",
-            "message": "Unexpected workspace invitation error",
-        },
-    )
+def get_membership_service(session: DBSession) -> MembershipService:
+    """Resolve the session-bound membership service for FastAPI dependency injection."""
+    return MembershipService(membership_repository.bind(session))
 
 
-def _parse_membership_uuid(membership_id: str) -> UUID:
-    try:
-        return UUID(membership_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "invalid_membership_id",
-                "message": "membership_id must be a valid UUID",
-            },
-        ) from exc
-
-
-def _translate_membership_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, MembershipNotFoundError):
-        return HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, MembershipForbiddenError):
-        return HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, WorkspaceAccessDeniedError):
-        return HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "workspace_access_denied", "message": str(exc)},
-        )
-    if isinstance(exc, MembershipConflictError):
-        return HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, MembershipValidationError):
-        return HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": exc.code, "message": exc.message},
-        )
-    if isinstance(exc, WorkspaceDatabaseUnavailableError):
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "membership_store_unavailable", "message": str(exc)},
-        )
-    return HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail={
-            "code": "membership_unexpected_error",
-            "message": "Unexpected workspace membership operation error",
-        },
-    )
+WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
+InvitationServiceDep = Annotated[InvitationService, Depends(get_invitation_service)]
+MembershipServiceDep = Annotated[MembershipService, Depends(get_membership_service)]
 
 
 @router.post(
@@ -200,15 +81,13 @@ async def create_workspace(
     dto: CreateWorkspaceRequestDTO,
     request: Request,
     auth_user: CurrentAuthenticatedUser,
-    session: DBSession,
+    service: WorkspaceServiceDep,
 ) -> WorkspaceResponseDTO:
     """Provision a new workspace and its initial active Owner membership atomically (WS-D01, WS-D03)."""
     verify_csrf_or_origin(request)
-    request_id = request.headers.get("x-request-id")
-    trace_id = request.headers.get("x-trace-id")
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await workspace_service.create_workspace(
-            session=session,
+        return await service.create_workspace(
             auth_user=auth_user,
             dto=dto,
             request_id=request_id,
@@ -218,8 +97,11 @@ async def create_workspace(
         WorkspaceAccessDeniedError,
         WorkspaceConflictError,
         WorkspaceDatabaseUnavailableError,
+        RepositoryUnavailableError,
     ) as exc:
-        raise _translate_workspace_error(exc) from exc
+        raise translate_domain_error(
+            exc, scope="workspace", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.get(
@@ -227,21 +109,23 @@ async def create_workspace(
     response_model=WorkspaceListResponseDTO,
 )
 async def list_workspaces(
+    request: Request,
     auth_user: CurrentAuthenticatedUser,
-    session: DBSession,
+    service: WorkspaceServiceDep,
 ) -> WorkspaceListResponseDTO:
-    """List active workspaces where the authenticated user holds an active membership."""
+    """List all active workspaces where the authenticated user holds an active membership."""
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await workspace_service.list_user_workspaces(
-            session=session,
-            auth_user=auth_user,
-        )
+        return await service.list_user_workspaces(auth_user=auth_user)
     except (
         WorkspaceAccessDeniedError,
         WorkspaceConflictError,
         WorkspaceDatabaseUnavailableError,
+        RepositoryUnavailableError,
     ) as exc:
-        raise _translate_workspace_error(exc) from exc
+        raise translate_domain_error(
+            exc, scope="workspace", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.get(
@@ -250,23 +134,25 @@ async def list_workspaces(
 )
 async def get_workspace(
     workspace_id: str,
+    request: Request,
     principal: CurrentUser,
-    session: DBSession,
+    service: WorkspaceServiceDep,
 ) -> WorkspaceResponseDTO:
     """Get details of an active workspace within the caller's authorized RLS scope."""
     _ = workspace_id
     require_permission(principal, "workspace:read")
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await workspace_service.get_workspace(
-            session=session,
-            principal=principal,
-        )
+        return await service.get_workspace(principal=principal)
     except (
         WorkspaceAccessDeniedError,
         WorkspaceConflictError,
         WorkspaceDatabaseUnavailableError,
+        RepositoryUnavailableError,
     ) as exc:
-        raise _translate_workspace_error(exc) from exc
+        raise translate_domain_error(
+            exc, scope="workspace", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.post(
@@ -279,25 +165,25 @@ async def create_workspace_invitation(
     dto: CreateInvitationRequestDTO,
     request: Request,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
+    service: InvitationServiceDep,
 ) -> WorkspaceInvitationResponseDTO:
     """Create a pending workspace invitation and enqueue durable outbox delivery (ADR-019)."""
     _ = workspace_id
     verify_csrf_or_origin(request)
     require_permission(ctx.principal, "workspace:write")
-    request_id = request.headers.get("x-request-id") or str(uuid4())
-    trace_id = request.headers.get("x-trace-id") or str(uuid4())
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await invitation_service.create_invitation(
-            session=session,
+        return await service.create_invitation(
             principal=ctx.principal,
             actor_issuer=ctx.session_user.issuer,
             payload=dto,
             request_id=request_id,
             trace_id=trace_id,
         )
-    except Exception as exc:
-        raise _translate_invitation_error(exc) from exc
+    except (InvitationError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="invitation", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.get(
@@ -306,23 +192,26 @@ async def create_workspace_invitation(
 )
 async def list_workspace_invitations(
     workspace_id: str,
+    request: Request,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
-    limit: int = Query(default=20, ge=1, le=100),
-    cursor: str | None = Query(default=None, max_length=256),
+    service: InvitationServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(max_length=256)] = None,
 ) -> WorkspaceInvitationListResponseDTO:
     """List workspace invitations ordered newest-first with opaque keyset cursor."""
     _ = workspace_id
     require_permission(ctx.principal, "workspace:read")
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await invitation_service.list_invitations(
-            session=session,
+        return await service.list_invitations(
             principal=ctx.principal,
             limit=limit,
             cursor=cursor,
         )
-    except Exception as exc:
-        raise _translate_invitation_error(exc) from exc
+    except (InvitationError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="invitation", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.post(
@@ -335,25 +224,29 @@ async def resend_workspace_invitation(
     invitation_id: str,
     request: Request,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
+    service: InvitationServiceDep,
 ) -> WorkspaceInvitationResponseDTO:
     """Rotate proof generation and queue a new outbox delivery for an active invitation."""
     _ = workspace_id
     verify_csrf_or_origin(request)
     require_permission(ctx.principal, "workspace:write")
-    parsed_id = _parse_invitation_uuid(invitation_id)
-    request_id = request.headers.get("x-request-id") or str(uuid4())
-    trace_id = request.headers.get("x-trace-id") or str(uuid4())
+    parsed_id = parse_uuid_path_param(
+        invitation_id,
+        code="invalid_invitation_id",
+        message="invitation_id must be a valid UUID",
+    )
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await invitation_service.resend_invitation(
-            session=session,
+        return await service.resend_invitation(
             principal=ctx.principal,
             invitation_id=parsed_id,
             request_id=request_id,
             trace_id=trace_id,
         )
-    except Exception as exc:
-        raise _translate_invitation_error(exc) from exc
+    except (InvitationError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="invitation", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.post(
@@ -365,25 +258,29 @@ async def revoke_workspace_invitation(
     invitation_id: str,
     request: Request,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
+    service: InvitationServiceDep,
 ) -> WorkspaceInvitationResponseDTO:
     """Revoke a pending workspace invitation idempotently and purge temporary proof material."""
     _ = workspace_id
     verify_csrf_or_origin(request)
     require_permission(ctx.principal, "workspace:write")
-    parsed_id = _parse_invitation_uuid(invitation_id)
-    request_id = request.headers.get("x-request-id") or str(uuid4())
-    trace_id = request.headers.get("x-trace-id") or str(uuid4())
+    parsed_id = parse_uuid_path_param(
+        invitation_id,
+        code="invalid_invitation_id",
+        message="invitation_id must be a valid UUID",
+    )
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await invitation_service.revoke_invitation(
-            session=session,
+        return await service.revoke_invitation(
             principal=ctx.principal,
             invitation_id=parsed_id,
             request_id=request_id,
             trace_id=trace_id,
         )
-    except Exception as exc:
-        raise _translate_invitation_error(exc) from exc
+    except (InvitationError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="invitation", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.get(
@@ -392,27 +289,30 @@ async def revoke_workspace_invitation(
 )
 async def list_workspace_memberships(
     workspace_id: str,
+    request: Request,
     response: Response,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
-    limit: int = Query(default=25, ge=1, le=100),
-    cursor: str | None = Query(default=None, max_length=256),
+    service: MembershipServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: Annotated[str | None, Query(max_length=256)] = None,
     status_filter: Annotated[MembershipStatus | None, Query(alias="status")] = None,
 ) -> WorkspaceMembershipListResponseDTO:
     """List scoped workspace memberships with cursor pagination (ADR-021)."""
     _ = workspace_id
     response.headers["Cache-Control"] = "no-store"
     require_permission(ctx.principal, "workspace:read")
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await membership_service.list_memberships(
-            session=session,
+        return await service.list_memberships(
             principal=ctx.principal,
             limit=limit,
             cursor=cursor,
             status_filter=status_filter,
         )
-    except Exception as exc:
-        raise _translate_membership_error(exc) from exc
+    except (MembershipError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="membership", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.patch(
@@ -426,27 +326,31 @@ async def update_workspace_membership_role(
     request: Request,
     response: Response,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
+    service: MembershipServiceDep,
 ) -> WorkspaceMembershipRoleUpdateResponseDTO:
     """Atomically change an active workspace member's role with last-owner protection (ADR-021)."""
     _ = workspace_id
     response.headers["Cache-Control"] = "no-store"
     verify_csrf_or_origin(request)
     require_permission(ctx.principal, "workspace:write")
-    parsed_id = _parse_membership_uuid(membership_id)
-    request_id = request.headers.get("x-request-id") or str(uuid4())
-    trace_id = request.headers.get("x-trace-id") or request_id
+    parsed_id = parse_uuid_path_param(
+        membership_id,
+        code="invalid_membership_id",
+        message="membership_id must be a valid UUID",
+    )
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await membership_service.update_member_role(
-            session=session,
+        return await service.update_member_role(
             principal=ctx.principal,
             membership_id=parsed_id,
             payload=dto,
             request_id=request_id,
             trace_id=trace_id,
         )
-    except Exception as exc:
-        raise _translate_membership_error(exc) from exc
+    except (MembershipError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="membership", request_id=request_id, trace_id=trace_id
+        ) from exc
 
 
 @router.post(
@@ -460,24 +364,28 @@ async def revoke_workspace_membership(
     request: Request,
     response: Response,
     ctx: CurrentSessionWorkspace,
-    session: DBSession,
+    service: MembershipServiceDep,
 ) -> WorkspaceMembershipRevokeResponseDTO:
     """Atomically revoke an active workspace member's access with last-owner protection (ADR-021)."""
     _ = workspace_id
     response.headers["Cache-Control"] = "no-store"
     verify_csrf_or_origin(request)
     require_permission(ctx.principal, "workspace:write")
-    parsed_id = _parse_membership_uuid(membership_id)
-    request_id = request.headers.get("x-request-id") or str(uuid4())
-    trace_id = request.headers.get("x-trace-id") or request_id
+    parsed_id = parse_uuid_path_param(
+        membership_id,
+        code="invalid_membership_id",
+        message="membership_id must be a valid UUID",
+    )
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        return await membership_service.revoke_member(
-            session=session,
+        return await service.revoke_member(
             principal=ctx.principal,
             membership_id=parsed_id,
             payload=dto,
             request_id=request_id,
             trace_id=trace_id,
         )
-    except Exception as exc:
-        raise _translate_membership_error(exc) from exc
+    except (MembershipError, WorkspaceAccessDeniedError, RepositoryUnavailableError) as exc:
+        raise translate_domain_error(
+            exc, scope="membership", request_id=request_id, trace_id=trace_id
+        ) from exc

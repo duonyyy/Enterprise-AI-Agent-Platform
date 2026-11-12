@@ -12,23 +12,22 @@ from control_api.modules.workspaces.dto import (
     WorkspaceMembershipRevokeResponseDTO,
     WorkspaceMembershipRoleUpdateResponseDTO,
 )
+from control_api.modules.workspaces.models.enums import MembershipStatus
 from control_api.modules.workspaces.models.errors import MembershipForbiddenError
+from control_api.modules.workspaces.models.ports import MembershipRepositoryPort
 from control_api.modules.workspaces.models.rbac import (
-    MembershipStatus,
     can_assign_target_role,
     can_list_workspace_members,
     can_revoke_target_role,
 )
-from control_api.modules.workspaces.repositories.membership_repository import MembershipRepository
 from platform_common.principal import AuthenticatedPrincipal
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class MembershipService:
-    """Enforces authoritative member-management RBAC policy backed by MembershipRepository."""
+    """Enforces authoritative member-management RBAC policy backed by MembershipRepositoryPort."""
 
-    def __init__(self, repository: MembershipRepository | None = None) -> None:
-        self._repository = repository or MembershipRepository()
+    def __init__(self, repository: MembershipRepositoryPort) -> None:
+        self._repository = repository
 
     @staticmethod
     def _actor_role(principal: AuthenticatedPrincipal) -> str:
@@ -36,7 +35,6 @@ class MembershipService:
 
     async def list_memberships(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         limit: int,
@@ -50,7 +48,6 @@ class MembershipService:
                 "Only active workspace owners and admins can list members",
             )
         items, next_cursor = await self._repository.list_memberships(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             actor_user_id=UUID(principal.user_id),
@@ -65,7 +62,6 @@ class MembershipService:
 
     async def update_member_role(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         membership_id: UUID,
@@ -85,7 +81,6 @@ class MembershipService:
                 "Actor role is not permitted to perform this role assignment",
             )
         record = await self._repository.update_member_role(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             actor_user_id=UUID(principal.user_id),
@@ -100,7 +95,6 @@ class MembershipService:
 
     async def revoke_member(
         self,
-        session: AsyncSession,
         *,
         principal: AuthenticatedPrincipal,
         membership_id: UUID,
@@ -119,7 +113,6 @@ class MembershipService:
                 "Actor role is not permitted to revoke this member",
             )
         record = await self._repository.revoke_member(
-            session,
             tenant_id=UUID(principal.tenant_id),
             workspace_id=UUID(principal.workspace_id),
             actor_user_id=UUID(principal.user_id),
@@ -131,3 +124,5 @@ class MembershipService:
         )
         return WorkspaceMembershipRevokeResponseDTO.model_validate(record)
 
+
+__all__ = ["MembershipService"]

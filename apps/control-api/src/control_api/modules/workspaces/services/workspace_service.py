@@ -11,7 +11,6 @@ Enforces approved design decisions:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from control_api.core.settings import settings
@@ -21,32 +20,28 @@ from control_api.modules.workspaces.dto import (
     WorkspaceResponseDTO,
     WorkspaceSummaryDTO,
 )
+from control_api.modules.workspaces.models.enums import MembershipStatus, WorkspaceRole
 from control_api.modules.workspaces.models.errors import (
     WorkspaceAccessDeniedError,
     WorkspaceConflictError,
     WorkspaceDatabaseUnavailableError,
 )
-from control_api.modules.workspaces.repositories.workspace_repository import (
-    WorkspaceRepository,
-    workspace_repository,
+from control_api.modules.workspaces.models.ports import (
+    AuthenticatedUserPort,
+    WorkspacePrincipalPort,
+    WorkspaceRepositoryPort,
 )
-
-if TYPE_CHECKING:
-    from control_api.core.auth import AuthenticatedUserContext
-    from platform_common.principal import AuthenticatedPrincipal
-    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class WorkspaceService:
     """Domain and application service for workspace bootstrap, creation, and scoped discovery."""
 
-    def __init__(self, repo: WorkspaceRepository | None = None) -> None:
-        self.repo = repo or workspace_repository
+    def __init__(self, repo: WorkspaceRepositoryPort) -> None:
+        self.repo = repo
 
     async def create_workspace(
         self,
-        session: AsyncSession,
-        auth_user: AuthenticatedUserContext,
+        auth_user: AuthenticatedUserPort,
         dto: CreateWorkspaceRequestDTO,
         *,
         request_id: str | None = None,
@@ -83,10 +78,8 @@ class WorkspaceService:
                 raise WorkspaceAccessDeniedError(
                     "Tenant provisioning requires bootstrap operator authority"
                 )
-            if not await self.repo.user_exists(session, owner_uid):
-                raise WorkspaceAccessDeniedError(
-                    "Designated initial owner user does not exist"
-                )
+            if not await self.repo.user_exists(owner_uid):
+                raise WorkspaceAccessDeniedError("Designated initial owner user does not exist")
             target_tenant_id = UUID(dto.tenant_id) if dto.tenant_id else uuid4()
             reason_code = "BOOTSTRAP_OPERATOR"
         else:
@@ -95,30 +88,27 @@ class WorkspaceService:
             target_tenant_id = UUID(dto.tenant_id)
 
             if is_operator:
-                if not await self.repo.user_exists(session, owner_uid):
-                    raise WorkspaceAccessDeniedError(
-                        "Designated initial owner user does not exist"
-                    )
+                if not await self.repo.user_exists(owner_uid):
+                    raise WorkspaceAccessDeniedError("Designated initial owner user does not exist")
                 reason_code = "BOOTSTRAP_OPERATOR"
             else:
                 # Actor must hold an active 'owner' membership in at least one active workspace
                 # of the target active tenant, verified server-side and locked FOR SHARE.
-                user_workspaces = await self.repo.get_user_workspaces(session, actor_uid)
+                user_workspaces = await self.repo.get_user_workspaces(actor_uid)
                 authorizing_rows = [
-                    r
-                    for r in user_workspaces
-                    if UUID(str(r["tenant_id"])) == target_tenant_id
-                    and str(r["role"]) == "owner"
-                    and str(r.get("membership_status", "active")) == "active"
+                    row
+                    for row in user_workspaces
+                    if UUID(row.tenant_id) == target_tenant_id
+                    and row.role == WorkspaceRole.OWNER
+                    and row.membership_status == MembershipStatus.ACTIVE
                 ]
                 if not authorizing_rows:
                     raise WorkspaceAccessDeniedError(
                         "Workspace creation requires active tenant owner or bootstrap operator authority"
                     )
 
-                authorizing_workspace_id = UUID(str(authorizing_rows[0]["workspace_id"]))
+                authorizing_workspace_id = UUID(authorizing_rows[0].workspace_id)
                 locked = await self.repo.lock_authorizing_owner_membership(
-                    session,
                     tenant_id=target_tenant_id,
                     authorizing_workspace_id=authorizing_workspace_id,
                     user_id=actor_uid,
@@ -132,7 +122,6 @@ class WorkspaceService:
         # 3. Execute atomic creation of (optional tenant +) workspace + initial owner + audit event (WS-D03)
         new_workspace_id = uuid4()
         created = await self.repo.create_workspace_atomic(
-            session,
             actor_user_id=actor_uid,
             owner_user_id=owner_uid,
             tenant_id=target_tenant_id,
@@ -145,13 +134,11 @@ class WorkspaceService:
             request_id=request_id,
             trace_id=trace_id,
         )
-
-        return WorkspaceResponseDTO(**created)
+        return WorkspaceResponseDTO.model_validate(created)
 
     async def list_user_workspaces(
         self,
-        session: AsyncSession,
-        auth_user: AuthenticatedUserContext,
+        auth_user: AuthenticatedUserPort,
     ) -> WorkspaceListResponseDTO:
         """List all active workspaces where the authenticated user holds an active membership."""
         if auth_user.session_data is None:
@@ -164,27 +151,26 @@ class WorkspaceService:
         except ValueError:
             return WorkspaceListResponseDTO(items=[])
 
-        rows = await self.repo.get_user_workspaces(session, actor_uid)
+        rows = await self.repo.get_user_workspaces(actor_uid)
         items = [
             WorkspaceSummaryDTO(
-                workspace_id=str(r["workspace_id"]),
-                tenant_id=str(r["tenant_id"]),
-                tenant_slug=str(r["tenant_slug"]),
-                tenant_name=str(r["tenant_name"]),
-                workspace_slug=str(r["workspace_slug"]),
-                workspace_name=str(r["workspace_name"]),
+                workspace_id=row.workspace_id,
+                tenant_id=row.tenant_id,
+                tenant_slug=row.tenant_slug,
+                tenant_name=row.tenant_name,
+                workspace_slug=row.workspace_slug,
+                workspace_name=row.workspace_name,
                 status="active",
-                role=str(r["role"]),
+                role=row.role,
             )
-            for r in rows
-            if str(r.get("membership_status", "active")) == "active"
+            for row in rows
+            if row.membership_status == MembershipStatus.ACTIVE
         ]
         return WorkspaceListResponseDTO(items=items)
 
     async def get_workspace(
         self,
-        session: AsyncSession,
-        principal: AuthenticatedPrincipal,
+        principal: WorkspacePrincipalPort,
     ) -> WorkspaceResponseDTO:
         """Retrieve workspace details within the caller's verified RLS scope."""
         try:
@@ -195,7 +181,6 @@ class WorkspaceService:
             raise WorkspaceAccessDeniedError("Active workspace membership required") from exc
 
         row = await self.repo.get_workspace_in_scope(
-            session,
             tenant_id=tenant_uid,
             workspace_id=workspace_uid,
             user_id=user_uid,
@@ -203,16 +188,12 @@ class WorkspaceService:
         if row is None:
             raise WorkspaceAccessDeniedError("Active workspace membership required")
 
-        return WorkspaceResponseDTO(**row)
+        return WorkspaceResponseDTO.model_validate(row)
 
-
-workspace_service = WorkspaceService()
 
 __all__ = [
     "WorkspaceAccessDeniedError",
     "WorkspaceConflictError",
     "WorkspaceDatabaseUnavailableError",
     "WorkspaceService",
-    "workspace_service",
 ]
-

@@ -9,13 +9,14 @@ from uuid import uuid4
 import pytest
 from control_api.core.settings import settings
 from control_api.modules.identity.models.session import SessionData, VerifiedIdentityEvidence
-from control_api.modules.workspaces.repositories.invitation_repository import InvitationRepository
-from control_api.modules.workspaces.services.handoff_store import (
+from control_api.modules.workspaces.models.records import InvitationAcceptRecord
+from control_api.modules.workspaces.repositories.handoff_store import (
     InMemoryInvitationHandoffStore,
     InvitationHandoffProtector,
     generate_browser_binding_token,
     hash_browser_binding_token,
 )
+from control_api.modules.workspaces.repositories.invitation_repository import InvitationRepository
 from control_api.modules.workspaces.services.invitation_acceptance_service import (
     InvitationAcceptanceService,
 )
@@ -114,11 +115,11 @@ def test_accept_cleanup_uses_handoff_read_before_commit(monkeypatch: pytest.Monk
     )
     store = InMemoryInvitationHandoffStore()
     repository = InvitationRepository()
-    service = InvitationAcceptanceService(repository=repository, store=store)
     now = int(time.time())
     invitation_id, user_id, workspace_id = uuid4(), str(uuid4()), uuid4()
     proof = "proof-held-across-database-await"
-    _, cookie = service.create_handoff(
+    temp_service = InvitationAcceptanceService(store=store)
+    _, cookie = temp_service.create_handoff(
         invitation_id=invitation_id,
         raw_token=proof,
         existing_browser_cookie=None,
@@ -132,9 +133,11 @@ def test_accept_cleanup_uses_handoff_read_before_commit(monkeypatch: pytest.Monk
     assert before is not None
     replacement: dict[str, object] = {}
 
-    async def commit_and_replace(_session: AsyncSession, **_kwargs: object) -> dict[str, object]:
+    async def commit_and_replace(
+        _session: AsyncSession, **_kwargs: object
+    ) -> InvitationAcceptRecord:
         for token in ("intermediate-proof", proof):
-            service.create_handoff(
+            temp_service.create_handoff(
                 invitation_id=invitation_id,
                 raw_token=token,
                 existing_browser_cookie=cookie,
@@ -146,15 +149,15 @@ def test_accept_cleanup_uses_handoff_read_before_commit(monkeypatch: pytest.Monk
         )
         assert current is not None and current["ciphertext"] != before["ciphertext"]
         replacement.update(current)
-        return {
-            "invitation_id": str(invitation_id),
-            "tenant_id": str(uuid4()),
-            "workspace_id": str(workspace_id),
-            "workspace_slug": "test-workspace",
-            "workspace_name": "Test Workspace",
-            "role": "developer",
-            "acceptance_state": "accepted",
-        }
+        return InvitationAcceptRecord(
+            invitation_id=str(invitation_id),
+            tenant_id=str(uuid4()),
+            workspace_id=str(workspace_id),
+            workspace_slug="test-workspace",
+            workspace_name="Test Workspace",
+            role="developer",
+            acceptance_state="accepted",
+        )
 
     monkeypatch.setattr(repository, "accept_invitation", commit_and_replace)
     session_data = SessionData(
@@ -178,8 +181,8 @@ def test_accept_cleanup_uses_handoff_read_before_commit(monkeypatch: pytest.Monk
 
     async def accept() -> None:
         async with AsyncSession() as session:
+            service = InvitationAcceptanceService(repository=repository.bind(session), store=store)
             result = await service.accept_invitation(
-                session,
                 invitation_id=invitation_id,
                 session_data=session_data,
                 issuer=settings.oidc_issuer,

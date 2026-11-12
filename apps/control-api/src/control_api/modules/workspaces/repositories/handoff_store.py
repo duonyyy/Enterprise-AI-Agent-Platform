@@ -1,176 +1,33 @@
-"""Encrypted browser-bound handoff storage and atomic rate limiting (ADR-020 / Step 03-C)."""
+"""Encrypted browser-bound handoff cache adapters and atomic rate limiting (ADR-020 / Step 03-C)."""
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import hmac
 import json
-import re
-import secrets
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any
 
+from control_api.core.errors import RepositoryUnavailableError
 from control_api.core.settings import settings
-from control_api.modules.identity.models.errors import RepositoryUnavailableError
-from control_api.modules.workspaces.models.errors import InvitationConfigurationError
-from cryptography.fernet import Fernet, InvalidToken
-from platform_common.invitations import hash_invitation_proof
+from control_api.modules.workspaces.models.handoff import (
+    InvitationHandoffProtector,
+    generate_browser_binding_token,
+    hash_browser_binding_token,
+    is_valid_browser_binding_token,
+)
+from control_api.modules.workspaces.models.records import (
+    ConsumedHandoffReceipt,
+    DecryptedHandoffPayload,
+    HandoffEntryDict,
+    HandoffPersistResult,
+    StoredHandoffLookup,
+)
 
-_BROWSER_COOKIE_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
-_KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-
-
-def hash_browser_binding_token(browser_token: str) -> str:
-    """Compute canonical SHA-256 hex digest of an opaque browser handoff cookie."""
-    return hashlib.sha256(browser_token.encode("utf-8")).hexdigest()
-
-
-def is_valid_browser_binding_token(value: str | None) -> bool:
-    """Return True if cookie value matches minimum 256-bit urlsafe entropy shape."""
-    return isinstance(value, str) and bool(_BROWSER_COOKIE_RE.match(value))
-
-
-def generate_browser_binding_token() -> str:
-    """Generate a high-entropy 256-bit urlsafe browser binding secret."""
-    return secrets.token_urlsafe(32)
-
-
-@dataclass(frozen=True, slots=True)
-class DecryptedHandoffPayload:
-    """Verified handoff payload recovered from an active encrypted Redis entry."""
-
-    invitation_id: str
-    token_hash: str
-    browser_binding_digest: str
-    issued_at: int
-    expires_at: int
-
-
-@dataclass(frozen=True, slots=True)
-class HandoffPersistResult:
-    """Atomic persistence outcome for browser-bound invitation handoffs."""
-
-    outcome: str
-    expires_at: int
-    remaining_ttl_seconds: int
-
-
-@dataclass(frozen=True, slots=True)
-class ConsumedHandoffReceipt:
-    """Non-secret post-commit receipt allowing safe same-user idempotent reload/retry."""
-
-    invitation_id: str
-    user_id: str
-    token_hash: str
-    browser_binding_digest: str
-    expires_at: int
-
-
-@dataclass(frozen=True, slots=True)
-class StoredHandoffLookup:
-    """Result returned when looking up a browser-bound handoff key."""
-
-    active: DecryptedHandoffPayload | None = None
-    consumed: ConsumedHandoffReceipt | None = None
-
-
-class InvitationHandoffProtector:
-    """Symmetric authenticated Fernet protector dedicated solely to pre-auth invitation handoffs."""
-
-    def __init__(self, *, fernet_key: str, key_id: str = "v1") -> None:
-        if not key_id or not _KEY_ID_RE.match(key_id):
-            raise InvitationConfigurationError(
-                "invitation_handoff_configuration_invalid",
-                "Invitation handoff key_id is invalid",
-            )
-        cleaned = fernet_key.strip()
-        if not cleaned or "replace-with" in cleaned.lower():
-            raise InvitationConfigurationError(
-                "invitation_handoff_configuration_invalid",
-                "Invitation handoff encryption key is missing or placeholder",
-            )
-        try:
-            self._fernet = Fernet(cleaned.encode("ascii"))
-        except (ValueError, TypeError, UnicodeError) as exc:
-            raise InvitationConfigurationError(
-                "invitation_handoff_configuration_invalid",
-                "Invitation handoff encryption key must be a valid Fernet key",
-            ) from exc
-        self.key_id = key_id
-        self._raw_key = cleaned
-
-    def encrypt_handoff(
-        self,
-        *,
-        invitation_id: str,
-        raw_proof: str,
-        browser_binding_digest: str,
-        issued_at: int,
-        expires_at: int,
-    ) -> str:
-        """Encrypt bound invitation handoff payload; raw proof is hashed immediately."""
-        token_hash = hash_invitation_proof(raw_proof)
-        payload = {
-            "v": 1,
-            "invitation_id": invitation_id,
-            "token_hash": token_hash,
-            "browser_binding_digest": browser_binding_digest,
-            "issued_at": issued_at,
-            "expires_at": expires_at,
-        }
-        serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        return self._fernet.encrypt(serialized).decode("ascii")
-
-    def decrypt_handoff(
-        self,
-        *,
-        ciphertext: str,
-        expected_invitation_id: str,
-        expected_browser_digest: str,
-        now: int,
-    ) -> DecryptedHandoffPayload | None:
-        """Verify ciphertext integrity, expiry, and browser/invitation binding."""
-        try:
-            plaintext = self._fernet.decrypt(ciphertext.encode("ascii"))
-            data = json.loads(plaintext.decode("utf-8"))
-        except (InvalidToken, ValueError, TypeError, json.JSONDecodeError, UnicodeError):
-            return None
-
-        if not isinstance(data, dict) or data.get("v") != 1:
-            return None
-
-        inv_id = data.get("invitation_id")
-        token_hash = data.get("token_hash")
-        digest = data.get("browser_binding_digest")
-        issued_at = data.get("issued_at")
-        expires_at = data.get("expires_at")
-        if (
-            not isinstance(inv_id, str)
-            or not isinstance(token_hash, str)
-            or len(token_hash) != 64
-            or not isinstance(digest, str)
-            or type(issued_at) is not int
-            or type(expires_at) is not int
-        ):
-            return None
-
-        if not hmac.compare_digest(inv_id, expected_invitation_id):
-            return None
-        if not hmac.compare_digest(digest, expected_browser_digest):
-            return None
-        if now >= expires_at:
-            return None
-
-        return DecryptedHandoffPayload(
-            invitation_id=inv_id,
-            token_hash=token_hash,
-            browser_binding_digest=digest,
-            issued_at=issued_at,
-            expires_at=expires_at,
-        )
+logger = logging.getLogger(__name__)
 
 
 class BaseInvitationHandoffStore(ABC):
@@ -235,7 +92,7 @@ class BaseInvitationHandoffStore(ABC):
         invitation_id: str,
         browser_binding_digest: str,
         now: int | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> HandoffEntryDict | None:
         """Fetch raw envelope (encrypted handoff OR consumed receipt) without consuming it."""
 
     @abstractmethod
@@ -256,9 +113,154 @@ class BaseInvitationHandoffStore(ABC):
     def clear_all(self) -> None:
         """Clear all stored handoff entries and rate counters (testing only)."""
 
+    async def enforce_handoff_rate_limit_async(
+        self,
+        *,
+        browser_binding_digest: str,
+        client_ip: str,
+        browser_limit: int,
+        ip_limit: int,
+        window_seconds: int,
+        now: int | None = None,
+    ) -> int | None:
+        """Async variant of enforce_handoff_rate_limit (non-blocking for Redis stores)."""
+        return self.enforce_handoff_rate_limit(
+            browser_binding_digest=browser_binding_digest,
+            client_ip=client_ip,
+            browser_limit=browser_limit,
+            ip_limit=ip_limit,
+            window_seconds=window_seconds,
+            now=now,
+        )
+
+    async def save_or_get_encrypted_handoff_async(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        token_hash: str,
+        key_id: str,
+        ciphertext: str,
+        expires_at: int,
+        ttl_seconds: int,
+        now: int | None = None,
+    ) -> HandoffPersistResult:
+        """Async variant of save_or_get_encrypted_handoff (non-blocking for Redis stores)."""
+        return self.save_or_get_encrypted_handoff(
+            invitation_id=invitation_id,
+            browser_binding_digest=browser_binding_digest,
+            token_hash=token_hash,
+            key_id=key_id,
+            ciphertext=ciphertext,
+            expires_at=expires_at,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+
+    async def get_handoff_entry_async(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        now: int | None = None,
+    ) -> HandoffEntryDict | None:
+        """Async variant of get_handoff_entry (non-blocking for Redis stores)."""
+        return self.get_handoff_entry(
+            invitation_id=invitation_id,
+            browser_binding_digest=browser_binding_digest,
+            now=now,
+        )
+
+    async def convert_to_consumed_receipt_async(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        user_id: str,
+        token_hash: str,
+        expected_handoff_ciphertext: str,
+        expires_at: int,
+        now: int | None = None,
+    ) -> None:
+        """Async variant of convert_to_consumed_receipt (non-blocking for Redis stores)."""
+        self.convert_to_consumed_receipt(
+            invitation_id=invitation_id,
+            browser_binding_digest=browser_binding_digest,
+            user_id=user_id,
+            token_hash=token_hash,
+            expected_handoff_ciphertext=expected_handoff_ciphertext,
+            expires_at=expires_at,
+            now=now,
+        )
+
+    async def clear_all_async(self) -> None:
+        """Async variant of clear_all (non-blocking for Redis stores)."""
+        self.clear_all()
+
+
+def _copy_handoff_entry(entry: HandoffEntryDict) -> HandoffEntryDict:
+    copied: HandoffEntryDict = {
+        "kind": entry["kind"],
+        "expires_at": entry["expires_at"],
+        "token_hash": entry["token_hash"],
+    }
+    if "invitation_id" in entry:
+        copied["invitation_id"] = entry["invitation_id"]
+    if "key_id" in entry:
+        copied["key_id"] = entry["key_id"]
+    if "ciphertext" in entry:
+        copied["ciphertext"] = entry["ciphertext"]
+    if "user_id" in entry:
+        copied["user_id"] = entry["user_id"]
+    if "browser_binding_digest" in entry:
+        copied["browser_binding_digest"] = entry["browser_binding_digest"]
+    return copied
+
 
 def _handoff_key(invitation_id: str, browser_binding_digest: str) -> str:
     return f"invite:handoff:{invitation_id}:{browser_binding_digest}"
+
+
+def _coerce_handoff_entry(raw_obj: dict[str, Any], now: int | None) -> HandoffEntryDict | None:
+    kind = raw_obj.get("kind")
+    exp = raw_obj.get("expires_at")
+    token_hash = raw_obj.get("token_hash")
+    if kind not in {"handoff", "consumed_receipt"}:
+        return None
+    if type(exp) is not int or not isinstance(token_hash, str):
+        return None
+    if now is not None and now >= exp:
+        return None
+
+    if kind == "handoff":
+        entry: HandoffEntryDict = {
+            "kind": "handoff",
+            "expires_at": exp,
+            "token_hash": token_hash,
+        }
+        key_id = raw_obj.get("key_id")
+        if isinstance(key_id, str):
+            entry["key_id"] = key_id
+        ciphertext = raw_obj.get("ciphertext")
+        if isinstance(ciphertext, str):
+            entry["ciphertext"] = ciphertext
+        return entry
+
+    receipt: HandoffEntryDict = {
+        "kind": "consumed_receipt",
+        "expires_at": exp,
+        "token_hash": token_hash,
+    }
+    inv_id = raw_obj.get("invitation_id")
+    if isinstance(inv_id, str):
+        receipt["invitation_id"] = inv_id
+    user_id = raw_obj.get("user_id")
+    if isinstance(user_id, str):
+        receipt["user_id"] = user_id
+    digest = raw_obj.get("browser_binding_digest")
+    if isinstance(digest, str):
+        receipt["browser_binding_digest"] = digest
+    return receipt
 
 
 class InMemoryInvitationHandoffStore(BaseInvitationHandoffStore):
@@ -266,7 +268,7 @@ class InMemoryInvitationHandoffStore(BaseInvitationHandoffStore):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: dict[str, tuple[dict[str, Any], int]] = {}
+        self._entries: dict[str, tuple[HandoffEntryDict, int]] = {}
         self._rates: dict[str, tuple[int, int]] = {}
 
     def _purge_locked(self, current: int) -> None:
@@ -366,16 +368,14 @@ class InMemoryInvitationHandoffStore(BaseInvitationHandoffStore):
                     )
 
             bounded_exp = min(expires_at, current + max(1, ttl_seconds))
-            self._entries[key] = (
-                {
-                    "kind": "handoff",
-                    "key_id": key_id,
-                    "token_hash": token_hash,
-                    "ciphertext": ciphertext,
-                    "expires_at": bounded_exp,
-                },
-                bounded_exp,
-            )
+            new_entry: HandoffEntryDict = {
+                "kind": "handoff",
+                "key_id": key_id,
+                "token_hash": token_hash,
+                "ciphertext": ciphertext,
+                "expires_at": bounded_exp,
+            }
+            self._entries[key] = (new_entry, bounded_exp)
             return HandoffPersistResult(
                 outcome="created",
                 expires_at=bounded_exp,
@@ -388,14 +388,14 @@ class InMemoryInvitationHandoffStore(BaseInvitationHandoffStore):
         invitation_id: str,
         browser_binding_digest: str,
         now: int | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> HandoffEntryDict | None:
         current = now if now is not None else int(time.time())
         with self._lock:
             self._purge_locked(current)
             entry = self._entries.get(_handoff_key(invitation_id, browser_binding_digest))
             if entry is None:
                 return None
-            return dict(entry[0])
+            return _copy_handoff_entry(entry[0])
 
     def convert_to_consumed_receipt(
         self,
@@ -431,17 +431,15 @@ class InMemoryInvitationHandoffStore(BaseInvitationHandoffStore):
             if remaining <= 0:
                 self._entries.pop(key, None)
                 return
-            self._entries[key] = (
-                {
-                    "kind": "consumed_receipt",
-                    "invitation_id": invitation_id,
-                    "user_id": user_id,
-                    "token_hash": token_hash,
-                    "browser_binding_digest": browser_binding_digest,
-                    "expires_at": effective_exp,
-                },
-                effective_exp,
-            )
+            receipt: HandoffEntryDict = {
+                "kind": "consumed_receipt",
+                "invitation_id": invitation_id,
+                "user_id": user_id,
+                "token_hash": token_hash,
+                "browser_binding_digest": browser_binding_digest,
+                "expires_at": effective_exp,
+            }
+            self._entries[key] = (receipt, effective_exp)
 
     def clear_all(self) -> None:
         with self._lock:
@@ -574,18 +572,59 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
     """
 
     def __init__(self, redis_url: str | None = None) -> None:
-        import redis
-
         self.redis_url = redis_url or settings.redis_url
-        self._client = redis.Redis.from_url(
-            self.redis_url,
-            socket_timeout=settings.redis_socket_timeout_seconds,
-            socket_connect_timeout=settings.redis_connect_timeout_seconds,
-            decode_responses=True,
-        )
+        self._sync_client: Any = None
+        self._async_client: Any = None
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def _client(self) -> Any:
+        if self._sync_client is None:
+            import redis
+
+            self._sync_client = redis.Redis.from_url(
+                self.redis_url,
+                socket_timeout=settings.redis_socket_timeout_seconds,
+                socket_connect_timeout=settings.redis_connect_timeout_seconds,
+                decode_responses=True,
+            )
+        return self._sync_client
+
+    def _get_async_client(self) -> Any:
+        import redis.asyncio as aioredis
+
+        loop = asyncio.get_running_loop()
+        if (
+            self._async_client is None
+            or self._async_loop is not loop
+            or self._async_loop.is_closed()
+        ):
+            self._async_client = aioredis.Redis.from_url(
+                self.redis_url,
+                socket_timeout=settings.redis_socket_timeout_seconds,
+                socket_connect_timeout=settings.redis_connect_timeout_seconds,
+                decode_responses=True,
+            )
+            self._async_loop = loop
+        return self._async_client
+
+    async def aclose(self) -> None:
+        """Close underlying async and sync Redis clients if initialized."""
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
+            self._async_loop = None
+        if self._sync_client is not None:
+            self._sync_client.close()
+            self._sync_client = None
 
     @staticmethod
     def _unavailable(exc: Exception) -> RepositoryUnavailableError:
+        logger.warning(
+            "Invitation handoff Redis operation failed (%s)",
+            type(exc).__name__,
+            extra={"error_type": type(exc).__name__},
+        )
         return RepositoryUnavailableError("Invitation handoff store temporarily unavailable")
 
     def enforce_handoff_rate_limit(
@@ -616,6 +655,70 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
         retry_int = int(retry_after or 0)
         return retry_int if retry_int > 0 else None
 
+    async def enforce_handoff_rate_limit_async(
+        self,
+        *,
+        browser_binding_digest: str,
+        client_ip: str,
+        browser_limit: int,
+        ip_limit: int,
+        window_seconds: int,
+        now: int | None = None,
+    ) -> int | None:
+        import redis.exceptions
+
+        try:
+            client = self._get_async_client()
+            retry_after: Any = await client.eval(
+                self._LUA_RATE_LIMIT,
+                2,
+                f"invite:handoff:rl:browser:{browser_binding_digest}",
+                f"invite:handoff:rl:ip:{client_ip}",
+                str(browser_limit),
+                str(ip_limit),
+                str(window_seconds),
+            )
+        except (redis.exceptions.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+
+        retry_int = int(retry_after or 0)
+        return retry_int if retry_int > 0 else None
+
+    @staticmethod
+    def _build_handoff_envelope(
+        *,
+        token_hash: str,
+        key_id: str,
+        ciphertext: str,
+        expires_at: int,
+        ttl_seconds: int,
+        now: int | None,
+    ) -> tuple[int, int, int, str]:
+        current = now if now is not None else int(time.time())
+        effective_ttl = max(1, ttl_seconds)
+        bounded_exp = min(expires_at, current + effective_ttl)
+        envelope = json.dumps(
+            {
+                "kind": "handoff",
+                "key_id": key_id,
+                "token_hash": token_hash,
+                "ciphertext": ciphertext,
+                "expires_at": bounded_exp,
+            },
+            separators=(",", ":"),
+        )
+        return current, effective_ttl, bounded_exp, envelope
+
+    @staticmethod
+    def _parse_persist_result(raw_res: Any) -> HandoffPersistResult:
+        if not isinstance(raw_res, (list, tuple)) or len(raw_res) < 3:
+            raise RepositoryUnavailableError("Unexpected response from invitation handoff store")
+        return HandoffPersistResult(
+            outcome=str(raw_res[0]),
+            expires_at=int(raw_res[1]),
+            remaining_ttl_seconds=int(raw_res[2]),
+        )
+
     def save_or_get_encrypted_handoff(
         self,
         *,
@@ -630,18 +733,13 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
     ) -> HandoffPersistResult:
         import redis
 
-        current = now if now is not None else int(time.time())
-        effective_ttl = max(1, ttl_seconds)
-        bounded_exp = min(expires_at, current + effective_ttl)
-        envelope = json.dumps(
-            {
-                "kind": "handoff",
-                "key_id": key_id,
-                "token_hash": token_hash,
-                "ciphertext": ciphertext,
-                "expires_at": bounded_exp,
-            },
-            separators=(",", ":"),
+        current, effective_ttl, bounded_exp, envelope = self._build_handoff_envelope(
+            token_hash=token_hash,
+            key_id=key_id,
+            ciphertext=ciphertext,
+            expires_at=expires_at,
+            ttl_seconds=ttl_seconds,
+            now=now,
         )
         key = _handoff_key(invitation_id, browser_binding_digest)
         try:
@@ -657,29 +755,49 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
             )
         except (redis.RedisError, OSError) as exc:
             raise self._unavailable(exc) from exc
+        return self._parse_persist_result(raw_res)
 
-        if not isinstance(raw_res, (list, tuple)) or len(raw_res) < 3:
-            raise RepositoryUnavailableError("Unexpected response from invitation handoff store")
-
-        return HandoffPersistResult(
-            outcome=str(raw_res[0]),
-            expires_at=int(raw_res[1]),
-            remaining_ttl_seconds=int(raw_res[2]),
-        )
-
-    def get_handoff_entry(
+    async def save_or_get_encrypted_handoff_async(
         self,
         *,
         invitation_id: str,
         browser_binding_digest: str,
+        token_hash: str,
+        key_id: str,
+        ciphertext: str,
+        expires_at: int,
+        ttl_seconds: int,
         now: int | None = None,
-    ) -> dict[str, Any] | None:
-        import redis
+    ) -> HandoffPersistResult:
+        import redis.exceptions
 
+        current, effective_ttl, bounded_exp, envelope = self._build_handoff_envelope(
+            token_hash=token_hash,
+            key_id=key_id,
+            ciphertext=ciphertext,
+            expires_at=expires_at,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+        key = _handoff_key(invitation_id, browser_binding_digest)
         try:
-            raw = self._client.get(_handoff_key(invitation_id, browser_binding_digest))
-        except (redis.RedisError, OSError) as exc:
+            client = self._get_async_client()
+            raw_res: Any = await client.eval(
+                self._LUA_SAVE_OR_PRESERVE_HANDOFF,
+                1,
+                key,
+                str(current),
+                token_hash,
+                str(bounded_exp),
+                str(effective_ttl),
+                envelope,
+            )
+        except (redis.exceptions.RedisError, OSError) as exc:
             raise self._unavailable(exc) from exc
+        return self._parse_persist_result(raw_res)
+
+    @staticmethod
+    def _decode_handoff_entry(raw: Any, now: int | None) -> HandoffEntryDict | None:
         if not raw or not isinstance(raw, str):
             return None
         try:
@@ -688,11 +806,59 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
             return None
         if not isinstance(data, dict):
             return None
-        if now is not None:
-            exp = data.get("expires_at")
-            if type(exp) is int and now >= exp:
-                return None
-        return data
+        return _coerce_handoff_entry(data, now)
+
+    def get_handoff_entry(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        now: int | None = None,
+    ) -> HandoffEntryDict | None:
+        import redis
+
+        try:
+            raw = self._client.get(_handoff_key(invitation_id, browser_binding_digest))
+        except (redis.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+        return self._decode_handoff_entry(raw, now)
+
+    async def get_handoff_entry_async(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        now: int | None = None,
+    ) -> HandoffEntryDict | None:
+        import redis.exceptions
+
+        try:
+            client = self._get_async_client()
+            raw = await client.get(_handoff_key(invitation_id, browser_binding_digest))
+        except (redis.exceptions.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+        return self._decode_handoff_entry(raw, now)
+
+    @staticmethod
+    def _build_receipt_payload(
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        user_id: str,
+        token_hash: str,
+        expires_at: int,
+    ) -> str:
+        return json.dumps(
+            {
+                "kind": "consumed_receipt",
+                "invitation_id": invitation_id,
+                "user_id": user_id,
+                "token_hash": token_hash,
+                "browser_binding_digest": browser_binding_digest,
+                "expires_at": expires_at,
+            },
+            separators=(",", ":"),
+        )
 
     def convert_to_consumed_receipt(
         self,
@@ -709,16 +875,12 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
 
         current = now if now is not None else int(time.time())
         key = _handoff_key(invitation_id, browser_binding_digest)
-        receipt = json.dumps(
-            {
-                "kind": "consumed_receipt",
-                "invitation_id": invitation_id,
-                "user_id": user_id,
-                "token_hash": token_hash,
-                "browser_binding_digest": browser_binding_digest,
-                "expires_at": expires_at,
-            },
-            separators=(",", ":"),
+        receipt = self._build_receipt_payload(
+            invitation_id=invitation_id,
+            browser_binding_digest=browser_binding_digest,
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
         )
         try:
             self._client.eval(
@@ -734,16 +896,73 @@ class RedisInvitationHandoffStore(BaseInvitationHandoffStore):
         except (redis.RedisError, OSError) as exc:
             raise self._unavailable(exc) from exc
 
+    async def convert_to_consumed_receipt_async(
+        self,
+        *,
+        invitation_id: str,
+        browser_binding_digest: str,
+        user_id: str,
+        token_hash: str,
+        expected_handoff_ciphertext: str,
+        expires_at: int,
+        now: int | None = None,
+    ) -> None:
+        import redis.exceptions
+
+        current = now if now is not None else int(time.time())
+        key = _handoff_key(invitation_id, browser_binding_digest)
+        receipt = self._build_receipt_payload(
+            invitation_id=invitation_id,
+            browser_binding_digest=browser_binding_digest,
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        try:
+            client = self._get_async_client()
+            await client.eval(
+                self._LUA_CONVERT_TO_CONSUMED_RECEIPT,
+                1,
+                key,
+                str(current),
+                token_hash,
+                str(expires_at),
+                receipt,
+                expected_handoff_ciphertext,
+            )
+        except (redis.exceptions.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+
     def clear_all(self) -> None:
         import redis
 
+        batch: list[str] = []
         try:
-            for pattern in ("invite:handoff:*",):
-                keys = self._client.keys(pattern)
-                if keys:
-                    self._client.delete(*keys)
-        except (redis.RedisError, OSError):
-            pass
+            for key in self._client.scan_iter(match="invite:handoff:*", count=200):
+                batch.append(key)
+                if len(batch) >= 500:
+                    self._client.delete(*batch)
+                    batch.clear()
+            if batch:
+                self._client.delete(*batch)
+        except (redis.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
+
+    async def clear_all_async(self) -> None:
+        import redis.exceptions
+
+        batch: list[str] = []
+        try:
+            client = self._get_async_client()
+            async for key in client.scan_iter(match="invite:handoff:*", count=200):
+                batch.append(key)
+                if len(batch) >= 500:
+                    await client.delete(*batch)
+                    batch.clear()
+            if batch:
+                await client.delete(*batch)
+        except (redis.exceptions.RedisError, OSError) as exc:
+            raise self._unavailable(exc) from exc
 
 
 def create_invitation_handoff_store() -> BaseInvitationHandoffStore:
@@ -755,4 +974,40 @@ def create_invitation_handoff_store() -> BaseInvitationHandoffStore:
     raise ValueError(f"Unsupported auth_store_type: {settings.auth_store_type}")
 
 
-invitation_handoff_store: BaseInvitationHandoffStore = create_invitation_handoff_store()
+invitation_handoff_store: BaseInvitationHandoffStore | None = None
+
+
+def get_invitation_handoff_store() -> BaseInvitationHandoffStore:
+    """Return the active handoff store, lazily initializing it on first access."""
+    global invitation_handoff_store
+    if invitation_handoff_store is None:
+        invitation_handoff_store = create_invitation_handoff_store()
+    return invitation_handoff_store
+
+
+async def close_invitation_handoff_store() -> None:
+    """Close cached handoff store clients during application shutdown."""
+    global invitation_handoff_store
+    store = invitation_handoff_store
+    if isinstance(store, RedisInvitationHandoffStore):
+        await store.aclose()
+    invitation_handoff_store = None
+
+
+__all__ = [
+    "BaseInvitationHandoffStore",
+    "ConsumedHandoffReceipt",
+    "DecryptedHandoffPayload",
+    "HandoffPersistResult",
+    "InMemoryInvitationHandoffStore",
+    "InvitationHandoffProtector",
+    "RedisInvitationHandoffStore",
+    "StoredHandoffLookup",
+    "close_invitation_handoff_store",
+    "create_invitation_handoff_store",
+    "generate_browser_binding_token",
+    "get_invitation_handoff_store",
+    "hash_browser_binding_token",
+    "invitation_handoff_store",
+    "is_valid_browser_binding_token",
+]

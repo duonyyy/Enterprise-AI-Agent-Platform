@@ -27,6 +27,7 @@ from control_api.modules.workspaces.models.errors import (
     InvitationNotFoundError,
     InvitationRateLimitError,
 )
+from control_api.modules.workspaces.models.records import InvitationRecord
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from platform_common.principal import AuthenticatedPrincipal
@@ -44,32 +45,32 @@ def _sample_record(
     status: str = "pending",
     generation: int = 1,
     delivery_state: str = "queued",
-) -> dict[str, object]:
+) -> InvitationRecord:
     now = datetime.now(UTC)
-    return {
-        "invitation_id": str(invitation_id or uuid4()),
-        "tenant_id": str(tenant_id),
-        "workspace_id": str(workspace_id),
-        "recipient_email_normalized": "invitee+dev@example.com",
-        "recipient_issuer": "http://localhost:8080/realms/enterprise",
-        "role": role,
-        "status": status,
-        "generation": generation,
-        "delivery_state": delivery_state,
-        "delivery_error_code": None,
-        "created_by_user_id": str(actor_user_id),
-        "delivery_requested_by_user_id": str(actor_user_id),
-        "revoked_by_user_id": str(actor_user_id) if status == "revoked" else None,
-        "accepted_by_user_id": None,
-        "expires_at": (now + timedelta(hours=72)).isoformat(),
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-        "provider_accepted_at": None,
-        "revoked_at": now.isoformat() if status == "revoked" else None,
-        "accepted_at": None,
-        "audit_event_id": str(uuid4()),
-        "outbox_event_id": str(uuid4()) if status == "pending" else None,
-    }
+    return InvitationRecord(
+        invitation_id=str(invitation_id or uuid4()),
+        tenant_id=str(tenant_id),
+        workspace_id=str(workspace_id),
+        recipient_email_normalized="invitee+dev@example.com",
+        recipient_issuer="http://localhost:8080/realms/enterprise",
+        role=role,
+        status=status,
+        generation=generation,
+        delivery_state=delivery_state,
+        delivery_error_code=None,
+        created_by_user_id=str(actor_user_id),
+        delivery_requested_by_user_id=str(actor_user_id),
+        revoked_by_user_id=str(actor_user_id) if status == "revoked" else None,
+        accepted_by_user_id=None,
+        expires_at=(now + timedelta(hours=72)).isoformat(),
+        created_at=now.isoformat(),
+        updated_at=now.isoformat(),
+        provider_accepted_at=None,
+        revoked_at=now.isoformat() if status == "revoked" else None,
+        accepted_at=None,
+        audit_event_id=str(uuid4()),
+        outbox_event_id=str(uuid4()) if status == "pending" else None,
+    )
 
 
 @pytest.fixture()
@@ -78,7 +79,9 @@ def isolated_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "invitations_enabled", True)
     monkeypatch.setattr(settings, "invitation_public_app_origin", "http://localhost:3000")
     monkeypatch.setattr(settings, "invitation_proof_key_id", "v1")
-    monkeypatch.setattr(settings.invitation_proof_encryption_key, "get_secret_value", lambda: fernet_key)
+    monkeypatch.setattr(
+        settings.invitation_proof_encryption_key, "get_secret_value", lambda: fernet_key
+    )
 
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -240,7 +243,8 @@ def test_role_matrix_validation_and_redaction_on_create_list_resend_revoke(
             )
         ),
     )
-    monkeypatch.setattr(workspaces_router.invitation_service, "_repository", fake_repo)
+    fake_repo.bind = lambda _session: fake_repo
+    monkeypatch.setattr(workspaces_router, "invitation_repository", fake_repo)
 
     # Developer cannot create or list invitations
     _set_role("developer")
@@ -273,7 +277,14 @@ def test_role_matrix_validation_and_redaction_on_create_list_resend_revoke(
     )
     assert created.status_code == 201
     created_body = created.json()
-    for forbidden in ("proof", "token_hash", "proof_ciphertext", "proof_key_id", "invite_url", "lease_token"):
+    for forbidden in (
+        "proof",
+        "token_hash",
+        "proof_ciphertext",
+        "proof_key_id",
+        "invite_url",
+        "lease_token",
+    ):
         assert forbidden not in created_body
 
     listed = isolated_client.get(f"/v1/workspaces/{ws_id}/invitations?limit=10")
@@ -332,7 +343,9 @@ def test_invitations_fail_closed_when_disabled_or_misconfigured(
     assert r_disabled.json()["detail"]["code"] == "invitation_service_unavailable"
 
     monkeypatch.setattr(settings, "invitations_enabled", True)
-    monkeypatch.setattr(settings.invitation_proof_encryption_key, "get_secret_value", lambda: "bad-key")
+    monkeypatch.setattr(
+        settings.invitation_proof_encryption_key, "get_secret_value", lambda: "bad-key"
+    )
     r_bad_key = isolated_client.post(
         f"/v1/workspaces/{ws_id}/invitations",
         json={"email": "invitee@example.com", "role": "viewer"},
@@ -391,7 +404,8 @@ def test_error_translation_preserves_404_409_429_retry_after(
             side_effect=InvitationNotFoundError("invitation_not_found", "Not found")
         ),
     )
-    monkeypatch.setattr(workspaces_router.invitation_service, "_repository", fake_repo)
+    fake_repo.bind = lambda _session: fake_repo
+    monkeypatch.setattr(workspaces_router, "invitation_repository", fake_repo)
 
     r_409 = isolated_client.post(
         f"/v1/workspaces/{ws_id}/invitations",

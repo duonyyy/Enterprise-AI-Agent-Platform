@@ -18,10 +18,11 @@ import psycopg
 import pytest
 from control_api.core.settings import settings
 from control_api.main import app
-from control_api.modules.workspaces.repositories.invitation_repository import (
+from control_api.modules.workspaces.models.records import (
     InvitationPolicyConfig,
-    InvitationRepository,
+    InvitationRecord,
 )
+from control_api.modules.workspaces.repositories.invitation_repository import InvitationRepository
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from jobs_worker.invitation_consumer import InvitationOutboxConsumer, _extract_sqlstate
@@ -95,7 +96,7 @@ async def _repo_create_invitation(
     email_addr: str,
     *,
     role: str = "viewer",
-) -> dict[str, Any]:
+) -> InvitationRecord:
     engine = create_async_engine(_to_async_pg_url(app_url))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     repo = InvitationRepository(PostgresOutboxEventBus(factory))
@@ -145,7 +146,7 @@ def test_concurrent_revoke_and_worker_claim_no_deadlock_both_directions(
     sink_a = _RealSmtpSinkServer("accept")
     try:
         inv_a = asyncio.run(_repo_create_invitation(app_url, seed, protector, "dir-a@example.com"))
-        inv_a_id = str(inv_a["invitation_id"])
+        inv_a_id = str(inv_a.invitation_id)
 
         worker_locked_ws = Event()
         release_worker = Event()
@@ -216,7 +217,7 @@ def test_concurrent_revoke_and_worker_claim_no_deadlock_both_directions(
     sink_b = _RealSmtpSinkServer("accept")
     try:
         inv_b = asyncio.run(_repo_create_invitation(app_url, seed, protector, "dir-b@example.com"))
-        inv_b_id = str(inv_b["invitation_id"])
+        inv_b_id = str(inv_b.invitation_id)
 
         api_paused_before_outbox = Event()
         release_api = Event()
@@ -307,8 +308,8 @@ def test_concurrent_resend_and_worker_claim_generation_and_proof_integrity(
         inv = asyncio.run(
             _repo_create_invitation(app_url, seed, protector, "resend-race@example.com")
         )
-        inv_id = str(inv["invitation_id"])
-        gen1_outbox_id = UUID(inv["outbox_event_id"])
+        inv_id = str(inv.invitation_id)
+        gen1_outbox_id = UUID(inv.outbox_event_id or "")
 
         api_before_outbox = Event()
         release_api = Event()
@@ -427,17 +428,17 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                 "UPDATE iam.workspace_invitations "
                 "SET delivery_state = 'sending', lease_token = %s, leased_until = now() - interval '1 minute' "
                 "WHERE id = %s",
-                (uuid4(), UUID(inv_lease["invitation_id"])),
+                (uuid4(), UUID(inv_lease.invitation_id)),
             )
             conn.execute(
                 "UPDATE integration.outbox_events SET state = 'delivering' WHERE id = %s",
-                (UUID(inv_lease["outbox_event_id"]),),
+                (UUID(inv_lease.outbox_event_id or ""),),
             )
             conn.execute(
                 "UPDATE iam.workspace_invitations "
                 "SET created_at = now() - interval '2 days', expires_at = now() - interval '1 minute' "
                 "WHERE id = %s",
-                (UUID(inv_exp["invitation_id"]),),
+                (UUID(inv_exp.invitation_id),),
             )
 
         with (
@@ -457,7 +458,7 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                     handled += 1
                 return handled
 
-            async def _do_revoke() -> dict[str, Any]:
+            async def _do_revoke() -> InvitationRecord:
                 engine = create_async_engine(_to_async_pg_url(app_url))
                 factory = async_sessionmaker(engine, expire_on_commit=False)
                 repo = InvitationRepository(PostgresOutboxEventBus(factory))
@@ -467,7 +468,7 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                             session,
                             tenant_id=seed["tenant_a"],
                             workspace_id=seed["ws_a"],
-                            invitation_id=UUID(inv_revoke["invitation_id"]),
+                            invitation_id=UUID(inv_revoke.invitation_id),
                             actor_user_id=seed["owner_a"],
                             request_id="req-conc-rev",
                             trace_id="trace-conc-rev",
@@ -475,7 +476,7 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                 finally:
                     await engine.dispose()
 
-            async def _do_resend() -> dict[str, Any]:
+            async def _do_resend() -> InvitationRecord:
                 engine = create_async_engine(_to_async_pg_url(app_url))
                 factory = async_sessionmaker(engine, expire_on_commit=False)
                 repo = InvitationRepository(PostgresOutboxEventBus(factory))
@@ -485,7 +486,7 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                             session,
                             tenant_id=seed["tenant_a"],
                             workspace_id=seed["ws_a"],
-                            invitation_id=UUID(inv_resend["invitation_id"]),
+                            invitation_id=UUID(inv_resend.invitation_id),
                             actor_user_id=seed["owner_a"],
                             protector=protector,
                             policy=InvitationPolicyConfig(72, 0, 50, 100),
@@ -495,11 +496,11 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
                 finally:
                     await engine.dispose()
 
-            def _run_revoke() -> dict[str, Any]:
+            def _run_revoke() -> InvitationRecord:
                 start_barrier.wait(timeout=10.0)
                 return asyncio.run(_do_revoke())
 
-            def _run_resend() -> dict[str, Any]:
+            def _run_resend() -> InvitationRecord:
                 start_barrier.wait(timeout=10.0)
                 return asyncio.run(_do_resend())
 
@@ -518,38 +519,38 @@ def test_concurrent_reclaim_expired_leases_with_claim_revoke_and_resend(
             c_worker.run_once()
 
         assert reclaimed == 1
-        assert revoke_res["status"] == "revoked"
-        assert resend_res["generation"] == 2
+        assert revoke_res.status == "revoked"
+        assert resend_res.generation == 2
 
         with psycopg.connect(owner_url) as conn:
             assert conn.execute(
                 "SELECT delivery_state, delivery_error_code, proof_ciphertext, lease_token "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_lease["invitation_id"]),),
+                (UUID(inv_lease.invitation_id),),
             ).fetchone() == ("unknown", "LEASE_EXPIRED_UNKNOWN", None, None)
 
             assert conn.execute(
                 "SELECT status, delivery_state, proof_ciphertext "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_exp["invitation_id"]),),
+                (UUID(inv_exp.invitation_id),),
             ).fetchone() == ("expired", "cancelled", None)
 
             assert conn.execute(
                 "SELECT status, delivery_state, proof_ciphertext "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_revoke["invitation_id"]),),
+                (UUID(inv_revoke.invitation_id),),
             ).fetchone() == ("revoked", "cancelled", None)
 
             assert conn.execute(
                 "SELECT status, generation, delivery_state, proof_ciphertext "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_resend["invitation_id"]),),
+                (UUID(inv_resend.invitation_id),),
             ).fetchone() == ("pending", 2, "provider_accepted", None)
 
             assert conn.execute(
                 "SELECT status, delivery_state, proof_ciphertext "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_active["invitation_id"]),),
+                (UUID(inv_active.invitation_id),),
             ).fetchone() == ("pending", "provider_accepted", None)
     finally:
         sink.close()
@@ -600,7 +601,7 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
                         session,
                         tenant_id=seed["tenant_a"],
                         workspace_id=seed["ws_a"],
-                        invitation_id=UUID(inv_2["invitation_id"]),
+                        invitation_id=UUID(inv_2.invitation_id),
                         actor_user_id=seed["owner_a"],
                         request_id="req-comp-rev2",
                         trace_id="trace-comp-rev2",
@@ -611,9 +612,7 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
         with _open_consumer(app_url, seed, protector, sink.port, engine=worker_engine) as consumer:
             try:
                 had, claim_1 = consumer._claim_next_outbox_delivery()
-                assert (
-                    had and claim_1 is not None and claim_1.invitation_id == inv_1["invitation_id"]
-                )
+                assert had and claim_1 is not None and claim_1.invitation_id == inv_1.invitation_id
 
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     comp_future = executor.submit(
@@ -631,15 +630,15 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
                 release_worker.set()
                 worker_engine.dispose()
 
-        assert rev2_res["status"] == "revoked"
+        assert rev2_res.status == "revoked"
         with psycopg.connect(owner_url) as conn:
             assert conn.execute(
                 "SELECT delivery_state, proof_ciphertext FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_1["invitation_id"]),),
+                (UUID(inv_1.invitation_id),),
             ).fetchone() == ("provider_accepted", None)
             assert conn.execute(
                 "SELECT count(*) FROM integration.inbox_receipts WHERE event_id = %s",
-                (UUID(inv_1["outbox_event_id"]),),
+                (UUID(inv_1.outbox_event_id or ""),),
             ).fetchone() == (1,)
 
         # Part B: Stale CAS completion after resend (generation 1 vs committed generation 2)
@@ -647,9 +646,9 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
         inv_3 = asyncio.run(_repo_create_invitation(app_url, seed, protector, "comp-3@example.com"))
         with _open_consumer(app_url, seed, protector, sink.port) as consumer_3:
             had_3, claim_3 = consumer_3._claim_next_outbox_delivery()
-            assert had_3 and claim_3 is not None and claim_3.invitation_id == inv_3["invitation_id"]
+            assert had_3 and claim_3 is not None and claim_3.invitation_id == inv_3.invitation_id
 
-            async def _resend_inv_3() -> dict[str, Any]:
+            async def _resend_inv_3() -> InvitationRecord:
                 engine = create_async_engine(_to_async_pg_url(app_url))
                 factory = async_sessionmaker(engine, expire_on_commit=False)
                 repo = InvitationRepository(PostgresOutboxEventBus(factory))
@@ -659,7 +658,7 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
                             session,
                             tenant_id=seed["tenant_a"],
                             workspace_id=seed["ws_a"],
-                            invitation_id=UUID(inv_3["invitation_id"]),
+                            invitation_id=UUID(inv_3.invitation_id),
                             actor_user_id=seed["owner_a"],
                             protector=protector,
                             policy=InvitationPolicyConfig(72, 0, 50, 100),
@@ -670,7 +669,7 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
                     await engine.dispose()
 
             resend_3 = asyncio.run(_resend_inv_3())
-            assert resend_3["generation"] == 2
+            assert resend_3.generation == 2
 
             # Stale worker attempts completion with gen=1 claim
             consumer_3._complete_delivery_cas(claim_3, SmtpSendResult(outcome="provider_accepted"))
@@ -679,16 +678,16 @@ def test_concurrent_completion_vs_revoke_and_resend_fencing_and_inbox_fk_lock(
             row_3 = conn.execute(
                 "SELECT status, generation, delivery_state, proof_ciphertext IS NOT NULL "
                 "FROM iam.workspace_invitations WHERE id = %s",
-                (UUID(inv_3["invitation_id"]),),
+                (UUID(inv_3.invitation_id),),
             ).fetchone()
             assert row_3 == ("pending", 2, "queued", True)
             assert conn.execute(
                 "SELECT state FROM integration.outbox_events WHERE id = %s",
-                (UUID(inv_3["outbox_event_id"]),),
+                (UUID(inv_3.outbox_event_id or ""),),
             ).fetchone() == ("dead",)
             assert conn.execute(
                 "SELECT count(*) FROM integration.inbox_receipts WHERE event_id = %s",
-                (UUID(inv_3["outbox_event_id"]),),
+                (UUID(inv_3.outbox_event_id or ""),),
             ).fetchone() == (0,)
     finally:
         sink.close()
@@ -733,11 +732,11 @@ def test_two_consumers_competing_same_and_multiple_events_no_double_send(
             with psycopg.connect(owner_url) as conn:
                 assert conn.execute(
                     "SELECT state, attempt FROM integration.outbox_events WHERE id = %s",
-                    (UUID(inv_single["outbox_event_id"]),),
+                    (UUID(inv_single.outbox_event_id or ""),),
                 ).fetchone() == ("delivered", 1)
                 assert conn.execute(
                     "SELECT count(*) FROM integration.inbox_receipts WHERE event_id = %s",
-                    (UUID(inv_single["outbox_event_id"]),),
+                    (UUID(inv_single.outbox_event_id or ""),),
                 ).fetchone() == (1,)
 
             # 2. Batch of 3 events drained concurrently by 2 consumers -> exact 3 total emails
@@ -817,8 +816,8 @@ def test_pre_dispatch_recoverable_conflict_retries_cleanly_without_double_claim_
 
         with psycopg.connect(owner_url) as conn:
             for iid, ob_id in (
-                (UUID(inv1["invitation_id"]), UUID(inv1["outbox_event_id"])),
-                (UUID(inv2["invitation_id"]), UUID(inv2["outbox_event_id"])),
+                (UUID(inv1.invitation_id), UUID(inv1.outbox_event_id or "")),
+                (UUID(inv2.invitation_id), UUID(inv2.outbox_event_id or "")),
             ):
                 assert conn.execute(
                     "SELECT delivery_state FROM iam.workspace_invitations WHERE id = %s",
@@ -856,7 +855,7 @@ def test_pre_dispatch_recoverable_conflict_retries_cleanly_without_double_claim_
                     with psycopg.connect(owner_url) as check_conn:
                         state = check_conn.execute(
                             "SELECT delivery_state FROM iam.workspace_invitations WHERE id = %s",
-                            (UUID(inv3["invitation_id"]),),
+                            (UUID(inv3.invitation_id),),
                         ).fetchone()
                     if state == ("provider_accepted",):
                         break
@@ -894,8 +893,8 @@ def test_provider_accepted_completion_db_failure_no_smtp_retry_and_lease_reclaim
         inv = asyncio.run(
             _repo_create_invitation(app_url, seed, protector, "post-smtp-err@example.com")
         )
-        inv_id = UUID(inv["invitation_id"])
-        outbox_id = UUID(inv["outbox_event_id"])
+        inv_id = UUID(inv.invitation_id)
+        outbox_id = UUID(inv.outbox_event_id or "")
 
         engine = create_engine(_to_sync_pg_url(app_url), pool_pre_ping=True)
         completion_attempts = 0

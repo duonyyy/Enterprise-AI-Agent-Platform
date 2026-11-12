@@ -2,29 +2,44 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-from datetime import UTC, datetime
-from typing import Any, Literal
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from control_api.core.database import set_rls_context
+from control_api.modules.workspaces.models.enums import (
+    ExpectedActiveStatus,
+    MembershipRevokeOutcome,
+    MembershipRoleUpdateOutcome,
+    MembershipStatus,
+    WorkspaceRole,
+)
 from control_api.modules.workspaces.models.errors import (
     MembershipConflictError,
-    MembershipError,
     MembershipForbiddenError,
     MembershipNotFoundError,
     MembershipValidationError,
     WorkspaceDatabaseUnavailableError,
 )
+from control_api.modules.workspaces.models.ports import MembershipRepositoryPort
 from control_api.modules.workspaces.models.rbac import (
-    MembershipStatus,
-    WorkspaceRole,
     can_assign_target_role,
     can_list_workspace_members,
     can_manage_target_role,
     can_revoke_target_role,
+)
+from control_api.modules.workspaces.models.records import (
+    MembershipMutationRecord,
+    MembershipRecord,
+)
+from control_api.modules.workspaces.repositories._db_helpers import (
+    db_unavailable,
+    decode_keyset_cursor,
+    encode_keyset_cursor,
+    format_timestamp,
+    is_active_workspace_in_tenant,
 )
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -34,63 +49,63 @@ logger = logging.getLogger(__name__)
 
 
 def _db_unavailable(exc: Exception) -> WorkspaceDatabaseUnavailableError:
-    logger.warning(
-        "Workspace membership database operation failed (%s)",
-        type(exc).__name__,
-    )
-    return WorkspaceDatabaseUnavailableError(
-        "Workspace membership persistence service temporarily unavailable"
+    return db_unavailable(
+        exc,
+        operation="membership_persistence",
+        message="Workspace membership persistence service temporarily unavailable",
     )
 
 
 def _format_ts(value: Any) -> str:
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat()
-    return str(value)
+    return format_timestamp(value) or ""
 
 
 def encode_membership_cursor(joined_at: datetime, membership_id: str) -> str:
     """Encode deterministic `(joined_at, id)` keyset cursor."""
-    payload = json.dumps(
-        {"joined_at": joined_at.astimezone(UTC).isoformat(), "id": membership_id},
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return encode_keyset_cursor("joined_at", joined_at, membership_id)
 
 
 def decode_membership_cursor(cursor: str) -> tuple[datetime, UUID]:
     """Decode and validate keyset pagination cursor."""
-    if not cursor or len(cursor) > 256:
-        raise MembershipValidationError("invalid_cursor", "Invalid pagination cursor")
-    try:
-        padded = cursor + ("=" * (-len(cursor) % 4))
-        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-        data = json.loads(raw.decode("utf-8"))
-        if not isinstance(data, dict):
-            raise TypeError("Cursor payload must be a JSON object")
-        joined_at = datetime.fromisoformat(str(data["joined_at"]))
-        if joined_at.tzinfo is None:
-            joined_at = joined_at.replace(tzinfo=UTC)
-        membership_id = UUID(str(data["id"]))
-        return joined_at, membership_id
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError, UnicodeError) as exc:
-        raise MembershipValidationError("invalid_cursor", "Invalid pagination cursor") from exc
+    return decode_keyset_cursor(
+        cursor,
+        ts_field="joined_at",
+        error_factory=MembershipValidationError,
+    )
 
 
 class MembershipRepository:
     """PostgreSQL repository enforcing RLS, workspace-first lock ordering, and atomic audit logs."""
 
     @staticmethod
-    def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
+    def _row_to_record(row: dict[str, Any]) -> MembershipRecord:
         raw_display = row.get("display_name")
-        return {
-            "membership_id": str(row["id"]),
-            "user_id": str(row["user_id"]),
-            "display_name": str(raw_display) if raw_display is not None else None,
-            "role": str(row["role"]),
-            "status": str(row["status"]),
-            "joined_at": _format_ts(row["joined_at"]),
-        }
+        return MembershipRecord(
+            membership_id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            display_name=str(raw_display) if raw_display is not None else None,
+            role=str(row["role"]),
+            status=str(row["status"]),
+            joined_at=_format_ts(row["joined_at"]),
+        )
+
+    @staticmethod
+    def _to_mutation_record(
+        record: MembershipRecord,
+        *,
+        outcome: MembershipRoleUpdateOutcome | MembershipRevokeOutcome,
+        audit_event_id: str | None = None,
+    ) -> MembershipMutationRecord:
+        return MembershipMutationRecord(
+            membership_id=record.membership_id,
+            user_id=record.user_id,
+            display_name=record.display_name,
+            role=record.role,
+            status=record.status,
+            joined_at=record.joined_at,
+            outcome=str(outcome),
+            audit_event_id=audit_event_id,
+        )
 
     async def _lock_workspace_and_relevant_memberships(
         self,
@@ -102,26 +117,11 @@ class MembershipRepository:
         target_membership_id: UUID,
     ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
         """Acquire workspace FOR UPDATE first, then lock relevant memberships in sorted user_id order."""
-        ws_row = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT w.id, w.status AS workspace_status, t.status AS tenant_status "
-                        "FROM iam.workspaces AS w "
-                        "JOIN iam.tenants AS t ON t.id = w.tenant_id "
-                        "WHERE w.tenant_id = :tenant_id AND w.id = :workspace_id "
-                        "FOR UPDATE OF w"
-                    ),
-                    {"tenant_id": tenant_id, "workspace_id": workspace_id},
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if (
-            ws_row is None
-            or str(ws_row["workspace_status"]) != "active"
-            or str(ws_row["tenant_status"]) != "active"
+        if not await is_active_workspace_in_tenant(
+            session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            lock_mode="update",
         ):
             raise MembershipForbiddenError(
                 "workspace_inactive",
@@ -246,7 +246,7 @@ class MembershipRepository:
         limit: int,
         cursor: str | None,
         status_filter: MembershipStatus | None,
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    ) -> tuple[list[MembershipRecord], str | None]:
         """List scoped workspace memberships deterministically without exposing private user identity columns."""
         if limit < 1 or limit > 100:
             raise MembershipValidationError("invalid_limit", "limit must be between 1 and 100")
@@ -260,25 +260,11 @@ class MembershipRepository:
                 workspace_id=str(workspace_id),
                 user_id=str(actor_user_id),
             )
-            ws_row = (
-                (
-                    await session.execute(
-                        text(
-                            "SELECT w.id, w.status AS workspace_status, t.status AS tenant_status "
-                            "FROM iam.workspaces AS w "
-                            "JOIN iam.tenants AS t ON t.id = w.tenant_id "
-                            "WHERE w.tenant_id = :tenant_id AND w.id = :workspace_id"
-                        ),
-                        {"tenant_id": tenant_id, "workspace_id": workspace_id},
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-            if (
-                ws_row is None
-                or str(ws_row["workspace_status"]) != "active"
-                or str(ws_row["tenant_status"]) != "active"
+            if not await is_active_workspace_in_tenant(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                lock_mode="none",
             ):
                 raise MembershipForbiddenError(
                     "workspace_inactive",
@@ -356,8 +342,6 @@ class MembershipRepository:
                     joined_at = datetime.fromisoformat(str(joined_at))
                 next_cursor = encode_membership_cursor(joined_at, str(last["id"]))
             return items, next_cursor
-        except MembershipError:
-            raise
         except SQLAlchemyError as exc:
             raise _db_unavailable(exc) from exc
 
@@ -371,10 +355,10 @@ class MembershipRepository:
         membership_id: UUID,
         new_role: WorkspaceRole,
         expected_role: WorkspaceRole,
-        expected_status: Literal["active"],
+        expected_status: ExpectedActiveStatus,
         request_id: str,
         trace_id: str,
-    ) -> dict[str, Any]:
+    ) -> MembershipMutationRecord:
         """Atomically update an active member's role with workspace-first serialization and last-owner protection."""
         try:
             await set_rls_context(
@@ -383,7 +367,11 @@ class MembershipRepository:
                 workspace_id=str(workspace_id),
                 user_id=str(actor_user_id),
             )
-            actor_row, target_row, locked_rows = await self._lock_workspace_and_relevant_memberships(
+            (
+                actor_row,
+                target_row,
+                locked_rows,
+            ) = await self._lock_workspace_and_relevant_memberships(
                 session,
                 tenant_id=tenant_id,
                 workspace_id=workspace_id,
@@ -428,9 +416,11 @@ class MembershipRepository:
             display_name = await self._lookup_display_name(session, user_id=target_user_uuid)
 
             if current_role == new_role:
-                await session.commit()
                 record = self._row_to_record({**target_row, "display_name": display_name})
-                return {**record, "outcome": "no_op", "audit_event_id": None}
+                return self._to_mutation_record(
+                    record,
+                    outcome=MembershipRoleUpdateOutcome.NO_OP,
+                )
 
             if current_role == "owner" and new_role != "owner":
                 active_owner_count = sum(
@@ -485,14 +475,13 @@ class MembershipRepository:
                     "new_role": new_role,
                 },
             )
-            await session.commit()
             record = self._row_to_record({**dict(updated_row), "display_name": display_name})
-            return {**record, "outcome": "updated", "audit_event_id": audit_event_id}
-        except MembershipError:
-            await session.rollback()
-            raise
+            return self._to_mutation_record(
+                record,
+                outcome=MembershipRoleUpdateOutcome.UPDATED,
+                audit_event_id=audit_event_id,
+            )
         except SQLAlchemyError as exc:
-            await session.rollback()
             raise _db_unavailable(exc) from exc
 
     async def revoke_member(
@@ -504,11 +493,12 @@ class MembershipRepository:
         actor_user_id: UUID,
         membership_id: UUID,
         expected_role: WorkspaceRole,
-        expected_status: Literal["active"],
+        expected_status: ExpectedActiveStatus,
         request_id: str,
         trace_id: str,
-    ) -> dict[str, Any]:
+    ) -> MembershipMutationRecord:
         """Atomically revoke a workspace membership, protecting the last active Owner."""
+        # Replay with expected_status='active' returns ALREADY_REVOKED idempotently per ADR-021.
         _ = expected_status
         try:
             await set_rls_context(
@@ -517,7 +507,11 @@ class MembershipRepository:
                 workspace_id=str(workspace_id),
                 user_id=str(actor_user_id),
             )
-            actor_row, target_row, locked_rows = await self._lock_workspace_and_relevant_memberships(
+            (
+                actor_row,
+                target_row,
+                locked_rows,
+            ) = await self._lock_workspace_and_relevant_memberships(
                 session,
                 tenant_id=tenant_id,
                 workspace_id=workspace_id,
@@ -563,9 +557,11 @@ class MembershipRepository:
             display_name = await self._lookup_display_name(session, user_id=target_user_uuid)
 
             if current_status == "revoked":
-                await session.commit()
                 record = self._row_to_record({**target_row, "display_name": display_name})
-                return {**record, "outcome": "already_revoked", "audit_event_id": None}
+                return self._to_mutation_record(
+                    record,
+                    outcome=MembershipRevokeOutcome.ALREADY_REVOKED,
+                )
 
             if current_role == "owner":
                 active_owner_count = sum(
@@ -618,20 +614,101 @@ class MembershipRepository:
                     "revoked_role": current_role,
                 },
             )
-            await session.commit()
             record = self._row_to_record({**dict(updated_row), "display_name": display_name})
-            return {**record, "outcome": "revoked", "audit_event_id": audit_event_id}
-        except MembershipError:
-            await session.rollback()
-            raise
+            return self._to_mutation_record(
+                record,
+                outcome=MembershipRevokeOutcome.REVOKED,
+                audit_event_id=audit_event_id,
+            )
         except SQLAlchemyError as exc:
-            await session.rollback()
             raise _db_unavailable(exc) from exc
+
+    def bind(self, session: AsyncSession) -> MembershipRepositoryPort:
+        """Bind an AsyncSession into a session-free MembershipRepositoryPort adapter."""
+        return SessionBoundMembershipRepository(repository=self, session=session)
+
+
+class SessionBoundMembershipRepository:
+    """Session-scoped adapter implementing MembershipRepositoryPort for pure services."""
+
+    def __init__(self, repository: MembershipRepository, session: AsyncSession) -> None:
+        self._repository = repository
+        self._session = session
+
+    async def list_memberships(
+        self,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        actor_user_id: UUID,
+        limit: int,
+        cursor: str | None,
+        status_filter: MembershipStatus | None,
+    ) -> tuple[list[MembershipRecord], str | None]:
+        return await self._repository.list_memberships(
+            self._session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            limit=limit,
+            cursor=cursor,
+            status_filter=status_filter,
+        )
+
+    async def update_member_role(
+        self,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        actor_user_id: UUID,
+        membership_id: UUID,
+        new_role: WorkspaceRole,
+        expected_role: WorkspaceRole,
+        expected_status: ExpectedActiveStatus,
+        request_id: str,
+        trace_id: str,
+    ) -> MembershipMutationRecord:
+        return await self._repository.update_member_role(
+            self._session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            membership_id=membership_id,
+            new_role=new_role,
+            expected_role=expected_role,
+            expected_status=expected_status,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+
+    async def revoke_member(
+        self,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        actor_user_id: UUID,
+        membership_id: UUID,
+        expected_role: WorkspaceRole,
+        expected_status: ExpectedActiveStatus,
+        request_id: str,
+        trace_id: str,
+    ) -> MembershipMutationRecord:
+        return await self._repository.revoke_member(
+            self._session,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            membership_id=membership_id,
+            expected_role=expected_role,
+            expected_status=expected_status,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
 
 
 __all__ = [
     "MembershipRepository",
+    "SessionBoundMembershipRepository",
     "decode_membership_cursor",
     "encode_membership_cursor",
 ]
-

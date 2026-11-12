@@ -3,4 +3,3 @@
 from control_api.modules.workspaces.api.router import router
 
 __all__ = ["router"]
-

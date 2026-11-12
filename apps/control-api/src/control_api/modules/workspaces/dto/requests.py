@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import Final, Literal
+from typing import Final
 from uuid import UUID
 
-from control_api.modules.workspaces.models.rbac import WorkspaceRole
+from control_api.modules.workspaces.models.enums import (
+    ExpectedActiveStatus,
+    InvitableRole,
+    WorkspaceRole,
+)
 from platform_common.invitations import normalize_invitation_email
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -111,12 +115,12 @@ class CreateInvitationRequestDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str = Field(..., min_length=3, max_length=254)
-    role: Literal["admin", "developer", "operator", "viewer"]
+    role: InvitableRole
 
     @field_validator("email")
     @classmethod
     def validate_and_normalize_email(cls, value: str) -> str:
-        return normalize_invitation_email(value)
+        return str(normalize_invitation_email(value))
 
 
 class InvitationHandoffRequestDTO(BaseModel):
@@ -143,7 +147,7 @@ class UpdateMembershipRoleRequestDTO(BaseModel):
 
     role: WorkspaceRole
     expected_role: WorkspaceRole
-    expected_status: Literal["active"]
+    expected_status: ExpectedActiveStatus
 
 
 class RevokeMembershipRequestDTO(BaseModel):
@@ -152,4 +156,4 @@ class RevokeMembershipRequestDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_role: WorkspaceRole
-    expected_status: Literal["active"]
+    expected_status: ExpectedActiveStatus
