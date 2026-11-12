@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from control_api.modules.workspaces.models.rbac import MembershipStatus, WorkspaceRole
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class WorkspaceResponseDTO(BaseModel):
@@ -113,11 +114,24 @@ class InvitationPreviewResponseDTO(BaseModel):
     workspace_id: str
     workspace_slug: str
     workspace_name: str
-    role: Literal["admin", "developer", "operator", "viewer"]
+    role: WorkspaceRole
     status: Literal["pending", "accepted"]
     expires_at: str
     can_accept: bool
     acceptance_state: Literal["ready", "already_accepted"]
+
+    @model_validator(mode="after")
+    def validate_owner_already_accepted_only(self) -> InvitationPreviewResponseDTO:
+        """Allow owner role strictly in already_accepted receipts after post-join promotion."""
+        if self.role == "owner" and (
+            self.acceptance_state != "already_accepted"
+            or self.status != "accepted"
+            or self.can_accept
+        ):
+            raise ValueError(
+                "owner role is only valid in already_accepted invitation preview receipts"
+            )
+        return self
 
 
 class InvitationAcceptResponseDTO(BaseModel):
@@ -130,7 +144,51 @@ class InvitationAcceptResponseDTO(BaseModel):
     workspace_id: str
     workspace_slug: str
     workspace_name: str
-    role: Literal["admin", "developer", "operator", "viewer"]
+    role: WorkspaceRole
     acceptance_state: Literal["accepted", "already_accepted"]
     redirect_url: str
 
+    @model_validator(mode="after")
+    def validate_owner_already_accepted_only(self) -> InvitationAcceptResponseDTO:
+        """Allow owner role strictly in already_accepted receipts after post-join promotion."""
+        if self.role == "owner" and self.acceptance_state != "already_accepted":
+            raise ValueError(
+                "owner role is only valid in already_accepted invitation acceptance receipts"
+            )
+        return self
+
+
+class WorkspaceMembershipRecordDTO(BaseModel):
+    """Minimal scoped membership projection returned by member management endpoints (ADR-021)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    membership_id: str
+    user_id: str
+    display_name: str | None = None
+    role: WorkspaceRole
+    status: MembershipStatus
+    joined_at: str
+
+
+class WorkspaceMembershipListResponseDTO(BaseModel):
+    """Paginated response for GET /v1/workspaces/{workspace_id}/memberships."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[WorkspaceMembershipRecordDTO] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+class WorkspaceMembershipRoleUpdateResponseDTO(WorkspaceMembershipRecordDTO):
+    """Committed response for PATCH /v1/workspaces/{workspace_id}/memberships/{membership_id}/role."""
+
+    outcome: Literal["updated", "no_op"]
+    audit_event_id: str | None = None
+
+
+class WorkspaceMembershipRevokeResponseDTO(WorkspaceMembershipRecordDTO):
+    """Committed response for POST /v1/workspaces/{workspace_id}/memberships/{membership_id}/revoke."""
+
+    outcome: Literal["revoked", "already_revoked"]
+    audit_event_id: str | None = None

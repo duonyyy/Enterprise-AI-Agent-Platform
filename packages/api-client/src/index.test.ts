@@ -1,6 +1,12 @@
 import test, { describe, mock } from "node:test";
 import assert from "node:assert/strict";
-import { ControlApiClientV2, ApiClientError } from "./index.ts";
+import {
+  ControlApiClientV2,
+  ApiClientError,
+  canActorAssignTargetRole,
+  canActorManageTargetRole,
+  canActorRevokeTargetRole,
+} from "./index.ts";
 
 describe("ControlApiClientV2 Unit Tests", () => {
   test("ApiClientError exposes status and helper getters", () => {
@@ -439,6 +445,126 @@ describe("ControlApiClientV2 Unit Tests", () => {
       const accepted = await client.acceptInvitation("11111111-1111-1111-1111-111111111111");
       assert.equal(accepted.acceptance_state, "accepted");
       assert.equal(calls[3]?.init?.body, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("supports workspace membership endpoints, RBAC helpers, and promoted-owner already_accepted receipts", async () => {
+    assert.equal(canActorManageTargetRole("owner", "owner"), true);
+    assert.equal(canActorAssignTargetRole("owner", "admin", "owner"), true);
+    assert.equal(canActorManageTargetRole("admin", "owner"), false);
+    assert.equal(canActorManageTargetRole("admin", "admin"), false);
+    assert.equal(canActorAssignTargetRole("admin", "developer", "admin"), false);
+    assert.equal(canActorAssignTargetRole("admin", "developer", "owner"), false);
+    assert.equal(canActorAssignTargetRole("admin", "developer", "operator"), true);
+    assert.equal(canActorRevokeTargetRole("admin", "viewer"), true);
+    assert.equal(canActorRevokeTargetRole("admin", "owner"), false);
+    assert.equal(canActorManageTargetRole("developer", "viewer"), false);
+
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+      calls.push({ url: urlStr, init });
+      if (urlStr.includes("/memberships?")) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                membership_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                user_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                display_name: "Alice",
+                role: "developer",
+                status: "active",
+                joined_at: "2026-11-12T00:00:00Z",
+              },
+            ],
+            next_cursor: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/role")) {
+        return new Response(
+          JSON.stringify({
+            membership_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            user_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            display_name: "Alice",
+            role: "owner",
+            status: "active",
+            joined_at: "2026-11-12T00:00:00Z",
+            outcome: "updated",
+            audit_event_id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/memberships/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/revoke")) {
+        return new Response(
+          JSON.stringify({
+            membership_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            user_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            display_name: "Alice",
+            role: "owner",
+            status: "revoked",
+            joined_at: "2026-11-12T00:00:00Z",
+            outcome: "revoked",
+            audit_event_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          invitation_id: "11111111-1111-1111-1111-111111111111",
+          tenant_id: "22222222-2222-2222-2222-222222222222",
+          tenant_slug: "vinai",
+          tenant_name: "VinAI",
+          workspace_id: "33333333-3333-3333-3333-333333333333",
+          workspace_slug: "alpha",
+          workspace_name: "Alpha",
+          role: "owner",
+          status: "accepted",
+          expires_at: "2026-11-15T12:00:00Z",
+          can_accept: false,
+          acceptance_state: "already_accepted",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const list = await client.listWorkspaceMemberships("33333333-3333-3333-3333-333333333333", {
+        limit: 25,
+        status: "active",
+      });
+      assert.equal(list.items.length, 1);
+      assert.ok(calls[0]?.url.includes("limit=25"));
+      assert.ok(calls[0]?.url.includes("status=active"));
+      assert.equal(calls[0]?.init?.cache, "no-store");
+
+      const updated = await client.updateWorkspaceMembershipRole(
+        "33333333-3333-3333-3333-333333333333",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        { role: "owner", expected_role: "developer", expected_status: "active" }
+      );
+      assert.equal(updated.role, "owner");
+      assert.equal(updated.outcome, "updated");
+      assert.equal(calls[1]?.init?.method, "PATCH");
+
+      const revoked = await client.revokeWorkspaceMembership(
+        "33333333-3333-3333-3333-333333333333",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        { expected_role: "owner", expected_status: "active" }
+      );
+      assert.equal(revoked.status, "revoked");
+      assert.equal(revoked.outcome, "revoked");
+
+      const promotedPreview = await client.previewInvitation("11111111-1111-1111-1111-111111111111");
+      assert.equal(promotedPreview.role, "owner");
+      assert.equal(promotedPreview.acceptance_state, "already_accepted");
     } finally {
       globalThis.fetch = originalFetch;
     }

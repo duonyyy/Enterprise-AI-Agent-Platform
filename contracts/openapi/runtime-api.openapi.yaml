@@ -32,11 +32,16 @@ paths:
   /v1/runs/{run_id}/events:
     get:
       summary: Reconnectable SSE events stream
+      description: >
+        Requires live workspace membership, active tenant/workspace, and required runtime scope.
+        Revalidates parent session and PostgreSQL authorization before each business event emission
+        and on bounded intervals (<= 5s); emits an SSE error event and terminates on revocation
+        or authorization backend timeout/unavailability.
       security:
         - BearerAuth: []
       parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
-        '200': { description: Stream }
+        '200': { description: Text/event-stream yielding run events and terminal error events on live revocation }
         '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
         '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
         '503': { description: Authorization or session store temporarily unavailable }

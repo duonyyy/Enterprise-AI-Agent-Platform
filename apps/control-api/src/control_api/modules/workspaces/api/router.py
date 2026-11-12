@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID, uuid4
 
 from control_api.core.auth import verify_csrf_or_origin
@@ -15,9 +16,14 @@ from control_api.core.dependencies import (
 from control_api.modules.workspaces.dto import (
     CreateInvitationRequestDTO,
     CreateWorkspaceRequestDTO,
+    RevokeMembershipRequestDTO,
+    UpdateMembershipRoleRequestDTO,
     WorkspaceInvitationListResponseDTO,
     WorkspaceInvitationResponseDTO,
     WorkspaceListResponseDTO,
+    WorkspaceMembershipListResponseDTO,
+    WorkspaceMembershipRevokeResponseDTO,
+    WorkspaceMembershipRoleUpdateResponseDTO,
     WorkspaceResponseDTO,
 )
 from control_api.modules.workspaces.models.errors import (
@@ -27,16 +33,23 @@ from control_api.modules.workspaces.models.errors import (
     InvitationNotFoundError,
     InvitationRateLimitError,
     InvitationValidationError,
+    MembershipConflictError,
+    MembershipForbiddenError,
+    MembershipNotFoundError,
+    MembershipValidationError,
     WorkspaceAccessDeniedError,
     WorkspaceConflictError,
     WorkspaceDatabaseUnavailableError,
 )
+from control_api.modules.workspaces.models.rbac import MembershipStatus
 from control_api.modules.workspaces.services.invitation_service import InvitationService
+from control_api.modules.workspaces.services.membership_service import MembershipService
 from control_api.modules.workspaces.services.workspace_service import workspace_service
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 invitation_service = InvitationService()
+membership_service = MembershipService()
 
 
 def _translate_workspace_error(exc: Exception) -> HTTPException:
@@ -121,6 +134,59 @@ def _translate_invitation_error(exc: Exception) -> HTTPException:
         detail={
             "code": "invitation_unexpected_error",
             "message": "Unexpected workspace invitation error",
+        },
+    )
+
+
+def _parse_membership_uuid(membership_id: str) -> UUID:
+    try:
+        return UUID(membership_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "invalid_membership_id",
+                "message": "membership_id must be a valid UUID",
+            },
+        ) from exc
+
+
+def _translate_membership_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, MembershipNotFoundError):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    if isinstance(exc, MembershipForbiddenError):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    if isinstance(exc, WorkspaceAccessDeniedError):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "workspace_access_denied", "message": str(exc)},
+        )
+    if isinstance(exc, MembershipConflictError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    if isinstance(exc, MembershipValidationError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    if isinstance(exc, WorkspaceDatabaseUnavailableError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "membership_store_unavailable", "message": str(exc)},
+        )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "membership_unexpected_error",
+            "message": "Unexpected workspace membership operation error",
         },
     )
 
@@ -318,3 +384,100 @@ async def revoke_workspace_invitation(
         )
     except Exception as exc:
         raise _translate_invitation_error(exc) from exc
+
+
+@router.get(
+    "/{workspace_id}/memberships",
+    response_model=WorkspaceMembershipListResponseDTO,
+)
+async def list_workspace_memberships(
+    workspace_id: str,
+    response: Response,
+    ctx: CurrentSessionWorkspace,
+    session: DBSession,
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=256),
+    status_filter: Annotated[MembershipStatus | None, Query(alias="status")] = None,
+) -> WorkspaceMembershipListResponseDTO:
+    """List scoped workspace memberships with cursor pagination (ADR-021)."""
+    _ = workspace_id
+    response.headers["Cache-Control"] = "no-store"
+    require_permission(ctx.principal, "workspace:read")
+    try:
+        return await membership_service.list_memberships(
+            session=session,
+            principal=ctx.principal,
+            limit=limit,
+            cursor=cursor,
+            status_filter=status_filter,
+        )
+    except Exception as exc:
+        raise _translate_membership_error(exc) from exc
+
+
+@router.patch(
+    "/{workspace_id}/memberships/{membership_id}/role",
+    response_model=WorkspaceMembershipRoleUpdateResponseDTO,
+)
+async def update_workspace_membership_role(
+    workspace_id: str,
+    membership_id: str,
+    dto: UpdateMembershipRoleRequestDTO,
+    request: Request,
+    response: Response,
+    ctx: CurrentSessionWorkspace,
+    session: DBSession,
+) -> WorkspaceMembershipRoleUpdateResponseDTO:
+    """Atomically change an active workspace member's role with last-owner protection (ADR-021)."""
+    _ = workspace_id
+    response.headers["Cache-Control"] = "no-store"
+    verify_csrf_or_origin(request)
+    require_permission(ctx.principal, "workspace:write")
+    parsed_id = _parse_membership_uuid(membership_id)
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    trace_id = request.headers.get("x-trace-id") or request_id
+    try:
+        return await membership_service.update_member_role(
+            session=session,
+            principal=ctx.principal,
+            membership_id=parsed_id,
+            payload=dto,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        raise _translate_membership_error(exc) from exc
+
+
+@router.post(
+    "/{workspace_id}/memberships/{membership_id}/revoke",
+    response_model=WorkspaceMembershipRevokeResponseDTO,
+)
+async def revoke_workspace_membership(
+    workspace_id: str,
+    membership_id: str,
+    dto: RevokeMembershipRequestDTO,
+    request: Request,
+    response: Response,
+    ctx: CurrentSessionWorkspace,
+    session: DBSession,
+) -> WorkspaceMembershipRevokeResponseDTO:
+    """Atomically revoke an active workspace member's access with last-owner protection (ADR-021)."""
+    _ = workspace_id
+    response.headers["Cache-Control"] = "no-store"
+    verify_csrf_or_origin(request)
+    require_permission(ctx.principal, "workspace:write")
+    parsed_id = _parse_membership_uuid(membership_id)
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    trace_id = request.headers.get("x-trace-id") or request_id
+    try:
+        return await membership_service.revoke_member(
+            session=session,
+            principal=ctx.principal,
+            membership_id=parsed_id,
+            payload=dto,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        raise _translate_membership_error(exc) from exc

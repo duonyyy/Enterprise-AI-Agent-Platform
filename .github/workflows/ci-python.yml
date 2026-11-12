@@ -149,6 +149,7 @@ jobs:
           RUNTIME_JWT_ISSUER: http://localhost:8080/realms/enterprise
           REDIS_URL: redis://localhost:6379/0
           TEST_REDIS_URL: redis://localhost:6379/15
+          TEST_REDIS_E2E_URL: redis://localhost:6379/14
         run: |
           uv run pytest tests/contract/ tests/security/ tests/integration/ apps/control-api/tests apps/agent-runtime/tests apps/jobs-worker/tests -v
 

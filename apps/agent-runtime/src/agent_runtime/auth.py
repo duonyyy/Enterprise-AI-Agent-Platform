@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import logging
 import time
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from threading import Lock
 from typing import Annotated, Any, Protocol
 from uuid import UUID
 
@@ -19,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_runtime.persistence.database import (
     RuntimeDatabaseUnavailable,
     get_db_session,
+    scoped_session,
     set_rls_context,
 )
 from agent_runtime.settings import RuntimeSettings, get_settings
@@ -168,6 +173,7 @@ class RuntimePrincipal:
     roles: tuple[str, ...]
     scopes: frozenset[str]
     session_id: str | None = None
+    token_scopes: frozenset[str] | None = None
 
     def require_scope(self, scope: str) -> None:
         if not _scope_matches(self.scopes, scope):
@@ -175,6 +181,15 @@ class RuntimePrincipal:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="insufficient_scope",
             )
+
+
+class RuntimeStreamAuthError(Exception):
+    """Fail-closed authorization error raised during live SSE revalidation."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class ParentSessionVerifierProtocol(Protocol):
@@ -199,6 +214,10 @@ class RedisParentSessionVerifier:
             socket_connect_timeout=active.redis_connect_timeout_seconds,
             decode_responses=True,
         )
+
+    def close(self) -> None:
+        """Release the shared Redis connection pool during application shutdown."""
+        self._client.close()
 
     def verify_parent_session(
         self,
@@ -292,6 +311,9 @@ class RedisParentSessionVerifier:
 
 
 _parent_session_verifier: ParentSessionVerifierProtocol | None = None
+_shared_redis_parent_session_verifier: RedisParentSessionVerifier | None = None
+_shared_redis_parent_session_verifier_key: tuple[str, float, float] | None = None
+_shared_redis_parent_session_verifier_lock = Lock()
 
 
 def set_parent_session_verifier(verifier: ParentSessionVerifierProtocol | None) -> None:
@@ -303,9 +325,41 @@ def set_parent_session_verifier(verifier: ParentSessionVerifierProtocol | None) 
 def get_parent_session_verifier(
     settings: RuntimeSettings | None = None,
 ) -> ParentSessionVerifierProtocol:
+    """Return the injected test verifier or one process-wide Redis verifier/pool."""
     if _parent_session_verifier is not None:
         return _parent_session_verifier
-    return RedisParentSessionVerifier(settings=settings)
+
+    active = settings or get_settings()
+    key = (
+        active.redis_url,
+        active.redis_socket_timeout_seconds,
+        active.redis_connect_timeout_seconds,
+    )
+    global _shared_redis_parent_session_verifier
+    global _shared_redis_parent_session_verifier_key
+    with _shared_redis_parent_session_verifier_lock:
+        if (
+            _shared_redis_parent_session_verifier is None
+            or _shared_redis_parent_session_verifier_key != key
+        ):
+            previous = _shared_redis_parent_session_verifier
+            _shared_redis_parent_session_verifier = RedisParentSessionVerifier(settings=active)
+            _shared_redis_parent_session_verifier_key = key
+            if previous is not None:
+                previous.close()
+        return _shared_redis_parent_session_verifier
+
+
+def close_shared_parent_session_verifier() -> None:
+    """Close and clear the process-wide Redis verifier owned by the Runtime app."""
+    global _shared_redis_parent_session_verifier
+    global _shared_redis_parent_session_verifier_key
+    with _shared_redis_parent_session_verifier_lock:
+        verifier = _shared_redis_parent_session_verifier
+        _shared_redis_parent_session_verifier = None
+        _shared_redis_parent_session_verifier_key = None
+        if verifier is not None:
+            verifier.close()
 
 
 _bearer = HTTPBearer(auto_error=False)
@@ -348,7 +402,9 @@ def verify_runtime_token(
         raise ValueError("invalid_token_payload")  # noqa: TRY004
 
     signed = f"{encoded_header}.{encoded_payload}".encode("ascii")
-    expected = hmac.new(active_settings.runtime_jwt_secret.encode("utf-8"), signed, hashlib.sha256).digest()
+    expected = hmac.new(
+        active_settings.runtime_jwt_secret.encode("utf-8"), signed, hashlib.sha256
+    ).digest()
     if not hmac.compare_digest(expected, _decode_segment(encoded_signature)):
         raise ValueError("invalid_token_signature")
 
@@ -359,7 +415,10 @@ def verify_runtime_token(
     nbf = payload.get("nbf")
     if isinstance(nbf, int) and nbf > now:
         raise ValueError("token_not_yet_valid")
-    if active_settings.runtime_jwt_issuer and payload.get("iss") != active_settings.runtime_jwt_issuer:
+    if (
+        active_settings.runtime_jwt_issuer
+        and payload.get("iss") != active_settings.runtime_jwt_issuer
+    ):
         raise ValueError("invalid_token_issuer")
     audience = payload.get("aud")
     audiences = {audience} if isinstance(audience, str) else set(audience or [])
@@ -373,7 +432,9 @@ def verify_runtime_token(
     scopes_value = payload.get("scopes", [])
     if not isinstance(roles_value, list) or not all(isinstance(item, str) for item in roles_value):
         raise ValueError("invalid_roles")
-    if not isinstance(scopes_value, list) or not all(isinstance(item, str) for item in scopes_value):
+    if not isinstance(scopes_value, list) or not all(
+        isinstance(item, str) for item in scopes_value
+    ):
         raise ValueError("invalid_scopes")
 
     session_id_raw = payload.get("session_id")
@@ -429,14 +490,18 @@ async def get_runtime_principal(
     stmt = text("SELECT * FROM iam.resolve_user_workspace_membership(:user_id, :workspace_id)")
     try:
         row = (
-            await session.execute(
-                stmt,
-                {
-                    "user_id": UUID(token_principal.user_id),
-                    "workspace_id": UUID(token_principal.workspace_id),
-                },
+            (
+                await session.execute(
+                    stmt,
+                    {
+                        "user_id": UUID(token_principal.user_id),
+                        "workspace_id": UUID(token_principal.workspace_id),
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
     except (SQLAlchemyError, RuntimeDatabaseUnavailable) as exc:
         logger.warning("Runtime workspace authorization lookup failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -486,6 +551,141 @@ async def get_runtime_principal(
         roles=(db_role,),
         scopes=effective_scopes,
         session_id=token_principal.session_id,
+        token_scopes=token_principal.scopes,
+    )
+
+
+async def revalidate_runtime_authorization(
+    principal: RuntimePrincipal,
+    *,
+    required_scope: str,
+    session_factory: Callable[..., AbstractAsyncContextManager[AsyncSession]] = scoped_session,
+    settings: RuntimeSettings | None = None,
+    timeout_seconds: float | None = None,
+) -> RuntimePrincipal:
+    """Revalidate parent session in Redis and live membership/scope in a short PG transaction.
+
+    Fails closed on revocation, lost scope, inactive workspace/tenant, dependency errors,
+    or lookup timeouts exceeding the caller's bounded supervision budget.
+    """
+    if principal.session_id is None:
+        raise RuntimeStreamAuthError(
+            "authorization_revoked",
+            "Parent application session is required",
+        )
+
+    active_settings = settings or get_settings()
+    budget = max(
+        0.05,
+        min(
+            timeout_seconds
+            if timeout_seconds is not None
+            else active_settings.sse_auth_lookup_timeout_seconds,
+            active_settings.sse_max_auth_age_seconds,
+        ),
+    )
+    deadline = time.monotonic() + budget
+
+    def _check_parent_session() -> tuple[str, Any]:
+        verifier = get_parent_session_verifier(active_settings)
+        return verifier.verify_parent_session(
+            session_id=principal.session_id or "",
+            user_id=principal.user_id,
+        )
+
+    try:
+        sess_status, _ = await asyncio.wait_for(
+            asyncio.to_thread(_check_parent_session),
+            timeout=budget,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            raise RuntimeStreamAuthError(
+                "authorization_unavailable",
+                "Authentication service temporarily unavailable",
+            ) from exc
+        raise RuntimeStreamAuthError("authorization_revoked", str(exc.detail)) from exc
+    except (TimeoutError, OSError) as exc:
+        logger.warning("Runtime SSE parent session check failed (%s)", type(exc).__name__)
+        raise RuntimeStreamAuthError(
+            "authorization_unavailable",
+            "Authentication service temporarily unavailable",
+        ) from exc
+
+    if sess_status != "OK":
+        raise RuntimeStreamAuthError(
+            "authorization_revoked",
+            "Parent application session revoked or expired",
+        )
+
+    remaining = max(0.01, deadline - time.monotonic())
+    try:
+        async with asyncio.timeout(remaining):
+            async with session_factory(
+                principal.tenant_id,
+                principal.workspace_id,
+                principal.user_id,
+            ) as session:
+                row = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT * FROM iam.resolve_user_workspace_membership("
+                                ":user_id, :workspace_id)"
+                            ),
+                            {
+                                "user_id": UUID(principal.user_id),
+                                "workspace_id": UUID(principal.workspace_id),
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+    except (TimeoutError, SQLAlchemyError, RuntimeDatabaseUnavailable, OSError) as exc:
+        logger.warning("Runtime SSE membership recheck failed (%s)", type(exc).__name__)
+        raise RuntimeStreamAuthError(
+            "authorization_unavailable",
+            "Authorization database unavailable or timed out",
+        ) from exc
+
+    if (
+        row is None
+        or row.get("tenant_status", "active") != "active"
+        or row.get("workspace_status", "active") != "active"
+        or str(row["tenant_id"]) != principal.tenant_id
+    ):
+        raise RuntimeStreamAuthError(
+            "authorization_revoked",
+            "Workspace membership or scope is no longer active",
+        )
+
+    db_role = str(row["role"])
+    if db_role not in RUNTIME_ROLE_SCOPES:
+        raise RuntimeStreamAuthError(
+            "authorization_revoked",
+            "Workspace membership role is not permitted",
+        )
+
+    base_token_scopes = (
+        principal.token_scopes if principal.token_scopes is not None else principal.scopes
+    )
+    effective_scopes = compute_effective_runtime_scopes(db_role, base_token_scopes)
+    if not _scope_matches(effective_scopes, required_scope):
+        raise RuntimeStreamAuthError(
+            "authorization_revoked",
+            "Required workspace runtime scope was revoked",
+        )
+
+    return RuntimePrincipal(
+        subject=principal.subject,
+        user_id=principal.user_id,
+        tenant_id=principal.tenant_id,
+        workspace_id=principal.workspace_id,
+        roles=(db_role,),
+        scopes=effective_scopes,
+        session_id=principal.session_id,
+        token_scopes=base_token_scopes,
     )
 
 

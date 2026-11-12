@@ -6,6 +6,7 @@ import re
 from typing import Final, Literal
 from uuid import UUID
 
+from control_api.modules.workspaces.models.rbac import WorkspaceRole
 from platform_common.invitations import normalize_invitation_email
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -134,3 +135,21 @@ class InvitationHandoffRequestDTO(BaseModel):
             raise ValueError("Invitation token length is out of bounds")
         return value
 
+
+class UpdateMembershipRoleRequestDTO(BaseModel):
+    """Strict input contract for PATCH /v1/workspaces/{workspace_id}/memberships/{membership_id}/role."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: WorkspaceRole
+    expected_role: WorkspaceRole
+    expected_status: Literal["active"]
+
+
+class RevokeMembershipRequestDTO(BaseModel):
+    """Strict input contract for POST /v1/workspaces/{workspace_id}/memberships/{membership_id}/revoke."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_role: WorkspaceRole
+    expected_status: Literal["active"]

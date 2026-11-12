@@ -127,7 +127,109 @@ export interface WorkspaceListResponseDTO {
   items: WorkspaceSummaryDTO[];
 }
 
+export type WorkspaceRole = "owner" | "admin" | "developer" | "operator" | "viewer";
 export type InvitableWorkspaceRole = "admin" | "developer" | "operator" | "viewer";
+export type AdminManageableWorkspaceRole = "developer" | "operator" | "viewer";
+export type MembershipStatus = "active" | "invited" | "revoked";
+
+export const WORKSPACE_ROLES: readonly WorkspaceRole[] = [
+  "owner",
+  "admin",
+  "developer",
+  "operator",
+  "viewer",
+];
+export const INVITABLE_WORKSPACE_ROLES: readonly InvitableWorkspaceRole[] = [
+  "admin",
+  "developer",
+  "operator",
+  "viewer",
+];
+export const ADMIN_MANAGEABLE_WORKSPACE_ROLES: readonly AdminManageableWorkspaceRole[] = [
+  "developer",
+  "operator",
+  "viewer",
+];
+
+export function canActorManageTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole
+): boolean {
+  if (actorRole === "owner") {
+    return true;
+  }
+  if (actorRole === "admin") {
+    return targetCurrentRole === "developer" || targetCurrentRole === "operator" || targetCurrentRole === "viewer";
+  }
+  return false;
+}
+
+export function canActorAssignTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole,
+  newRole: WorkspaceRole
+): boolean {
+  if (!canActorManageTargetRole(actorRole, targetCurrentRole)) {
+    return false;
+  }
+  if (actorRole === "owner") {
+    return true;
+  }
+  if (actorRole === "admin") {
+    return newRole === "developer" || newRole === "operator" || newRole === "viewer";
+  }
+  return false;
+}
+
+export function canActorRevokeTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole
+): boolean {
+  return canActorManageTargetRole(actorRole, targetCurrentRole);
+}
+
+export interface WorkspaceMembershipDTO {
+  membership_id: string;
+  user_id: string;
+  display_name: string | null;
+  role: WorkspaceRole;
+  status: MembershipStatus;
+  joined_at: string;
+}
+
+export interface WorkspaceMembershipListResponseDTO {
+  items: WorkspaceMembershipDTO[];
+  next_cursor?: string | null;
+}
+
+export interface ListWorkspaceMembershipsOptions {
+  limit?: number;
+  cursor?: string | null;
+  status?: MembershipStatus;
+  signal?: AbortSignal;
+}
+
+export interface UpdateWorkspaceMembershipRoleRequestDTO {
+  role: WorkspaceRole;
+  expected_role: WorkspaceRole;
+  expected_status: "active";
+}
+
+export interface WorkspaceMembershipRoleUpdateResponseDTO extends WorkspaceMembershipDTO {
+  outcome: "updated" | "no_op";
+  audit_event_id: string | null;
+}
+
+export interface RevokeWorkspaceMembershipRequestDTO {
+  expected_role: WorkspaceRole;
+  expected_status: "active";
+}
+
+export interface WorkspaceMembershipRevokeResponseDTO extends WorkspaceMembershipDTO {
+  outcome: "revoked" | "already_revoked";
+  audit_event_id: string | null;
+}
+
 export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
 export type InvitationDeliveryState =
   | "queued"
@@ -180,31 +282,57 @@ export interface InvitationHandoffResponseDTO {
   expires_at: string;
 }
 
-export interface InvitationPreviewResponseDTO {
-  invitation_id: string;
-  tenant_id: string;
-  tenant_slug: string;
-  tenant_name: string;
-  workspace_id: string;
-  workspace_slug: string;
-  workspace_name: string;
-  role: "admin" | "developer" | "operator" | "viewer";
-  status: "pending" | "accepted";
-  expires_at: string;
-  can_accept: boolean;
-  acceptance_state: "ready" | "already_accepted";
-}
+export type InvitationPreviewResponseDTO =
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      tenant_slug: string;
+      tenant_name: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: InvitableWorkspaceRole;
+      status: "pending" | "accepted";
+      expires_at: string;
+      can_accept: boolean;
+      acceptance_state: "ready" | "already_accepted";
+    }
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      tenant_slug: string;
+      tenant_name: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: "owner";
+      status: "accepted";
+      expires_at: string;
+      can_accept: false;
+      acceptance_state: "already_accepted";
+    };
 
-export interface InvitationAcceptResponseDTO {
-  invitation_id: string;
-  tenant_id: string;
-  workspace_id: string;
-  workspace_slug: string;
-  workspace_name: string;
-  role: "admin" | "developer" | "operator" | "viewer";
-  acceptance_state: "accepted" | "already_accepted";
-  redirect_url: string;
-}
+export type InvitationAcceptResponseDTO =
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: InvitableWorkspaceRole;
+      acceptance_state: "accepted" | "already_accepted";
+      redirect_url: string;
+    }
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: "owner";
+      acceptance_state: "already_accepted";
+      redirect_url: string;
+    };
 
 export interface LoginUrlOptions {
   invitationId?: string;
@@ -636,6 +764,66 @@ export class ControlApiClientV2 {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
       {
         method: "POST",
+        signal,
+      }
+    );
+  }
+
+  // --- Workspace Member Management API (ADR-021 / Step 03-D) ---
+  async listWorkspaceMemberships(
+    workspaceId: string,
+    options?: ListWorkspaceMembershipsOptions
+  ): Promise<WorkspaceMembershipListResponseDTO> {
+    const params = new URLSearchParams();
+    if (options?.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options?.cursor) {
+      params.set("cursor", options.cursor);
+    }
+    if (options?.status) {
+      params.set("status", options.status);
+    }
+    const qs = params.toString();
+    const path = qs
+      ? `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships?${qs}`
+      : `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships`;
+    return this.request<WorkspaceMembershipListResponseDTO>(path, {
+      method: "GET",
+      cache: "no-store",
+      signal: options?.signal,
+    });
+  }
+
+  async updateWorkspaceMembershipRole(
+    workspaceId: string,
+    membershipId: string,
+    dto: UpdateWorkspaceMembershipRoleRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceMembershipRoleUpdateResponseDTO> {
+    return this.request<WorkspaceMembershipRoleUpdateResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships/${encodeURIComponent(membershipId)}/role`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(dto),
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async revokeWorkspaceMembership(
+    workspaceId: string,
+    membershipId: string,
+    dto: RevokeWorkspaceMembershipRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceMembershipRevokeResponseDTO> {
+    return this.request<WorkspaceMembershipRevokeResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships/${encodeURIComponent(membershipId)}/revoke`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        cache: "no-store",
         signal,
       }
     );

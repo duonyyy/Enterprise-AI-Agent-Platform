@@ -24,6 +24,8 @@ from test_postgres_fixture import (
     temporary_database,
 )
 
+from scripts.validate_database_schema import EXPECTED_MIGRATIONS
+
 CONSTRAINTS_SQL = """
 SELECT n.nspname, c.relname, k.conname, k.contype, pg_get_constraintdef(k.oid)
 FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid
@@ -172,9 +174,9 @@ def test_backup_and_restore_recovery(
                 )
                 assert cur.fetchone()[0] == 57
 
-                # 1 technical migration history table with 5 applied migrations
+                # 1 technical migration history table with the reviewed canonical migration inventory
                 cur.execute("SELECT count(*) FROM public.schema_migrations")
-                assert cur.fetchone()[0] == 5
+                assert cur.fetchone()[0] == len(EXPECTED_MIGRATIONS)
 
                 # Verify RLS is enabled and forced on all 56 non-global domain tables (iam.users is global)
                 cur.execute(

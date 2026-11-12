@@ -706,11 +706,20 @@ paths:
                   workspace_id: { type: string, format: uuid }
                   workspace_slug: { type: string }
                   workspace_name: { type: string }
-                  role: { type: string, enum: [admin, developer, operator, viewer] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
                   status: { type: string, enum: [pending, accepted] }
                   expires_at: { type: string, format: date-time }
                   can_accept: { type: boolean }
                   acceptance_state: { type: string, enum: [ready, already_accepted] }
+                if:
+                  properties:
+                    role: { const: owner }
+                  required: [role]
+                then:
+                  properties:
+                    status: { const: accepted }
+                    can_accept: { const: false }
+                    acceptance_state: { const: already_accepted }
         '401':
           description: Missing, invalid, expired, or revoked application session
           content:
@@ -785,9 +794,16 @@ paths:
                   workspace_id: { type: string, format: uuid }
                   workspace_slug: { type: string }
                   workspace_name: { type: string }
-                  role: { type: string, enum: [admin, developer, operator, viewer] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
                   acceptance_state: { type: string, enum: [accepted, already_accepted] }
                   redirect_url: { type: string }
+                if:
+                  properties:
+                    role: { const: owner }
+                  required: [role]
+                then:
+                  properties:
+                    acceptance_state: { const: already_accepted }
         '401':
           description: Missing, invalid, expired, or revoked application session
           content:
@@ -817,6 +833,243 @@ paths:
           description: Invalid invitation ID or unexpected request body
         '503':
           description: Authoritative session, handoff store, or database unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/workspaces/{workspace_id}/memberships:
+    get:
+      summary: List workspace memberships with cursor pagination
+      description: Requires an active application session and live active Owner or Admin role.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 256 }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [active, invited, revoked] }
+      responses:
+        '200':
+          description: Workspace memberships page
+          content:
+            application/json:
+              schema: &workspace_membership_list_response
+                type: object
+                additionalProperties: false
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: &workspace_membership_dto
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - membership_id
+                        - user_id
+                        - display_name
+                        - role
+                        - status
+                        - joined_at
+                      properties:
+                        membership_id: { type: string, format: uuid }
+                        user_id: { type: string, format: uuid }
+                        display_name: { type: [string, "null"] }
+                        role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                        status: { type: string, enum: [active, invited, revoked] }
+                        joined_at: { type: string, format: date-time }
+                  next_cursor: { type: [string, "null"] }
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session and live Owner or Admin role required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Scoped workspace not found
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Invalid pagination cursor, status filter, or workspace_id
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Membership or session store temporarily unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/workspaces/{workspace_id}/memberships/{membership_id}/role:
+    patch:
+      summary: Change active workspace member role atomically
+      description: Requires an active application session, Origin/CSRF check, and live Owner or Admin role.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: membership_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: &workspace_membership_role_update_request
+              type: object
+              additionalProperties: false
+              required: [role, expected_role, expected_status]
+              properties:
+                role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                expected_role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                expected_status: { type: string, enum: [active] }
+      responses:
+        '200':
+          description: Role updated or confirmed unchanged (no-op) under workspace serialization guard
+          content:
+            application/json:
+              schema: &workspace_membership_role_update_response
+                type: object
+                additionalProperties: false
+                required:
+                  - membership_id
+                  - user_id
+                  - display_name
+                  - role
+                  - status
+                  - joined_at
+                  - outcome
+                  - audit_event_id
+                properties:
+                  membership_id: { type: string, format: uuid }
+                  user_id: { type: string, format: uuid }
+                  display_name: { type: [string, "null"] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                  status: { type: string, enum: [active, invited, revoked] }
+                  joined_at: { type: string, format: date-time }
+                  outcome: { type: string, enum: [updated, no_op] }
+                  audit_event_id: { type: [string, "null"], format: uuid }
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session, CSRF/Origin check, or role-management authority required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Scoped membership not found in workspace
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Stale expected state, last active Owner protection, or inactive membership conflict
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Malformed identifier or unexpected request payload
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Membership or session store temporarily unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/workspaces/{workspace_id}/memberships/{membership_id}/revoke:
+    post:
+      summary: Revoke workspace membership atomically
+      description: Requires an active application session, Origin/CSRF check, and live Owner or Admin role.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: membership_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: &workspace_membership_revoke_request
+              type: object
+              additionalProperties: false
+              required: [expected_role, expected_status]
+              properties:
+                expected_role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                expected_status: { type: string, enum: [active] }
+      responses:
+        '200':
+          description: Membership revoked or safely reconciled as already revoked without duplicate audit
+          content:
+            application/json:
+              schema: &workspace_membership_revoke_response
+                type: object
+                additionalProperties: false
+                required:
+                  - membership_id
+                  - user_id
+                  - display_name
+                  - role
+                  - status
+                  - joined_at
+                  - outcome
+                  - audit_event_id
+                properties:
+                  membership_id: { type: string, format: uuid }
+                  user_id: { type: string, format: uuid }
+                  display_name: { type: [string, "null"] }
+                  role: { type: string, enum: [owner, admin, developer, operator, viewer] }
+                  status: { type: string, enum: [active, invited, revoked] }
+                  joined_at: { type: string, format: date-time }
+                  outcome: { type: string, enum: [revoked, already_revoked] }
+                  audit_event_id: { type: [string, "null"], format: uuid }
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session, CSRF/Origin check, or revocation authority required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Scoped membership not found in workspace
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Stale expected state, last active Owner protection, or invited membership conflict
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Malformed identifier or unexpected request payload
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Membership or session store temporarily unavailable
           content:
             application/json:
               schema: *invitation_error_response

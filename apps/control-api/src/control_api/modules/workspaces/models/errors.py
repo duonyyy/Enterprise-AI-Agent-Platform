@@ -65,6 +65,31 @@ class InvitationGoneError(InvitationError):
     """Raised when a verified recipient presents a valid proof for an expired or revoked invitation."""
 
 
+class MembershipError(WorkspaceError):
+    """Base domain error for workspace member management operations (ADR-021)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class MembershipNotFoundError(MembershipError):
+    """Raised when a target membership does not exist in the scoped workspace."""
+
+
+class MembershipForbiddenError(MembershipError):
+    """Raised when the actor lacks role authority for a member management operation."""
+
+
+class MembershipConflictError(MembershipError):
+    """Raised on stale preconditions, last-owner protection, or state transition conflicts."""
+
+
+class MembershipValidationError(MembershipError):
+    """Raised on invalid cursor, status filter, or malformed identifier inputs."""
+
+
 __all__ = [
     "InvitationConfigurationError",
     "InvitationConflictError",
@@ -74,6 +99,11 @@ __all__ = [
     "InvitationNotFoundError",
     "InvitationRateLimitError",
     "InvitationValidationError",
+    "MembershipConflictError",
+    "MembershipError",
+    "MembershipForbiddenError",
+    "MembershipNotFoundError",
+    "MembershipValidationError",
     "WorkspaceAccessDeniedError",
     "WorkspaceConflictError",
     "WorkspaceDatabaseUnavailableError",

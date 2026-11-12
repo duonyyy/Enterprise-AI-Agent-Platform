@@ -13,6 +13,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ROLE_LABELS: Record<string, string> = {
+  owner: "Chủ sở hữu (Owner)",
   admin: "Quản trị viên (Admin)",
   developer: "Kỹ sư phát triển (Developer)",
   operator: "Vận hành (Operator)",

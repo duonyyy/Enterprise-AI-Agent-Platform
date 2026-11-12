@@ -610,7 +610,7 @@ async def get_current_session_workspace_context(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "active_session_required",
-                "message": "Workspace invitations require an active application session",
+                "message": "Workspace management and invitations require an active application session",
             },
         )
     try:
