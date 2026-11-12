@@ -20,6 +20,7 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0003_restore_workspaces_rls.sql",
     "0004_identity_discovery_projection.sql",
     "0005_workspace_invitations.sql",
+    "0006_invitation_acceptance_projection.sql",
 )
 
 APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
@@ -34,6 +35,9 @@ REVIEWED_RESTORE_RLS_FINGERPRINT: Final[str] = (
 )
 REVIEWED_IDENTITY_PROJECTION_FINGERPRINT: Final[str] = (
     "f02197eba774ea5bade4dcb6218ad76ccf8d59ba2df57b3d5366453213abe2ec"
+)
+REVIEWED_INVITATION_ACCEPT_PROJECTION_FINGERPRINT: Final[str] = (
+    "e494e79970e1ad5f889de5ad6106707892ee80285c844eb9db9aaaddb529a8b8"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -763,6 +767,81 @@ def _validate_workspace_invitations_sql(sql: str) -> list[str]:
     return errors
 
 
+def _validate_invitation_acceptance_projection_sql(sql: str) -> list[str]:
+    """Validate ADR-020 / 03-C forward migration 0006_invitation_acceptance_projection.sql."""
+    errors: list[str] = []
+    executable, fingerprint = _sql_structure(sql)
+
+    if FORBIDDEN_DDL_IN_POLICY_MIGRATION_RE.search(executable):
+        errors.append(
+            "0006_invitation_acceptance_projection.sql must not contain CREATE TABLE or DROP TABLE"
+        )
+
+    if fingerprint != REVIEWED_INVITATION_ACCEPT_PROJECTION_FINGERPRINT:
+        errors.append(
+            "0006_invitation_acceptance_projection.sql differs from the reviewed authored SQL fingerprint; "
+            "projection changes require review"
+        )
+
+    func_name = "iam.resolve_invitation_accept_scope"
+    if not re.search(
+        rf"DROP\s+FUNCTION\s+IF\s+EXISTS\s+{re.escape(func_name)}\s*\(\s*uuid\s*\)",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"0006_invitation_acceptance_projection.sql must DROP FUNCTION IF EXISTS {func_name}(uuid)"
+        )
+    if not re.search(
+        rf"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)}\s*\(\s*"
+        r"p_invitation_id\s+uuid\s*,\s*p_token_hash\s+text\s*,\s*p_user_id\s+uuid\s*,\s*"
+        r"p_issuer\s+text\s*,\s*p_subject\s+text\s*,\s*p_email_normalized\s+text\s*\)",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"0006_invitation_acceptance_projection.sql must declare bound 6-arg signature {func_name}"
+        )
+    if not re.search(
+        r"RETURNS\s+TABLE\s*\(\s*invitation_id\s+uuid\s*,\s*tenant_id\s+uuid\s*,\s*workspace_id\s+uuid\s*\)",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0006_invitation_acceptance_projection.sql must return ONLY (invitation_id, tenant_id, workspace_id)"
+        )
+    if not re.search(
+        rf"REVOKE\s+ALL\s+ON\s+FUNCTION\s+{re.escape(func_name)}\s*\(\s*"
+        r"uuid\s*,\s*text\s*,\s*uuid\s*,\s*text\s*,\s*text\s*,\s*text\s*\)\s+FROM\s+PUBLIC\b",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"0006_invitation_acceptance_projection.sql must REVOKE ALL ON FUNCTION {func_name} FROM PUBLIC"
+        )
+    if not re.search(
+        rf"GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+{re.escape(func_name)}\s*\(\s*"
+        r"uuid\s*,\s*text\s*,\s*uuid\s*,\s*text\s*,\s*text\s*,\s*text\s*\)\s+TO\s+platform_app\b",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"0006_invitation_acceptance_projection.sql must GRANT EXECUTE ON FUNCTION {func_name} TO platform_app"
+        )
+
+    if len(re.findall(r"\bSECURITY\s+DEFINER\b", executable)) != 1:
+        errors.append(
+            "0006_invitation_acceptance_projection.sql must declare SECURITY DEFINER on the scope projection function"
+        )
+
+    if len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable)) != 1:
+        errors.append(
+            "0006_invitation_acceptance_projection.sql must pin SET search_path = pg_catalog, iam, pg_temp"
+        )
+
+    return errors
+
+
 def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     """Validate the canonical SQL migration directory and return a list of errors."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -791,13 +870,18 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     )
     errors.extend(_validate_workspace_invitations_sql(invitations_sql))
 
+    accept_projection_sql = (
+        target_dir / "0006_invitation_acceptance_projection.sql"
+    ).read_text(encoding="utf-8-sig")
+    errors.extend(_validate_invitation_acceptance_projection_sql(accept_projection_sql))
+
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for static database schema validation."""
     parser = argparse.ArgumentParser(
-        description="Validate static DB-56 baseline + approved ADR-019 delta PostgreSQL schema invariants."
+        description="Validate static DB-56 baseline + approved ADR-019/ADR-020 delta PostgreSQL schema invariants."
     )
     parser.add_argument(
         "--migrations-dir",
@@ -814,11 +898,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 5 ordered migrations, 7 schemas, 56 baseline + 1 delta = 57 canonical tables, "
+        "PASS static checks: 6 ordered migrations, 7 schemas, 56 baseline + 1 delta = 57 canonical tables, "
         "recognized FK/UNIQUE declarations, 55 baseline + 1 delta = 56 RLS declarations, "
         "10 immutable trigger declarations + 1 document guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
-        "reviewed 0004 content fingerprint."
+        "reviewed 0004 content fingerprint, reviewed 0006 content fingerprint."
     )
     print(
         "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy (DEC-DB-01)."
@@ -828,6 +912,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0005_workspace_invitations.sql adds iam.workspace_invitations with FORCE ROW LEVEL SECURITY (ADR-019 / 03-B)."
+    )
+    print(
+        "0006_invitation_acceptance_projection.sql defines narrow SECURITY DEFINER invitation acceptance scope projection (ADR-020 / 03-C)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

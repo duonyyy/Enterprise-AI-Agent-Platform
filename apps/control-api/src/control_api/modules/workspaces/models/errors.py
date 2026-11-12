@@ -61,11 +61,16 @@ class InvitationConfigurationError(InvitationError):
     """Raised when invitations feature flags or proof encryption config are missing or invalid."""
 
 
+class InvitationGoneError(InvitationError):
+    """Raised when a verified recipient presents a valid proof for an expired or revoked invitation."""
+
+
 __all__ = [
     "InvitationConfigurationError",
     "InvitationConflictError",
     "InvitationError",
     "InvitationForbiddenError",
+    "InvitationGoneError",
     "InvitationNotFoundError",
     "InvitationRateLimitError",
     "InvitationValidationError",

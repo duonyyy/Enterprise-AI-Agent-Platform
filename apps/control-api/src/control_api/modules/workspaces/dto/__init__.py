@@ -3,8 +3,12 @@
 from control_api.modules.workspaces.dto.requests import (
     CreateInvitationRequestDTO,
     CreateWorkspaceRequestDTO,
+    InvitationHandoffRequestDTO,
 )
 from control_api.modules.workspaces.dto.responses import (
+    InvitationAcceptResponseDTO,
+    InvitationHandoffResponseDTO,
+    InvitationPreviewResponseDTO,
     WorkspaceInvitationListResponseDTO,
     WorkspaceInvitationResponseDTO,
     WorkspaceListResponseDTO,
@@ -15,6 +19,10 @@ from control_api.modules.workspaces.dto.responses import (
 __all__ = [
     "CreateInvitationRequestDTO",
     "CreateWorkspaceRequestDTO",
+    "InvitationAcceptResponseDTO",
+    "InvitationHandoffRequestDTO",
+    "InvitationHandoffResponseDTO",
+    "InvitationPreviewResponseDTO",
     "WorkspaceInvitationListResponseDTO",
     "WorkspaceInvitationResponseDTO",
     "WorkspaceListResponseDTO",

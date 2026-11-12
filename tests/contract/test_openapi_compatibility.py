@@ -13,6 +13,10 @@ from control_api.modules.identity.dto import (
 from control_api.modules.workspaces.dto import (
     CreateInvitationRequestDTO,
     CreateWorkspaceRequestDTO,
+    InvitationAcceptResponseDTO,
+    InvitationHandoffRequestDTO,
+    InvitationHandoffResponseDTO,
+    InvitationPreviewResponseDTO,
     WorkspaceInvitationListResponseDTO,
     WorkspaceInvitationResponseDTO,
     WorkspaceListResponseDTO,
@@ -270,4 +274,65 @@ def test_openapi_workspace_invitations_and_outbox_contracts():
     assert outbox_validator.is_valid(evt_json)
     assert not outbox_validator.is_valid({**evt_json, "proof": "raw-secret"})
     assert not outbox_validator.is_valid({**evt_json, "recipient_email": "alice@example.com"})
+
+
+def test_openapi_invitation_acceptance_schemas():
+    root = Path(__file__).resolve().parents[2]
+    spec = yaml.safe_load(
+        (root / "contracts" / "openapi" / "control-api.openapi.yaml").read_text(encoding="utf-8")
+    )
+
+    sec_schemes = spec["components"]["securitySchemes"]
+    assert "HandoffCookie" in sec_schemes
+    assert sec_schemes["HandoffCookie"]["name"] == "agent_invite_handoff"
+
+    handoff_op = spec["paths"]["/v1/invitations/{invitation_id}/handoff"]["post"]
+    handoff_req_val = Draft202012Validator(
+        handoff_op["requestBody"]["content"]["application/json"]["schema"]
+    )
+    handoff_resp_val = Draft202012Validator(
+        handoff_op["responses"]["201"]["content"]["application/json"]["schema"]
+    )
+    handoff_req = InvitationHandoffRequestDTO(token="opaque-proof-token-123456")
+    assert handoff_req_val.is_valid(handoff_req.model_dump())
+    assert not handoff_req_val.is_valid({"token": "opaque-proof-token-123456", "role": "owner"})
+    handoff_resp = InvitationHandoffResponseDTO(expires_at="2026-11-12T12:10:00Z")
+    assert handoff_resp_val.is_valid(handoff_resp.model_dump())
+
+    preview_op = spec["paths"]["/v1/invitations/{invitation_id}/preview"]["post"]
+    preview_resp_val = Draft202012Validator(
+        preview_op["responses"]["200"]["content"]["application/json"]["schema"]
+    )
+    preview_resp = InvitationPreviewResponseDTO(
+        invitation_id="00000000-0000-0000-0000-000000000101",
+        tenant_id="00000000-0000-0000-0000-000000000001",
+        tenant_slug="vinai",
+        tenant_name="VinAI Enterprise",
+        workspace_id="00000000-0000-0000-0000-000000000010",
+        workspace_slug="alpha-ws",
+        workspace_name="Alpha Workspace",
+        role="developer",
+        status="pending",
+        expires_at="2026-11-15T12:00:00Z",
+        can_accept=True,
+        acceptance_state="ready",
+    )
+    assert preview_resp_val.is_valid(preview_resp.model_dump())
+    assert not preview_resp_val.is_valid({**preview_resp.model_dump(), "proof": "leak"})
+
+    accept_op = spec["paths"]["/v1/invitations/{invitation_id}/accept"]["post"]
+    accept_resp_val = Draft202012Validator(
+        accept_op["responses"]["200"]["content"]["application/json"]["schema"]
+    )
+    accept_resp = InvitationAcceptResponseDTO(
+        invitation_id="00000000-0000-0000-0000-000000000101",
+        tenant_id="00000000-0000-0000-0000-000000000001",
+        workspace_id="00000000-0000-0000-0000-000000000010",
+        workspace_slug="alpha-ws",
+        workspace_name="Alpha Workspace",
+        role="developer",
+        acceptance_state="accepted",
+        redirect_url="/w/00000000-0000-0000-0000-000000000010/agents",
+    )
+    assert accept_resp_val.is_valid(accept_resp.model_dump())
 

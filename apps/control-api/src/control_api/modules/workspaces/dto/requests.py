@@ -117,3 +117,20 @@ class CreateInvitationRequestDTO(BaseModel):
     def validate_and_normalize_email(cls, value: str) -> str:
         return normalize_invitation_email(value)
 
+
+class InvitationHandoffRequestDTO(BaseModel):
+    """Strict input contract for POST /v1/invitations/{invitation_id}/handoff (ADR-020)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(..., min_length=8, max_length=512)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token_shape(cls, value: str) -> str:
+        if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("Invitation token must be a compact non-whitespace opaque token")
+        if len(value) < 8 or len(value) > 512:
+            raise ValueError("Invitation token length is out of bounds")
+        return value
+

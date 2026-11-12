@@ -361,5 +361,87 @@ describe("ControlApiClientV2 Unit Tests", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("invitation handoff, preview, accept and getLoginUrl options preserve security flags", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      calls.push({ url: urlStr, init });
+      if (urlStr.endsWith("/handoff")) {
+        return new Response(JSON.stringify({ expires_at: "2026-11-12T12:00:00Z" }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (urlStr.endsWith("/preview")) {
+        return new Response(
+          JSON.stringify({
+            invitation_id: "11111111-1111-1111-1111-111111111111",
+            tenant_id: "22222222-2222-2222-2222-222222222222",
+            tenant_slug: "vinai",
+            tenant_name: "VinAI",
+            workspace_id: "33333333-3333-3333-3333-333333333333",
+            workspace_slug: "alpha",
+            workspace_name: "Alpha",
+            role: "developer",
+            status: "pending",
+            expires_at: "2026-11-15T12:00:00Z",
+            can_accept: true,
+            acceptance_state: "ready",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/accept")) {
+        return new Response(
+          JSON.stringify({
+            invitation_id: "11111111-1111-1111-1111-111111111111",
+            tenant_id: "22222222-2222-2222-2222-222222222222",
+            workspace_id: "33333333-3333-3333-3333-333333333333",
+            workspace_slug: "alpha",
+            workspace_name: "Alpha",
+            role: "developer",
+            acceptance_state: "accepted",
+            redirect_url: "/w/33333333-3333-3333-3333-333333333333/agents",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ authorization_url: "https://idp.example/auth", state: "st-1" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const handoff = await client.createInvitationHandoff(
+        "11111111-1111-1111-1111-111111111111",
+        { token: "secret-proof-token-value" }
+      );
+      assert.equal(handoff.expires_at, "2026-11-12T12:00:00Z");
+      assert.equal(calls[0]?.init?.cache, "no-store");
+      assert.equal(calls[0]?.init?.referrerPolicy, "no-referrer");
+      assert.equal(calls[0]?.init?.credentials, "same-origin");
+
+      await client.getLoginUrl("/invitations/11111111-1111-1111-1111-111111111111/accept", {
+        invitationId: "11111111-1111-1111-1111-111111111111",
+        reauth: true,
+      });
+      assert.ok(calls[1]?.url.includes("invitation_id=11111111-1111-1111-1111-111111111111"));
+      assert.ok(calls[1]?.url.includes("reauth=true"));
+
+      const preview = await client.previewInvitation("11111111-1111-1111-1111-111111111111");
+      assert.equal(preview.can_accept, true);
+      assert.equal(calls[2]?.init?.body, undefined);
+
+      const accepted = await client.acceptInvitation("11111111-1111-1111-1111-111111111111");
+      assert.equal(accepted.acceptance_state, "accepted");
+      assert.equal(calls[3]?.init?.body, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

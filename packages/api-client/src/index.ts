@@ -172,6 +172,46 @@ export interface WorkspaceInvitationListResponseDTO {
   next_cursor?: string | null;
 }
 
+export interface InvitationHandoffRequestDTO {
+  token: string;
+}
+
+export interface InvitationHandoffResponseDTO {
+  expires_at: string;
+}
+
+export interface InvitationPreviewResponseDTO {
+  invitation_id: string;
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_id: string;
+  workspace_slug: string;
+  workspace_name: string;
+  role: "admin" | "developer" | "operator" | "viewer";
+  status: "pending" | "accepted";
+  expires_at: string;
+  can_accept: boolean;
+  acceptance_state: "ready" | "already_accepted";
+}
+
+export interface InvitationAcceptResponseDTO {
+  invitation_id: string;
+  tenant_id: string;
+  workspace_id: string;
+  workspace_slug: string;
+  workspace_name: string;
+  role: "admin" | "developer" | "operator" | "viewer";
+  acceptance_state: "accepted" | "already_accepted";
+  redirect_url: string;
+}
+
+export interface LoginUrlOptions {
+  invitationId?: string;
+  reauth?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface ListWorkspaceInvitationsOptions {
   limit?: number;
   cursor?: string | null;
@@ -443,8 +483,28 @@ export class ControlApiClientV2 {
   }
 
   // --- Auth & Session API (SPEC-AUTH-001) ---
-  async getLoginUrl(returnTo?: string, signal?: AbortSignal): Promise<LoginInitiateResponse> {
-    const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+  async getLoginUrl(
+    returnTo?: string,
+    signalOrOptions?: AbortSignal | LoginUrlOptions
+  ): Promise<LoginInitiateResponse> {
+    const params = new URLSearchParams();
+    if (returnTo) {
+      params.set("return_to", returnTo);
+    }
+    let signal: AbortSignal | undefined;
+    if (signalOrOptions instanceof AbortSignal) {
+      signal = signalOrOptions;
+    } else if (signalOrOptions) {
+      if (signalOrOptions.invitationId) {
+        params.set("invitation_id", signalOrOptions.invitationId);
+      }
+      if (signalOrOptions.reauth) {
+        params.set("reauth", "true");
+      }
+      signal = signalOrOptions.signal;
+    }
+    const qs = params.toString();
+    const query = qs ? `?${qs}` : "";
     return this.request<LoginInitiateResponse>(`/v1/auth/login${query}`, {
       method: "GET",
       signal,
@@ -576,6 +636,54 @@ export class ControlApiClientV2 {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
       {
         method: "POST",
+        signal,
+      }
+    );
+  }
+
+  // --- Global Invitation Acceptance API (ADR-020 / Step 03-C) ---
+  async createInvitationHandoff(
+    invitationId: string,
+    dto: InvitationHandoffRequestDTO,
+    signal?: AbortSignal
+  ): Promise<InvitationHandoffResponseDTO> {
+    return this.request<InvitationHandoffResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/handoff`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async previewInvitation(
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<InvitationPreviewResponseDTO> {
+    return this.request<InvitationPreviewResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/preview`,
+      {
+        method: "POST",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async acceptInvitation(
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<InvitationAcceptResponseDTO> {
+    return this.request<InvitationAcceptResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/accept`,
+      {
+        method: "POST",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
         signal,
       }
     );

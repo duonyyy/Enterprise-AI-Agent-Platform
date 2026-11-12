@@ -21,6 +21,7 @@ from control_api.modules.identity.models.session import (
     SessionData,
     SessionVerificationStatus,
     StoredSessionState,
+    VerifiedIdentityEvidence,
 )
 from control_api.modules.identity.repositories.session_repository import (
     BaseRevocationStore,
@@ -184,10 +185,18 @@ class SessionManager:
         issuer: str,
         subject: str,
         now: int | None = None,
+        identity_evidence: VerifiedIdentityEvidence | None = None,
     ) -> tuple[SessionData, str]:
         current = now if now is not None else int(time.time())
         session_id = str(uuid4())
         UUID(user_id)
+
+        if identity_evidence is not None and not identity_evidence.matches_session(
+            issuer=issuer,
+            subject=subject,
+            user_id=user_id,
+        ):
+            raise ValueError("Identity evidence does not match authenticated session principal")
 
         idle_timeout = settings.session_idle_timeout_seconds
         absolute_timeout = settings.session_absolute_timeout_seconds
@@ -205,6 +214,7 @@ class SessionManager:
             idle_expires_at=idle_expires_at,
             absolute_expires_at=absolute_expires_at,
             rotation_version=rotation_version,
+            identity_evidence=identity_evidence,
         )
 
         # Sign credential first, then persist authoritative state in store before returning.
@@ -219,6 +229,7 @@ class SessionManager:
             created_at=session.created_at,
             idle_expires_at=session.idle_expires_at,
             absolute_expires_at=session.absolute_expires_at,
+            identity_evidence=identity_evidence,
         )
         self.denylist.create_session_state(state, now=current)
         return session, token
@@ -263,6 +274,7 @@ class SessionManager:
             idle_expires_at=state.idle_expires_at,
             absolute_expires_at=state.absolute_expires_at,
             rotation_version=state.rotation_version,
+            identity_evidence=state.identity_evidence,
         )
 
     @_translate_store_errors
@@ -331,6 +343,7 @@ class SessionManager:
             idle_expires_at=updated_state.idle_expires_at,
             absolute_expires_at=updated_state.absolute_expires_at,
             rotation_version=updated_state.rotation_version,
+            identity_evidence=updated_state.identity_evidence,
         )
         new_token = self._sign_session(new_session)
         return new_session, new_token

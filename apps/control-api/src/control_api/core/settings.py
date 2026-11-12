@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     invitation_proof_encryption_key: SecretStr = Field(default=SecretStr(""))
     invitation_proof_key_id: str = "v1"
     invitation_ttl_hours: int = Field(default=72, ge=1, le=720)
+
+    # Invitation Acceptance & Encrypted Handoff (ADR-020 / Step 03-C)
+    invitation_handoff_encryption_key: SecretStr = Field(default=SecretStr(""))
+    invitation_handoff_key_id: str = "v1"
+    invitation_handoff_ttl_seconds: int = Field(default=600, ge=60, le=900)
+    invitation_identity_freshness_seconds: int = Field(default=900, ge=60, le=3600)
+    invitation_identity_max_future_skew_seconds: int = Field(default=60, ge=0, le=300)
+    invitation_handoff_cookie_name: str = "agent_invite_handoff"
+    invitation_handoff_cookie_secure: bool = False
+    invitation_handoff_cookie_same_site: str = "lax"
+    invitation_handoff_cookie_path: str = "/"
+    invitation_handoff_browser_rate_limit: int = Field(default=5, ge=1, le=100)
+    invitation_handoff_ip_rate_limit: int = Field(default=30, ge=1, le=1000)
+    invitation_handoff_rate_window_seconds: int = Field(default=600, ge=10, le=3600)
+    trusted_proxy_cidrs: tuple[str, ...] = ()
     invitation_resend_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
     invitation_recipient_hourly_limit: int = Field(default=5, ge=1, le=1000)
     invitation_workspace_hourly_limit: int = Field(default=100, ge=1, le=10000)

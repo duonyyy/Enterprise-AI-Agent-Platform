@@ -92,3 +92,45 @@ class WorkspaceInvitationListResponseDTO(BaseModel):
     items: list[WorkspaceInvitationResponseDTO] = Field(default_factory=list)
     next_cursor: str | None = None
 
+
+class InvitationHandoffResponseDTO(BaseModel):
+    """Generic acknowledgement for POST /v1/invitations/{invitation_id}/handoff (ADR-020)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expires_at: str
+
+
+class InvitationPreviewResponseDTO(BaseModel):
+    """Safe verified invitation preview metadata returned by POST /v1/invitations/{invitation_id}/preview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_id: str
+    tenant_id: str
+    tenant_slug: str
+    tenant_name: str
+    workspace_id: str
+    workspace_slug: str
+    workspace_name: str
+    role: Literal["admin", "developer", "operator", "viewer"]
+    status: Literal["pending", "accepted"]
+    expires_at: str
+    can_accept: bool
+    acceptance_state: Literal["ready", "already_accepted"]
+
+
+class InvitationAcceptResponseDTO(BaseModel):
+    """Authoritative response after invitation acceptance commit or same-user replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_id: str
+    tenant_id: str
+    workspace_id: str
+    workspace_slug: str
+    workspace_name: str
+    role: Literal["admin", "developer", "operator", "viewer"]
+    acceptance_state: Literal["accepted", "already_accepted"]
+    redirect_url: str
+

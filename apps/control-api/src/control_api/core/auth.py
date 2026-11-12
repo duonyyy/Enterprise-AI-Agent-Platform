@@ -214,6 +214,7 @@ def _decode_and_verify_jwt(token: str) -> dict[str, Any]:
             "iat": session_data.created_at,
             "idle_exp": session_data.idle_expires_at,
             "exp": session_data.absolute_expires_at,
+            "identity_evidence": session_data.identity_evidence,
         }
 
     # Otherwise, this is a scoped API token (signed by runtime_jwt_secret or jwt_secret_key)
@@ -263,8 +264,10 @@ def verify_csrf_or_origin(request: Request) -> None:
     Direct Bearer-authenticated API calls are exempt because browsers do not attach
     Authorization Bearer headers cross-site.
     """
-    # If no session cookie is sent, request is Bearer-only -> exempt from browser CSRF
-    if not request.cookies.get(settings.session_cookie_name):
+    # If neither session cookie nor handoff cookie is sent, request is Bearer-only -> exempt from browser CSRF
+    has_session_cookie = bool(request.cookies.get(settings.session_cookie_name))
+    has_handoff_cookie = bool(request.cookies.get(settings.invitation_handoff_cookie_name))
+    if not has_session_cookie and not has_handoff_cookie:
         return
 
     sec_fetch_site = request.headers.get("sec-fetch-site")
@@ -274,7 +277,9 @@ def verify_csrf_or_origin(request: Request) -> None:
             detail="Cross-site request rejected for cookie-authenticated session",
         )
 
-    allowed = set(settings.allowed_origins) | set(settings.oidc_redirect_allowlist)
+    allowed = {o.rstrip("/") for o in settings.allowed_origins} | {
+        o.rstrip("/") for o in settings.oidc_redirect_allowlist
+    }
     host = request.headers.get("host", "")
     if host:
         allowed.add(f"http://{host}")
@@ -301,6 +306,62 @@ def verify_csrf_or_origin(request: Request) -> None:
             )
 
 
+def verify_invitation_csrf_or_origin(request: Request) -> None:
+    """Strict Origin/Referer enforcement for browser-bound invitation acceptance endpoints (ADR-020).
+
+    Applies uniformly to BOTH unauthenticated pre-auth handoffs and authenticated
+    preview/accept endpoints without delegating trust to arbitrary Host headers or
+    allowing missing Origin/Referer on browser state transitions.
+    """
+    sec_fetch_site = request.headers.get("sec-fetch-site")
+    if sec_fetch_site == "cross-site":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "csrf_origin_rejected",
+                "message": "Cross-site invitation request rejected.",
+            },
+        )
+
+    allowed = {o.rstrip("/") for o in settings.allowed_origins} | {
+        settings.invitation_public_app_origin.rstrip("/")
+    }
+    origin = request.headers.get("origin")
+    if origin is not None:
+        parsed_origin = origin.strip().rstrip("/")
+        if not parsed_origin or parsed_origin.lower() == "null" or parsed_origin not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "csrf_origin_rejected",
+                    "message": "Request Origin is not allowed for invitation acceptance.",
+                },
+            )
+        return
+
+    referer = request.headers.get("referer")
+    if referer:
+        parsed_ref = urlparse(referer)
+        ref_origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
+        if not parsed_ref.scheme or not parsed_ref.netloc or ref_origin not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "csrf_origin_rejected",
+                    "message": "Request Referer origin is not allowed for invitation acceptance.",
+                },
+            )
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "csrf_origin_rejected",
+            "message": "Trusted Origin or Referer header is required for invitation requests.",
+        },
+    )
+
+
 async def get_current_authenticated_user(
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
@@ -322,6 +383,7 @@ async def get_current_authenticated_user(
                 idle_expires_at=int(payload["idle_exp"]),
                 absolute_expires_at=int(payload["exp"]),
                 rotation_version=int(payload["ver"]),
+                identity_evidence=payload.get("identity_evidence"),
             )
             return AuthenticatedUserContext(
                 user_id=user_id,

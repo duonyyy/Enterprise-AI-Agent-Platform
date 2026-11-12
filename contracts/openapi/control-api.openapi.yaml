@@ -11,6 +11,18 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: redirect
+          in: query
+          required: false
+          schema: { type: boolean }
+        - name: invitation_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: reauth
+          in: query
+          required: false
+          schema: { type: boolean }
       responses:
         '200':
           description: Authorization transaction initiated
@@ -597,6 +609,217 @@ paths:
           content:
             application/json:
               schema: *invitation_error_response
+  /v1/invitations/{invitation_id}/handoff:
+    post:
+      summary: Store an encrypted browser-bound invitation proof handoff in Redis
+      parameters:
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: &invitation_handoff_request
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  minLength: 8
+                  maxLength: 512
+      responses:
+        '201':
+          description: Encrypted handoff persisted and HttpOnly browser-binding cookie issued
+          content:
+            application/json:
+              schema: &invitation_handoff_response
+                type: object
+                additionalProperties: false
+                required: [expires_at]
+                properties:
+                  expires_at: { type: string, format: date-time }
+        '403':
+          description: CSRF/Origin verification failed
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Malformed invitation ID or token payload (token input redacted)
+        '429':
+          description: Handoff rate limit exceeded
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Invitations disabled, misconfigured, or handoff store unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/invitations/{invitation_id}/preview:
+    post:
+      summary: Preview an invitation after verifying fresh identity and browser-bound handoff
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: {}
+      responses:
+        '200':
+          description: Verified invitation preview metadata (non-consuming)
+          content:
+            application/json:
+              schema: &invitation_preview_response
+                type: object
+                additionalProperties: false
+                required:
+                  - invitation_id
+                  - tenant_id
+                  - tenant_slug
+                  - tenant_name
+                  - workspace_id
+                  - workspace_slug
+                  - workspace_name
+                  - role
+                  - status
+                  - expires_at
+                  - can_accept
+                  - acceptance_state
+                properties:
+                  invitation_id: { type: string, format: uuid }
+                  tenant_id: { type: string, format: uuid }
+                  tenant_slug: { type: string }
+                  tenant_name: { type: string }
+                  workspace_id: { type: string, format: uuid }
+                  workspace_slug: { type: string }
+                  workspace_name: { type: string }
+                  role: { type: string, enum: [admin, developer, operator, viewer] }
+                  status: { type: string, enum: [pending, accepted] }
+                  expires_at: { type: string, format: date-time }
+                  can_accept: { type: boolean }
+                  acceptance_state: { type: string, enum: [ready, already_accepted] }
+        '401':
+          description: Missing, invalid, expired, or revoked application session
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '403':
+          description: Wrong credential type, stale/missing verified identity, CSRF failure, or recipient mismatch
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Invitation or handoff context not found, expired, or invalid
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Membership conflict, inviter authority lost, workspace inactive, or accepted by another user
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '410':
+          description: Invitation expired or revoked (returned only after verified recipient proof check)
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Invalid invitation ID or non-empty body
+        '503':
+          description: Authoritative session, handoff store, or database unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/invitations/{invitation_id}/accept:
+    post:
+      summary: Atomically accept a verified workspace invitation and activate membership
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: {}
+      responses:
+        '200':
+          description: Membership activated or safely reconciled as already accepted
+          content:
+            application/json:
+              schema: &invitation_accept_response
+                type: object
+                additionalProperties: false
+                required:
+                  - invitation_id
+                  - tenant_id
+                  - workspace_id
+                  - workspace_slug
+                  - workspace_name
+                  - role
+                  - acceptance_state
+                  - redirect_url
+                properties:
+                  invitation_id: { type: string, format: uuid }
+                  tenant_id: { type: string, format: uuid }
+                  workspace_id: { type: string, format: uuid }
+                  workspace_slug: { type: string }
+                  workspace_name: { type: string }
+                  role: { type: string, enum: [admin, developer, operator, viewer] }
+                  acceptance_state: { type: string, enum: [accepted, already_accepted] }
+                  redirect_url: { type: string }
+        '401':
+          description: Missing, invalid, expired, or revoked application session
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '403':
+          description: Wrong credential type, stale/missing verified identity, CSRF failure, or recipient mismatch
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Invitation or handoff context not found, expired, or invalid
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Membership conflict, inviter authority lost, workspace inactive, or accepted by another user
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '410':
+          description: Invitation expired or revoked (returned only after verified recipient proof check)
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Invalid invitation ID or unexpected request body
+        '503':
+          description: Authoritative session, handoff store, or database unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
   /v1/workspaces/{workspace_id}/agents:
     get:
       summary: List agents
@@ -670,3 +893,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    HandoffCookie:
+      type: apiKey
+      in: cookie
+      name: agent_invite_handoff
