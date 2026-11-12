@@ -11,12 +11,16 @@ from control_api.modules.identity.dto import (
     WorkspaceMembershipDTO,
 )
 from control_api.modules.workspaces.dto import (
+    CreateInvitationRequestDTO,
     CreateWorkspaceRequestDTO,
+    WorkspaceInvitationListResponseDTO,
+    WorkspaceInvitationResponseDTO,
     WorkspaceListResponseDTO,
     WorkspaceResponseDTO,
     WorkspaceSummaryDTO,
 )
 from jsonschema import Draft202012Validator
+from platform_common.invitations import InvitationDeliveryRequestedV1
 
 
 def test_openapi_specs_existence():
@@ -179,4 +183,91 @@ def test_openapi_workspaces_bootstrap_and_discovery_contracts():
         created_at="2026-11-12T00:00:00Z",
     )
     assert validator_detail_resp.is_valid(dto_detail.model_dump())
+
+
+def test_openapi_workspace_invitations_and_outbox_contracts():
+    """Verify invitation OpenAPI 3.1 endpoints, error envelopes, and outbox JSON Schema."""
+    import json
+
+    root = Path(__file__).resolve().parents[2]
+    spec_path = root / "contracts" / "openapi" / "control-api.openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    inv_col = spec["paths"]["/v1/workspaces/{workspace_id}/invitations"]
+    inv_resend = spec["paths"]["/v1/workspaces/{workspace_id}/invitations/{invitation_id}/resend"]
+    inv_revoke = spec["paths"]["/v1/workspaces/{workspace_id}/invitations/{invitation_id}/revoke"]
+
+    req_validator = Draft202012Validator(
+        inv_col["post"]["requestBody"]["content"]["application/json"]["schema"]
+    )
+    create_resp_validator = Draft202012Validator(
+        inv_col["post"]["responses"]["201"]["content"]["application/json"]["schema"]
+    )
+    list_resp_validator = Draft202012Validator(
+        inv_col["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    )
+    resend_resp_validator = Draft202012Validator(
+        inv_resend["post"]["responses"]["202"]["content"]["application/json"]["schema"]
+    )
+    revoke_resp_validator = Draft202012Validator(
+        inv_revoke["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+    )
+    err_validator = Draft202012Validator(
+        inv_col["post"]["responses"]["409"]["content"]["application/json"]["schema"]
+    )
+
+    dto_req = CreateInvitationRequestDTO(email="Invitee+Tag@Example.COM", role="developer")
+    assert req_validator.is_valid(dto_req.model_dump())
+    assert not req_validator.is_valid({"email": "x@example.com", "role": "owner"})
+    assert not req_validator.is_valid({"email": "x@example.com", "role": "viewer", "extra": 1})
+
+    dto_inv = WorkspaceInvitationResponseDTO(
+        invitation_id="00000000-0000-0000-0000-000000000101",
+        tenant_id="00000000-0000-0000-0000-000000000001",
+        workspace_id="00000000-0000-0000-0000-000000000010",
+        recipient_email_normalized="invitee+tag@example.com",
+        recipient_issuer="http://localhost:8080/realms/enterprise",
+        role="developer",
+        status="pending",
+        generation=1,
+        delivery_state="queued",
+        delivery_error_code=None,
+        created_by_user_id="00000000-0000-0000-0000-000000000099",
+        delivery_requested_by_user_id="00000000-0000-0000-0000-000000000099",
+        revoked_by_user_id=None,
+        accepted_by_user_id=None,
+        expires_at="2026-11-15T00:00:00Z",
+        created_at="2026-11-12T00:00:00Z",
+        updated_at="2026-11-12T00:00:00Z",
+        provider_accepted_at=None,
+        revoked_at=None,
+        accepted_at=None,
+        audit_event_id="00000000-0000-0000-0000-000000000201",
+        outbox_event_id="00000000-0000-0000-0000-000000000301",
+    )
+    dumped = dto_inv.model_dump()
+    assert create_resp_validator.is_valid(dumped)
+    assert resend_resp_validator.is_valid(dumped)
+    assert revoke_resp_validator.is_valid(dumped)
+    assert not create_resp_validator.is_valid({**dumped, "proof": "secret"})
+
+    dto_list = WorkspaceInvitationListResponseDTO(items=[dto_inv], next_cursor="opaque-cursor")
+    assert list_resp_validator.is_valid(dto_list.model_dump())
+    assert err_validator.is_valid({"detail": {"code": "pending_invitation_conflict", "message": "Duplicate"}})
+
+    schema_path = root / "contracts" / "jsonschema" / "workspace-invitation-delivery-requested.v1.schema.json"
+    outbox_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    outbox_validator = Draft202012Validator(outbox_schema)
+    evt = InvitationDeliveryRequestedV1(
+        invitation_id="00000000-0000-0000-0000-000000000101",
+        generation=1,
+        tenant_id="00000000-0000-0000-0000-000000000001",
+        workspace_id="00000000-0000-0000-0000-000000000010",
+        delivery_requested_by_user_id="00000000-0000-0000-0000-000000000099",
+        requested_at="2026-11-12T00:00:00Z",
+    )
+    evt_json = evt.model_dump(mode="json")
+    assert outbox_validator.is_valid(evt_json)
+    assert not outbox_validator.is_valid({**evt_json, "proof": "raw-secret"})
+    assert not outbox_validator.is_valid({**evt_json, "recipient_email": "alice@example.com"})
 

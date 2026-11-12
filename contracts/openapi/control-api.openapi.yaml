@@ -343,6 +343,260 @@ paths:
           description: Workspace access denied or active membership required
         '503':
           description: Authorization or workspace store temporarily unavailable
+  /v1/workspaces/{workspace_id}/invitations:
+    post:
+      summary: Create a workspace invitation and enqueue delivery
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, role]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  minLength: 3
+                  maxLength: 254
+                role:
+                  type: string
+                  enum: [admin, developer, operator, viewer]
+      responses:
+        '201':
+          description: Invitation created and delivery queued
+          content:
+            application/json:
+              schema: &workspace_invitation_dto
+                type: object
+                additionalProperties: false
+                required:
+                  - invitation_id
+                  - tenant_id
+                  - workspace_id
+                  - recipient_email_normalized
+                  - recipient_issuer
+                  - role
+                  - status
+                  - generation
+                  - delivery_state
+                  - created_by_user_id
+                  - delivery_requested_by_user_id
+                  - expires_at
+                  - created_at
+                  - updated_at
+                properties:
+                  invitation_id: { type: string, format: uuid }
+                  tenant_id: { type: string, format: uuid }
+                  workspace_id: { type: string, format: uuid }
+                  recipient_email_normalized: { type: string, minLength: 3, maxLength: 254 }
+                  recipient_issuer: { type: string, minLength: 1 }
+                  role: { type: string, enum: [admin, developer, operator, viewer] }
+                  status: { type: string, enum: [pending, accepted, revoked, expired] }
+                  generation: { type: integer, minimum: 1 }
+                  delivery_state:
+                    type: string
+                    enum: [queued, sending, provider_accepted, failed, unknown, cancelled]
+                  delivery_error_code: { type: [string, "null"] }
+                  created_by_user_id: { type: string, format: uuid }
+                  delivery_requested_by_user_id: { type: string, format: uuid }
+                  revoked_by_user_id: { type: [string, "null"], format: uuid }
+                  accepted_by_user_id: { type: [string, "null"], format: uuid }
+                  expires_at: { type: string, format: date-time }
+                  created_at: { type: string, format: date-time }
+                  updated_at: { type: string, format: date-time }
+                  provider_accepted_at: { type: [string, "null"], format: date-time }
+                  revoked_at: { type: [string, "null"], format: date-time }
+                  accepted_at: { type: [string, "null"], format: date-time }
+                  audit_event_id: { type: [string, "null"], format: uuid }
+                  outbox_event_id: { type: [string, "null"], format: uuid }
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session, CSRF/Origin check, or owner/admin role required
+          content:
+            application/json:
+              schema: &invitation_error_response
+                type: object
+                additionalProperties: false
+                required: [detail]
+                properties:
+                  detail:
+                    type: object
+                    additionalProperties: false
+                    required: [code, message]
+                    properties:
+                      code: { type: string }
+                      message: { type: string }
+        '409':
+          description: Membership or pending invitation conflict
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Invalid email, unsupported role, or malformed workspace_id
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '429':
+          description: Invitation rate limit exceeded
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Invitations disabled or misconfigured
+          content:
+            application/json:
+              schema: *invitation_error_response
+    get:
+      summary: List workspace invitations with cursor pagination
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, maxLength: 256 }
+      responses:
+        '200':
+          description: Workspace invitations page
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: *workspace_invitation_dto
+                  next_cursor: { type: [string, "null"] }
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session and owner/admin role required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '422':
+          description: Invalid pagination cursor or parameters
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Invitation store temporarily unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/workspaces/{workspace_id}/invitations/{invitation_id}/resend:
+    post:
+      summary: Rotate invitation proof generation and queue redelivery
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '202':
+          description: New invitation generation queued for delivery
+          content:
+            application/json:
+              schema: *workspace_invitation_dto
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session, CSRF/Origin check, or owner/admin privilege required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Invitation not found in workspace
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Invitation is not pending/unexpired or target user already holds membership record
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '429':
+          description: Resend cooldown or rate limit exceeded
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Invitations disabled or misconfigured
+          content:
+            application/json:
+              schema: *invitation_error_response
+  /v1/workspaces/{workspace_id}/invitations/{invitation_id}/revoke:
+    post:
+      summary: Revoke a pending workspace invitation
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Invitation revoked, already revoked, or expired
+          content:
+            application/json:
+              schema: *workspace_invitation_dto
+        '401':
+          description: Missing, invalid, or expired application session
+        '403':
+          description: Active application session, CSRF/Origin check, or owner/admin privilege required
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '404':
+          description: Invitation not found in workspace
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '409':
+          description: Accepted invitation cannot be revoked
+          content:
+            application/json:
+              schema: *invitation_error_response
+        '503':
+          description: Invitation store temporarily unavailable
+          content:
+            application/json:
+              schema: *invitation_error_response
   /v1/workspaces/{workspace_id}/agents:
     get:
       summary: List agents

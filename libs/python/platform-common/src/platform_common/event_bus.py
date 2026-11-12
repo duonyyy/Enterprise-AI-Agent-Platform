@@ -11,6 +11,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -74,57 +75,193 @@ class PostgresOutboxEventBus(EventBus):
             raise ValueError("Outbox partition key must be '<tenant UUID>:<workspace UUID>'") from exc
 
     @staticmethod
-    def _aggregate_id(payload: dict[str, Any]) -> str:
+    def _aggregate_id(payload: dict[str, Any], explicit_aggregate_id: str | UUID | None = None) -> str:
+        if explicit_aggregate_id is not None:
+            try:
+                return str(UUID(str(explicit_aggregate_id)))
+            except ValueError as exc:
+                raise ValueError("Outbox aggregate_id must be a UUID") from exc
         value = payload.get("aggregate_id", payload.get("aggregateId"))
         if not isinstance(value, str):
-            raise ValueError("Outbox payload requires aggregate_id")
+            raise TypeError("Outbox payload requires string aggregate_id")
         try:
             return str(UUID(value))
         except ValueError as exc:
             raise ValueError("Outbox aggregate_id must be a UUID") from exc
 
-    async def publish(
-        self, topic: str, key: str, payload: dict[str, Any], headers: dict[str, str] | None = None
-    ) -> bool:
-        tenant_id, workspace_id = self._parse_partition_key(key)
-        aggregate_id = self._aggregate_id(payload)
+    @classmethod
+    def _prepare_outbox_entry(
+        cls,
+        topic: str,
+        key: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        *,
+        aggregate_type: str | None = None,
+        aggregate_id: str | UUID | None = None,
+        event_id: str | UUID | None = None,
+    ) -> tuple[str, str, str, str, str, str, dict[str, Any]]:
+        tenant_id, workspace_id = cls._parse_partition_key(key)
+        resolved_aggregate_id = cls._aggregate_id(payload, aggregate_id)
         event_type = payload.get("type")
         if not isinstance(event_type, str) or not event_type:
             raise ValueError("Outbox payload requires a non-empty type")
+        resolved_event_id = str(UUID(str(event_id))) if event_id is not None else str(payload.get("id") or uuid4())
+        resolved_aggregate_type = aggregate_type or topic
         envelope = {
-            "id": str(payload.get("id") or uuid4()),
+            "id": resolved_event_id,
             "topic": topic,
             "partition_key": key,
             "headers": headers or {},
             "data": payload,
         }
-        async with self._session_factory() as session:
-            async with session.begin():
-                await session.execute(
-                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
-                    {"tenant_id": tenant_id},
-                )
-                await session.execute(
-                    text("SELECT set_config('app.workspace_id', :workspace_id, true)"),
-                    {"workspace_id": workspace_id},
-                )
-                await session.execute(
-                    text("""
-                        INSERT INTO integration.outbox_events
-                            (tenant_id, workspace_id, aggregate_type, aggregate_id, event_type, payload, state)
-                        VALUES
-                            (CAST(:tenant_id AS uuid), CAST(:workspace_id AS uuid), :aggregate_type,
-                             CAST(:aggregate_id AS uuid), :event_type, CAST(:payload AS jsonb), 'pending')
-                    """),
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "aggregate_type": topic,
-                        "aggregate_id": aggregate_id,
-                        "event_type": event_type,
-                        "payload": json.dumps(envelope, separators=(",", ":")),
-                    },
-                )
+        return (
+            resolved_event_id,
+            tenant_id,
+            workspace_id,
+            resolved_aggregate_type,
+            resolved_aggregate_id,
+            event_type,
+            envelope,
+        )
+
+    @staticmethod
+    async def _insert_outbox_row(
+        session: AsyncSession,
+        *,
+        event_id: str,
+        tenant_id: str,
+        workspace_id: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        event_type: str,
+        envelope: dict[str, Any],
+        available_at: datetime | None = None,
+        set_rls: bool = True,
+    ) -> str:
+        if set_rls:
+            await session.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": tenant_id},
+            )
+            await session.execute(
+                text("SELECT set_config('app.workspace_id', :workspace_id, true)"),
+                {"workspace_id": workspace_id},
+            )
+        if available_at is not None:
+            await session.execute(
+                text("""
+                    INSERT INTO integration.outbox_events
+                        (tenant_id, workspace_id, id, aggregate_type, aggregate_id, event_type, payload, state, available_at)
+                    VALUES
+                        (CAST(:tenant_id AS uuid), CAST(:workspace_id AS uuid), CAST(:id AS uuid),
+                         :aggregate_type, CAST(:aggregate_id AS uuid), :event_type, CAST(:payload AS jsonb),
+                         'pending', :available_at)
+                """),
+                {
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
+                    "id": event_id,
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                    "event_type": event_type,
+                    "payload": json.dumps(envelope, separators=(",", ":")),
+                    "available_at": available_at,
+                },
+            )
+        else:
+            await session.execute(
+                text("""
+                    INSERT INTO integration.outbox_events
+                        (tenant_id, workspace_id, id, aggregate_type, aggregate_id, event_type, payload, state)
+                    VALUES
+                        (CAST(:tenant_id AS uuid), CAST(:workspace_id AS uuid), CAST(:id AS uuid),
+                         :aggregate_type, CAST(:aggregate_id AS uuid), :event_type, CAST(:payload AS jsonb),
+                         'pending')
+                """),
+                {
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
+                    "id": event_id,
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                    "event_type": event_type,
+                    "payload": json.dumps(envelope, separators=(",", ":")),
+                },
+            )
+        return event_id
+
+    async def publish_in_transaction(
+        self,
+        session: AsyncSession,
+        topic: str,
+        key: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        *,
+        aggregate_type: str | None = None,
+        aggregate_id: str | UUID | None = None,
+        event_id: str | UUID | None = None,
+        available_at: datetime | None = None,
+        set_rls: bool = False,
+    ) -> str:
+        """Persist an outbox event within an active caller transaction."""
+        prepared = self._prepare_outbox_entry(
+            topic,
+            key,
+            payload,
+            headers,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_id=event_id,
+        )
+        (
+            resolved_event_id,
+            tenant_id,
+            workspace_id,
+            resolved_aggregate_type,
+            resolved_aggregate_id,
+            event_type,
+            envelope,
+        ) = prepared
+        return await self._insert_outbox_row(
+            session,
+            event_id=resolved_event_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            aggregate_type=resolved_aggregate_type,
+            aggregate_id=resolved_aggregate_id,
+            event_type=event_type,
+            envelope=envelope,
+            available_at=available_at,
+            set_rls=set_rls,
+        )
+
+    async def publish(
+        self, topic: str, key: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> bool:
+        prepared = self._prepare_outbox_entry(topic, key, payload, headers)
+        (
+            event_id,
+            tenant_id,
+            workspace_id,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            envelope,
+        ) = prepared
+        async with self._session_factory() as session, session.begin():
+            await self._insert_outbox_row(
+                session,
+                event_id=event_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                event_type=event_type,
+                envelope=envelope,
+                set_rls=True,
+            )
         return True
 
     async def close(self) -> None:

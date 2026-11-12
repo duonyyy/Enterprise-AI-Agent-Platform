@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -527,3 +527,44 @@ async def _verify_membership_and_build_principal(
         roles=[role],
         permissions=effective_permissions,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionWorkspaceContext:
+    """Verified active application session + active workspace membership context."""
+
+    principal: AuthenticatedPrincipal
+    session_user: AuthenticatedUserContext
+
+
+async def get_current_session_workspace_context(
+    workspace_id: str,
+    auth_user: Annotated[AuthenticatedUserContext, Depends(get_current_authenticated_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SessionWorkspaceContext:
+    """Require an active application session (cookie or session Bearer JWT) and active membership."""
+    if auth_user.session_data is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "active_session_required",
+                "message": "Workspace invitations require an active application session",
+            },
+        )
+    try:
+        normalized_workspace_id = str(UUID(workspace_id))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "invalid_workspace_id",
+                "message": "workspace_id must be a valid UUID",
+            },
+        ) from exc
+
+    principal = await _resolve_principal_from_user_id(
+        session=session,
+        user_id=auth_user.user_id,
+        workspace_id=normalized_workspace_id,
+    )
+    return SessionWorkspaceContext(principal=principal, session_user=auth_user)

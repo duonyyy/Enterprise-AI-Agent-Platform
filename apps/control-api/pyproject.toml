@@ -15,6 +15,7 @@ dependencies = [
     "platform-common",
     "agent-contracts",
     "pyjwt[crypto]==2.15.1",
+    "cryptography>=44.0.0",
 ]
 
 [build-system]

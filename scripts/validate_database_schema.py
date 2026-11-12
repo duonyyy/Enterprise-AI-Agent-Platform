@@ -19,7 +19,10 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0002_fail_closed_rls.sql",
     "0003_restore_workspaces_rls.sql",
     "0004_identity_discovery_projection.sql",
+    "0005_workspace_invitations.sql",
 )
+
+APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
 
 # Pin the reviewed authored program, not its database effects. Whitespace and
 # comments outside quoted bodies are ignored; PL/pgSQL bodies remain opaque.
@@ -665,6 +668,101 @@ def _validate_identity_projection_sql(sql: str) -> list[str]:
     return errors
 
 
+def _validate_workspace_invitations_sql(sql: str) -> list[str]:
+    """Validate ADR-019 / 03-B delta migration 0005_workspace_invitations.sql."""
+    errors: list[str] = []
+    executable, _ = _sql_structure(sql)
+
+    created_tables = {
+        name.lower()
+        for name in re.findall(
+            r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)",
+            executable,
+            re.IGNORECASE,
+        )
+    }
+    if re.search(r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?![a-z_][a-z0-9_]*\.)[a-z_][a-z0-9_]*", executable, re.IGNORECASE):
+        errors.append("0005_workspace_invitations.sql must not create unqualified tables")
+    if created_tables != APPROVED_DELTA_TABLES:
+        errors.append(
+            "0005_workspace_invitations.sql must create only the approved ADR-019 table "
+            f"{sorted(APPROVED_DELTA_TABLES)}, got {sorted(created_tables)}"
+        )
+
+    if len(CANONICAL_TABLES) + len(created_tables) != 57:
+        errors.append(
+            "Total domain tables (baseline 56 + 0005 delta) must equal 57"
+        )
+
+    if "DROP TABLE" in executable.upper():
+        errors.append("0005_workspace_invitations.sql must not contain DROP TABLE")
+
+    if not re.search(
+        r"FOREIGN\s+KEY\s*\(\s*tenant_id\s*,\s*workspace_id\s*\)\s*REFERENCES\s+iam\.workspaces\s*\(\s*tenant_id\s*,\s*id\s*\)",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0005_workspace_invitations.sql must declare composite FK "
+            "(tenant_id, workspace_id) REFERENCES iam.workspaces(tenant_id, id)"
+        )
+
+    if not re.search(
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*id\s*\)",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0005_workspace_invitations.sql must declare UNIQUE (tenant_id, workspace_id, id)"
+        )
+
+    if "iam.workspace_invitations" not in set(ENABLE_RLS_RE.findall(executable)):
+        errors.append("0005_workspace_invitations.sql must ENABLE ROW LEVEL SECURITY on iam.workspace_invitations")
+
+    if "iam.workspace_invitations" not in set(FORCE_RLS_RE.findall(executable)):
+        errors.append("0005_workspace_invitations.sql must FORCE ROW LEVEL SECURITY on iam.workspace_invitations")
+
+    policy_match = re.search(
+        r"CREATE\s+POLICY\s+tenant_isolation\s+ON\s+iam\.workspace_invitations\b(.*?);",
+        executable,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if policy_match is None:
+        errors.append(
+            "0005_workspace_invitations.sql must declare CREATE POLICY tenant_isolation ON iam.workspace_invitations"
+        )
+    else:
+        policy_stmt = policy_match.group(1)
+        if "IS NULL" in policy_stmt.upper():
+            errors.append(
+                "0005_workspace_invitations.sql tenant_isolation policy must be fail-closed without IS NULL"
+            )
+        if not re.search(r"tenant_id\s*=.*workspace_id\s*=", policy_stmt, re.IGNORECASE | re.DOTALL):
+            errors.append(
+                "0005_workspace_invitations.sql tenant_isolation policy must bind both tenant_id and workspace_id"
+            )
+
+    if not re.search(
+        r"REVOKE\s+ALL\s+ON\s+TABLE\s+iam\.workspace_invitations\s+FROM\s+PUBLIC\s*;",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0005_workspace_invitations.sql must REVOKE ALL ON TABLE iam.workspace_invitations FROM PUBLIC"
+        )
+
+    if not re.search(
+        r"GRANT\s+SELECT\s*,\s*INSERT\s*,\s*UPDATE\s+ON\s+TABLE\s+iam\.workspace_invitations\s+TO\s+platform_app\s*;",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0005_workspace_invitations.sql must GRANT SELECT, INSERT, UPDATE ON TABLE iam.workspace_invitations TO platform_app"
+        )
+
+    return errors
+
+
 def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     """Validate the canonical SQL migration directory and return a list of errors."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -688,13 +786,18 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     )
     errors.extend(_validate_identity_projection_sql(projection_sql))
 
+    invitations_sql = (target_dir / "0005_workspace_invitations.sql").read_text(
+        encoding="utf-8-sig"
+    )
+    errors.extend(_validate_workspace_invitations_sql(invitations_sql))
+
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for static database schema validation."""
     parser = argparse.ArgumentParser(
-        description="Validate static DB-56 PostgreSQL schema and migration invariants."
+        description="Validate static DB-56 baseline + approved ADR-019 delta PostgreSQL schema invariants."
     )
     parser.add_argument(
         "--migrations-dir",
@@ -711,8 +814,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 4 ordered migrations, 7 schemas, 56 canonical tables, "
-        "recognized FK/UNIQUE declarations, 55 baseline RLS declarations, "
+        "PASS static checks: 5 ordered migrations, 7 schemas, 56 baseline + 1 delta = 57 canonical tables, "
+        "recognized FK/UNIQUE declarations, 55 baseline + 1 delta = 56 RLS declarations, "
         "10 immutable trigger declarations + 1 document guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
         "reviewed 0004 content fingerprint."
@@ -722,6 +825,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections (ADR-018 / D3-A)."
+    )
+    print(
+        "0005_workspace_invitations.sql adds iam.workspace_invitations with FORCE ROW LEVEL SECURITY (ADR-019 / 03-B)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

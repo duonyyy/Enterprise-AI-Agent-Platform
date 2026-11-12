@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Literal
 from uuid import UUID
 
+from platform_common.invitations import normalize_invitation_email
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 WORKSPACE_SLUG_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
@@ -101,4 +102,18 @@ class CreateWorkspaceRequestDTO(BaseModel):
                 "(for operator tenant bootstrap) must be provided"
             )
         return self
+
+
+class CreateInvitationRequestDTO(BaseModel):
+    """Strict input contract for POST /v1/workspaces/{workspace_id}/invitations (ADR-019)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(..., min_length=3, max_length=254)
+    role: Literal["admin", "developer", "operator", "viewer"]
+
+    @field_validator("email")
+    @classmethod
+    def validate_and_normalize_email(cls, value: str) -> str:
+        return normalize_invitation_email(value)
 

@@ -266,5 +266,100 @@ describe("ControlApiClientV2 Unit Tests", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("workspace invitations methods decode payloads and {code, message} error details", async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    const baseInv = {
+      invitation_id: "00000000-0000-0000-0000-000000000101",
+      tenant_id: "00000000-0000-0000-0000-000000000001",
+      workspace_id: "00000000-0000-0000-0000-000000000010",
+      recipient_email_normalized: "invitee@example.com",
+      recipient_issuer: "http://localhost:8080/realms/enterprise",
+      role: "developer",
+      status: "pending",
+      generation: 1,
+      delivery_state: "queued",
+      delivery_error_code: null,
+      created_by_user_id: "00000000-0000-0000-0000-000000000099",
+      delivery_requested_by_user_id: "00000000-0000-0000-0000-000000000099",
+      revoked_by_user_id: null,
+      accepted_by_user_id: null,
+      expires_at: "2026-11-15T00:00:00Z",
+      created_at: "2026-11-12T00:00:00Z",
+      updated_at: "2026-11-12T00:00:00Z",
+      provider_accepted_at: null,
+      revoked_at: null,
+      accepted_at: null,
+      audit_event_id: "00000000-0000-0000-0000-000000000201",
+      outbox_event_id: "00000000-0000-0000-0000-000000000301",
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const method = init?.method || "GET";
+      calls.push({ url: urlStr, method, body: typeof init?.body === "string" ? init.body : undefined });
+
+      if (urlStr.endsWith("/invitations") && method === "POST") {
+        return new Response(JSON.stringify(baseInv), { status: 201 });
+      }
+      if (urlStr.includes("/invitations?limit=10&cursor=cur-1") && method === "GET") {
+        return new Response(JSON.stringify({ items: [baseInv], next_cursor: null }), { status: 200 });
+      }
+      if (urlStr.endsWith("/resend") && method === "POST") {
+        return new Response(
+          JSON.stringify({ detail: { code: "resend_cooldown_active", message: "Please wait" } }),
+          { status: 429, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (urlStr.endsWith("/revoke") && method === "POST") {
+        return new Response(JSON.stringify({ ...baseInv, status: "revoked", delivery_state: "cancelled" }), {
+          status: 200,
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const created = await client.createWorkspaceInvitation("00000000-0000-0000-0000-000000000010", {
+        email: "invitee@example.com",
+        role: "developer",
+      });
+      assert.equal(created.generation, 1);
+      assert.equal(created.delivery_state, "queued");
+
+      const page = await client.listWorkspaceInvitations("00000000-0000-0000-0000-000000000010", {
+        limit: 10,
+        cursor: "cur-1",
+      });
+      assert.equal(page.items.length, 1);
+      assert.equal(page.next_cursor, null);
+
+      await assert.rejects(
+        () =>
+          client.resendWorkspaceInvitation(
+            "00000000-0000-0000-0000-000000000010",
+            "00000000-0000-0000-0000-000000000101"
+          ),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiClientError);
+          assert.equal(err.isRateLimited, true);
+          assert.equal(err.errorCode, "resend_cooldown_active");
+          assert.equal(err.errorMessage, "Please wait");
+          return true;
+        }
+      );
+
+      const revoked = await client.revokeWorkspaceInvitation(
+        "00000000-0000-0000-0000-000000000010",
+        "00000000-0000-0000-0000-000000000101"
+      );
+      assert.equal(revoked.status, "revoked");
+      assert.equal(calls.length, 4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

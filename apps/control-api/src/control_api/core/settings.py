@@ -1,7 +1,8 @@
-from typing import Any, Literal
+import json
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -35,12 +36,14 @@ class Settings(BaseSettings):
     oidc_issuer: str = "http://localhost:8080/realms/enterprise"
     oidc_client_id: str = "enterprise-studio"
     # Additional ID Token audiences require explicit trust, as well as matching azp.
-    oidc_additional_trusted_audiences: list[str] = Field(default_factory=list, max_length=64)
+    oidc_additional_trusted_audiences: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, max_length=64
+    )
     oidc_client_secret: SecretStr = Field(
         default=SecretStr("enterprise-studio-client-secret-dev-default-32ch")
     )
     oidc_redirect_uri: str = "http://localhost:3000/v1/auth/callback"
-    oidc_redirect_allowlist: list[str] = Field(
+    oidc_redirect_allowlist: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
@@ -48,7 +51,7 @@ class Settings(BaseSettings):
             "http://127.0.0.1:8000",
         ]
     )
-    allowed_origins: list[str] = Field(
+    allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
@@ -72,7 +75,19 @@ class Settings(BaseSettings):
 
     # Workspace & Tenant Bootstrap Authority Allowlist (SPEC-WORKSPACE-001 / WS-D01)
     # Entries may be "<issuer>|<subject>" or "<subject>" (bound to oidc_issuer).
-    bootstrap_operator_subjects: list[str] = Field(default_factory=list, max_length=64)
+    bootstrap_operator_subjects: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, max_length=64
+    )
+
+    # Workspace Invitations & Proof Encryption (ADR-019 / Step 03-B)
+    invitations_enabled: bool = False
+    invitation_public_app_origin: str = "http://localhost:3000"
+    invitation_proof_encryption_key: SecretStr = Field(default=SecretStr(""))
+    invitation_proof_key_id: str = "v1"
+    invitation_ttl_hours: int = Field(default=72, ge=1, le=720)
+    invitation_resend_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
+    invitation_recipient_hourly_limit: int = Field(default=5, ge=1, le=1000)
+    invitation_workspace_hourly_limit: int = Field(default=100, ge=1, le=10000)
 
     def is_bootstrap_operator(self, issuer: str, subject: str) -> bool:
         """Check whether (issuer, subject) matches an authorized bootstrap operator entry (WS-D01)."""
@@ -91,6 +106,24 @@ class Settings(BaseSettings):
             elif clean_iss == self.oidc_issuer.strip() and entry == clean_sub:
                 return True
         return False
+
+    @field_validator(
+        "oidc_additional_trusted_audiences",
+        "oidc_redirect_allowlist",
+        "allowed_origins",
+        "bootstrap_operator_subjects",
+        mode="before",
+    )
+    @classmethod
+    def parse_string_list(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return []
+            if trimmed.startswith("["):
+                return json.loads(trimmed)
+            return [item.strip() for item in trimmed.split(",") if item.strip()]
+        return value
 
     @field_validator("auth_store_type", mode="before")
     @classmethod

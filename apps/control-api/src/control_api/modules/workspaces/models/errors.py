@@ -24,7 +24,51 @@ class WorkspaceDatabaseUnavailableError(RepositoryUnavailableError, WorkspaceErr
     """Raised when PostgreSQL persistence or authorization lookup fails during workspace operations."""
 
 
+class InvitationError(WorkspaceError):
+    """Base domain error for workspace invitation lifecycle operations."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class InvitationNotFoundError(InvitationError):
+    """Raised when an invitation does not exist inside the target workspace."""
+
+
+class InvitationForbiddenError(InvitationError):
+    """Raised when the actor lacks permission for the target invitation role or action."""
+
+
+class InvitationConflictError(InvitationError):
+    """Raised on membership, duplicate pending, or state transition conflicts."""
+
+
+class InvitationRateLimitError(InvitationError):
+    """Raised when resend cooldown or hourly invitation enqueue quota is exceeded."""
+
+    def __init__(self, code: str, message: str, *, retry_after_seconds: int) -> None:
+        super().__init__(code, message)
+        self.retry_after_seconds = max(1, retry_after_seconds)
+
+
+class InvitationValidationError(InvitationError):
+    """Raised on invalid cursor, email normalization, or role inputs."""
+
+
+class InvitationConfigurationError(InvitationError):
+    """Raised when invitations feature flags or proof encryption config are missing or invalid."""
+
+
 __all__ = [
+    "InvitationConfigurationError",
+    "InvitationConflictError",
+    "InvitationError",
+    "InvitationForbiddenError",
+    "InvitationNotFoundError",
+    "InvitationRateLimitError",
+    "InvitationValidationError",
     "WorkspaceAccessDeniedError",
     "WorkspaceConflictError",
     "WorkspaceDatabaseUnavailableError",

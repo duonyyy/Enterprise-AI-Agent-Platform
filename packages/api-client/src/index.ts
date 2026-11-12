@@ -127,6 +127,57 @@ export interface WorkspaceListResponseDTO {
   items: WorkspaceSummaryDTO[];
 }
 
+export type InvitableWorkspaceRole = "admin" | "developer" | "operator" | "viewer";
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+export type InvitationDeliveryState =
+  | "queued"
+  | "sending"
+  | "provider_accepted"
+  | "failed"
+  | "unknown"
+  | "cancelled";
+
+export interface CreateWorkspaceInvitationRequestDTO {
+  email: string;
+  role: InvitableWorkspaceRole;
+}
+
+export interface WorkspaceInvitationResponseDTO {
+  invitation_id: string;
+  tenant_id: string;
+  workspace_id: string;
+  recipient_email_normalized: string;
+  recipient_issuer: string;
+  role: InvitableWorkspaceRole;
+  status: InvitationStatus;
+  generation: number;
+  delivery_state: InvitationDeliveryState;
+  delivery_error_code?: string | null;
+  created_by_user_id: string;
+  delivery_requested_by_user_id: string;
+  revoked_by_user_id?: string | null;
+  accepted_by_user_id?: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  provider_accepted_at?: string | null;
+  revoked_at?: string | null;
+  accepted_at?: string | null;
+  audit_event_id?: string | null;
+  outbox_event_id?: string | null;
+}
+
+export interface WorkspaceInvitationListResponseDTO {
+  items: WorkspaceInvitationResponseDTO[];
+  next_cursor?: string | null;
+}
+
+export interface ListWorkspaceInvitationsOptions {
+  limit?: number;
+  cursor?: string | null;
+  signal?: AbortSignal;
+}
+
 export class ApiClientError extends Error {
   public readonly status: number;
   public readonly statusText: string;
@@ -161,6 +212,49 @@ export class ApiClientError extends Error {
 
   get isConflict(): boolean {
     return this.status === 409;
+  }
+
+  get isUnprocessable(): boolean {
+    return this.status === 422;
+  }
+
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  get errorCode(): string | undefined {
+    if (typeof this.body === "object" && this.body !== null) {
+      const record = this.body as Record<string, unknown>;
+      if (typeof record.detail === "object" && record.detail !== null) {
+        const detail = record.detail as Record<string, unknown>;
+        if (typeof detail.code === "string") {
+          return detail.code;
+        }
+      }
+      if (typeof record.code === "string") {
+        return record.code;
+      }
+    }
+    return undefined;
+  }
+
+  get errorMessage(): string | undefined {
+    if (typeof this.body === "object" && this.body !== null) {
+      const record = this.body as Record<string, unknown>;
+      if (typeof record.detail === "object" && record.detail !== null) {
+        const detail = record.detail as Record<string, unknown>;
+        if (typeof detail.message === "string") {
+          return detail.message;
+        }
+      }
+      if (typeof record.detail === "string") {
+        return record.detail;
+      }
+      if (typeof record.message === "string") {
+        return record.message;
+      }
+    }
+    return undefined;
   }
 }
 
@@ -416,6 +510,72 @@ export class ControlApiClientV2 {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}`,
       {
         method: "GET",
+        signal,
+      }
+    );
+  }
+
+  // --- Workspace Invitations API (ADR-019 / Step 03-B) ---
+  async createWorkspaceInvitation(
+    workspaceId: string,
+    dto: CreateWorkspaceInvitationRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        signal,
+      }
+    );
+  }
+
+  async listWorkspaceInvitations(
+    workspaceId: string,
+    options: ListWorkspaceInvitationsOptions = {}
+  ): Promise<WorkspaceInvitationListResponseDTO> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options.cursor) {
+      params.set("cursor", options.cursor);
+    }
+    const query = params.toString();
+    const suffix = query ? `?${query}` : "";
+    return this.request<WorkspaceInvitationListResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations${suffix}`,
+      {
+        method: "GET",
+        signal: options.signal,
+      }
+    );
+  }
+
+  async resendWorkspaceInvitation(
+    workspaceId: string,
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
+      {
+        method: "POST",
+        signal,
+      }
+    );
+  }
+
+  async revokeWorkspaceInvitation(
+    workspaceId: string,
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
+      {
+        method: "POST",
         signal,
       }
     );
