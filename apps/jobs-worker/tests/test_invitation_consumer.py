@@ -161,7 +161,9 @@ def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes
         )
         assert res.outcome == "provider_accepted"
         assert res.error_code is None
-        assert f"<inv.{inv_id}.g1.{event_id}@platform.local>".encode("ascii") in srv_ok.received_data
+        assert (
+            f"<inv.{inv_id}.g1.{event_id}@platform.local>".encode("ascii") in srv_ok.received_data
+        )
     finally:
         srv_ok.close()
 
@@ -310,3 +312,90 @@ def test_consumer_and_cli_fail_closed_without_config(monkeypatch: pytest.MonkeyP
             ),
         )
 
+
+def test_recoverable_db_error_classification_excludes_rls_and_integrity_errors():
+    from jobs_worker.invitation_consumer import _is_recoverable_db_error
+    from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+
+    class _OrigError(Exception):
+        def __init__(self, sqlstate: str) -> None:
+            super().__init__(sqlstate)
+            self.sqlstate = sqlstate
+
+    for recoverable_code in ("40P01", "40001", "55P03", "57P01", "08006"):
+        err = OperationalError("stmt", {}, _OrigError(recoverable_code))
+        assert _is_recoverable_db_error(err) is True
+
+    # RLS / privilege errors (42501), schema errors (42P01), and constraint errors (23505) MUST fail closed.
+    assert _is_recoverable_db_error(ProgrammingError("stmt", {}, _OrigError("42501"))) is False
+    assert _is_recoverable_db_error(ProgrammingError("stmt", {}, _OrigError("42P01"))) is False
+    assert _is_recoverable_db_error(IntegrityError("stmt", {}, _OrigError("23505"))) is False
+    assert _is_recoverable_db_error(ValueError("bad config")) is False
+    assert _is_recoverable_db_error(RuntimeError("unexpected")) is False
+
+
+def test_run_forever_recovers_from_transient_db_error_and_fails_closed_on_rls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import asyncio
+
+    from jobs_worker.invitation_consumer import _is_recoverable_db_error
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    class _OrigError(Exception):
+        def __init__(self, sqlstate: str) -> None:
+            super().__init__(sqlstate)
+            self.sqlstate = sqlstate
+
+    consumer = InvitationOutboxConsumer(
+        database_url="postgresql+psycopg://user:pass@127.0.0.1:5432/db",
+        tenant_id=str(uuid4()),
+        workspace_id=str(uuid4()),
+        protector=InvitationProofProtector(Fernet.generate_key().decode("ascii")),
+        public_app_origin="http://localhost:3000",
+        smtp_transport=StdlibSmtpTransport(
+            SmtpConfig(
+                host="127.0.0.1",
+                port=1025,
+                sender="no-reply@example.com",
+                tls_mode="none",
+                allow_plaintext_local_smtp=True,
+            )
+        ),
+        db_retry_max_attempts=2,
+        db_retry_backoff_seconds=(0.0,),
+    )
+
+    reclaim_calls = 0
+    process_calls = 0
+
+    def _fake_reclaim() -> int:
+        nonlocal reclaim_calls
+        reclaim_calls += 1
+        if reclaim_calls == 1:
+            raise OperationalError("reclaim", {}, _OrigError("40P01"))
+        return 0
+
+    def _fake_process() -> bool:
+        nonlocal process_calls
+        process_calls += 1
+        consumer.stop()
+        return False
+
+    monkeypatch.setattr(consumer, "reclaim_expired_leases", _fake_reclaim)
+    monkeypatch.setattr(consumer, "process_next_event", _fake_process)
+    asyncio.run(consumer.run_forever(poll_interval_seconds=0.0))
+    assert reclaim_calls == 2
+    assert process_calls == 1
+
+    # Non-recoverable permission/RLS error (42501) must terminate loop fail-closed.
+    rls_err = ProgrammingError("claim", {}, _OrigError("42501"))
+    assert _is_recoverable_db_error(rls_err) is False
+    monkeypatch.setattr(consumer, "reclaim_expired_leases", lambda: 0)
+
+    def _raise_rls() -> bool:
+        raise rls_err
+
+    monkeypatch.setattr(consumer, "process_next_event", _raise_rls)
+    with pytest.raises(ProgrammingError):
+        asyncio.run(consumer.run_forever(poll_interval_seconds=0.0))

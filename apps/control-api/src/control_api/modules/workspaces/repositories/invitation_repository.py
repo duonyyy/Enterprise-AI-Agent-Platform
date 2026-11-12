@@ -125,11 +125,15 @@ class InvitationRepository:
             f"{ws_lock_clause}"
         )
         ws_row = (
-            await session.execute(
-                ws_stmt,
-                {"tenant_id": tenant_id, "workspace_id": workspace_id},
+            (
+                await session.execute(
+                    ws_stmt,
+                    {"tenant_id": tenant_id, "workspace_id": workspace_id},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if (
             ws_row is None
             or str(ws_row["workspace_status"]) != "active"
@@ -144,15 +148,19 @@ class InvitationRepository:
             "FOR SHARE"
         )
         actor_row = (
-            await session.execute(
-                actor_stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "user_id": actor_user_id,
-                },
+            (
+                await session.execute(
+                    actor_stmt,
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "user_id": actor_user_id,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if actor_row is None or str(actor_row["status"]) != "active":
             raise InvitationForbiddenError(
                 "active_membership_required",
@@ -186,16 +194,20 @@ class InvitationRepository:
             "LIMIT 1"
         )
         existing = (
-            await session.execute(
-                stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "recipient_issuer": recipient_issuer,
-                    "recipient_email": recipient_email_normalized,
-                },
+            (
+                await session.execute(
+                    stmt,
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "recipient_issuer": recipient_issuer,
+                        "recipient_email": recipient_email_normalized,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if existing is not None:
             raise InvitationConflictError(
                 "membership_conflict",
@@ -253,15 +265,19 @@ class InvitationRepository:
             "  AND created_at > now() - interval '60 minutes'"
         )
         ws_row = (
-            await session.execute(
-                ws_stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "event_type": INVITATION_DELIVERY_EVENT_TYPE,
-                },
+            (
+                await session.execute(
+                    ws_stmt,
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "event_type": INVITATION_DELIVERY_EVENT_TYPE,
+                    },
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         if int(ws_row["cnt"] or 0) >= policy.workspace_hourly_limit:
             retry_after = max(1, math.ceil(float(ws_row["retry_after"] or 60.0)))
             raise InvitationRateLimitError(
@@ -286,17 +302,21 @@ class InvitationRepository:
             "  AND i.recipient_email_normalized = :recipient_email"
         )
         rec_row = (
-            await session.execute(
-                rec_stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "event_type": INVITATION_DELIVERY_EVENT_TYPE,
-                    "recipient_issuer": recipient_issuer,
-                    "recipient_email": recipient_email_normalized,
-                },
+            (
+                await session.execute(
+                    rec_stmt,
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "event_type": INVITATION_DELIVERY_EVENT_TYPE,
+                        "recipient_issuer": recipient_issuer,
+                        "recipient_email": recipient_email_normalized,
+                    },
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         if int(rec_row["cnt"] or 0) >= policy.recipient_hourly_limit:
             retry_after = max(1, math.ceil(float(rec_row["retry_after"] or 60.0)))
             raise InvitationRateLimitError(
@@ -330,20 +350,24 @@ class InvitationRepository:
             ") RETURNING id"
         )
         row = (
-            await session.execute(
-                stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "actor_subject": str(actor_user_id),
-                    "action": action,
-                    "resource_id": str(invitation_id),
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                    "details_redacted": json.dumps(details, sort_keys=True),
-                },
+            (
+                await session.execute(
+                    stmt,
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "actor_subject": str(actor_user_id),
+                        "action": action,
+                        "resource_id": str(invitation_id),
+                        "request_id": request_id,
+                        "trace_id": trace_id,
+                        "details_redacted": json.dumps(details, sort_keys=True),
+                    },
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         return str(row["id"])
 
     async def _publish_delivery_outbox(
@@ -485,22 +509,19 @@ class InvitationRepository:
                 "RETURNING id"
             )
             expired_rows = (
-                await session.execute(
-                    expire_stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "recipient_issuer": recipient_issuer,
-                        "recipient_email": recipient_email_normalized,
-                    },
+                (
+                    await session.execute(
+                        expire_stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "recipient_issuer": recipient_issuer,
+                            "recipient_email": recipient_email_normalized,
+                        },
+                    )
                 )
-            ).mappings().all()
-            await self._dead_letter_outbox_for_invitations(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                invitation_ids=[UUID(str(r["id"])) for r in expired_rows],
-                states=("pending",),
+                .mappings()
+                .all()
             )
 
             dup_stmt = text(
@@ -527,6 +548,14 @@ class InvitationRepository:
                     "pending_invitation_conflict",
                     "An active pending invitation already exists for this recipient",
                 )
+
+            await self._dead_letter_outbox_for_invitations(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                invitation_ids=[UUID(str(r["id"])) for r in expired_rows],
+                states=("pending",),
+            )
 
             await self._enforce_rate_limits(
                 session,
@@ -568,24 +597,28 @@ class InvitationRepository:
                 "    provider_accepted_at, revoked_at, accepted_at"
             )
             inv_row = (
-                await session.execute(
-                    insert_stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "id": invitation_id,
-                        "recipient_email": recipient_email_normalized,
-                        "recipient_issuer": recipient_issuer,
-                        "role": role,
-                        "created_by_user_id": actor_user_id,
-                        "token_hash": token_hash,
-                        "proof_ciphertext": proof_ciphertext,
-                        "proof_key_id": proof_key_id,
-                        "delivery_requested_by_user_id": actor_user_id,
-                        "ttl_hours": policy.ttl_hours,
-                    },
+                (
+                    await session.execute(
+                        insert_stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "id": invitation_id,
+                            "recipient_email": recipient_email_normalized,
+                            "recipient_issuer": recipient_issuer,
+                            "role": role,
+                            "created_by_user_id": actor_user_id,
+                            "token_hash": token_hash,
+                            "proof_ciphertext": proof_ciphertext,
+                            "proof_key_id": proof_key_id,
+                            "delivery_requested_by_user_id": actor_user_id,
+                            "ttl_hours": policy.ttl_hours,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
             outbox_event_id = await self._publish_delivery_outbox(
                 session,
@@ -741,13 +774,19 @@ class InvitationRepository:
                 "FOR UPDATE"
             )
             inv = (
-                await session.execute(
-                    lock_stmt,
-                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "id": invitation_id},
+                (
+                    await session.execute(
+                        lock_stmt,
+                        {"tenant_id": tenant_id, "workspace_id": workspace_id, "id": invitation_id},
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             if inv is None:
-                raise InvitationNotFoundError("invitation_not_found", "Workspace invitation not found")
+                raise InvitationNotFoundError(
+                    "invitation_not_found", "Workspace invitation not found"
+                )
 
             target_role = str(inv["role"])
             if actor_role == "admin" and target_role == "admin":
@@ -775,18 +814,22 @@ class InvitationRepository:
             )
             if policy.resend_cooldown_seconds > 0:
                 cd_row = (
-                    await session.execute(
-                        cooldown_stmt,
-                        {
-                            "tenant_id": tenant_id,
-                            "workspace_id": workspace_id,
-                            "aggregate_type": INVITATION_AGGREGATE_TYPE,
-                            "invitation_id": invitation_id,
-                            "event_type": INVITATION_DELIVERY_EVENT_TYPE,
-                            "cooldown": policy.resend_cooldown_seconds,
-                        },
+                    (
+                        await session.execute(
+                            cooldown_stmt,
+                            {
+                                "tenant_id": tenant_id,
+                                "workspace_id": workspace_id,
+                                "aggregate_type": INVITATION_AGGREGATE_TYPE,
+                                "invitation_id": invitation_id,
+                                "event_type": INVITATION_DELIVERY_EVENT_TYPE,
+                                "cooldown": policy.resend_cooldown_seconds,
+                            },
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 if cd_row["remaining"] is not None and float(cd_row["remaining"]) > 0:
                     raise InvitationRateLimitError(
                         "resend_cooldown_active",
@@ -811,14 +854,6 @@ class InvitationRepository:
                 workspace_id=workspace_id,
                 recipient_issuer=recipient_issuer,
                 recipient_email_normalized=recipient_email,
-            )
-
-            await self._dead_letter_outbox_for_invitations(
-                session,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                invitation_ids=[invitation_id],
-                states=("pending",),
             )
 
             next_generation = int(inv["generation"]) + 1
@@ -856,21 +891,33 @@ class InvitationRepository:
                 "    provider_accepted_at, revoked_at, accepted_at"
             )
             updated_row = (
-                await session.execute(
-                    update_stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "id": invitation_id,
-                        "generation": next_generation,
-                        "token_hash": token_hash,
-                        "proof_ciphertext": proof_ciphertext,
-                        "proof_key_id": proof_key_id,
-                        "actor_user_id": actor_user_id,
-                        "ttl_hours": policy.ttl_hours,
-                    },
+                (
+                    await session.execute(
+                        update_stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "id": invitation_id,
+                            "generation": next_generation,
+                            "token_hash": token_hash,
+                            "proof_ciphertext": proof_ciphertext,
+                            "proof_key_id": proof_key_id,
+                            "actor_user_id": actor_user_id,
+                            "ttl_hours": policy.ttl_hours,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
+
+            await self._dead_letter_outbox_for_invitations(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                invitation_ids=[invitation_id],
+                states=("pending",),
+            )
 
             outbox_event_id = await self._publish_delivery_outbox(
                 session,
@@ -953,13 +1000,19 @@ class InvitationRepository:
                 "FOR UPDATE"
             )
             inv = (
-                await session.execute(
-                    lock_stmt,
-                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "id": invitation_id},
+                (
+                    await session.execute(
+                        lock_stmt,
+                        {"tenant_id": tenant_id, "workspace_id": workspace_id, "id": invitation_id},
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             if inv is None:
-                raise InvitationNotFoundError("invitation_not_found", "Workspace invitation not found")
+                raise InvitationNotFoundError(
+                    "invitation_not_found", "Workspace invitation not found"
+                )
 
             target_role = str(inv["role"])
             if actor_role == "admin" and target_role == "admin":
@@ -999,11 +1052,19 @@ class InvitationRepository:
                     "    provider_accepted_at, revoked_at, accepted_at"
                 )
                 expired_row = (
-                    await session.execute(
-                        expire_stmt,
-                        {"tenant_id": tenant_id, "workspace_id": workspace_id, "id": invitation_id},
+                    (
+                        await session.execute(
+                            expire_stmt,
+                            {
+                                "tenant_id": tenant_id,
+                                "workspace_id": workspace_id,
+                                "id": invitation_id,
+                            },
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 await self._dead_letter_outbox_for_invitations(
                     session,
                     tenant_id=tenant_id,
@@ -1035,16 +1096,20 @@ class InvitationRepository:
                 "    provider_accepted_at, revoked_at, accepted_at"
             )
             revoked_row = (
-                await session.execute(
-                    revoke_stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "id": invitation_id,
-                        "actor_user_id": actor_user_id,
-                    },
+                (
+                    await session.execute(
+                        revoke_stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "id": invitation_id,
+                            "actor_user_id": actor_user_id,
+                        },
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             await self._dead_letter_outbox_for_invitations(
                 session,
                 tenant_id=tenant_id,
