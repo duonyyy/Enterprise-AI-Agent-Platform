@@ -24,6 +24,8 @@ from test_postgres_fixture import (
     temporary_database,
 )
 
+from scripts.validate_database_schema import EXPECTED_MIGRATIONS
+
 CONSTRAINTS_SQL = """
 SELECT n.nspname, c.relname, k.conname, k.contype, pg_get_constraintdef(k.oid)
 FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid
@@ -89,7 +91,7 @@ def test_persistence_across_server_restart(
             assert res is not None
             assert res[0] == "Agent Persisted Across Restart"
 
-        # Step 4: Verify 56 domain tables remain intact
+        # Step 4: Verify 57 domain tables (56 baseline + iam.workspace_invitations ADR-019) remain intact
         with psycopg.connect(owner_url) as owner, owner.cursor() as cur:
             cur.execute(
                 """
@@ -98,7 +100,7 @@ def test_persistence_across_server_restart(
                   AND table_type = 'BASE TABLE'
                 """
             )
-            assert cur.fetchone()[0] == 56
+            assert cur.fetchone()[0] == 57
 
     finally:
         with psycopg.connect(owner_url) as owner, owner.cursor() as cur:
@@ -162,7 +164,7 @@ def test_backup_and_restore_recovery(
             # Step 3: Verify restored database as owner
             with psycopg.connect(restore_owner_url) as conn, conn.cursor() as cur:
                 assert conn.execute(CONSTRAINTS_SQL).fetchall() == expected_constraints
-                # 56 domain tables
+                # 57 domain tables (56 baseline + iam.workspace_invitations ADR-019)
                 cur.execute(
                     """
                     SELECT count(*) FROM information_schema.tables
@@ -170,13 +172,13 @@ def test_backup_and_restore_recovery(
                       AND table_type = 'BASE TABLE'
                     """
                 )
-                assert cur.fetchone()[0] == 56
+                assert cur.fetchone()[0] == 57
 
-                # 1 technical migration history table with 4 applied migrations
+                # 1 technical migration history table with the reviewed canonical migration inventory
                 cur.execute("SELECT count(*) FROM public.schema_migrations")
-                assert cur.fetchone()[0] == 4
+                assert cur.fetchone()[0] == len(EXPECTED_MIGRATIONS)
 
-                # Verify RLS is enabled and forced on all 55 non-global domain tables (iam.users is global)
+                # Verify RLS is enabled and forced on all 56 non-global domain tables (iam.users is global)
                 cur.execute(
                     """
                     SELECT count(*)
@@ -189,7 +191,7 @@ def test_backup_and_restore_recovery(
                     """
                 )
                 tables_with_forced_rls = cur.fetchone()[0]
-                assert tables_with_forced_rls == 55
+                assert tables_with_forced_rls == 56
 
                 # Verify iam.users is the single global domain table without RLS
                 cur.execute(
@@ -231,8 +233,8 @@ def test_backup_and_restore_recovery(
             f"Backup size: {backup_size} bytes\n"
             f"Restore duration: {restore_duration:.3f}s\n"
             f"Target database: {restore_db}\n"
-            f"Tables verified: 56 domain tables + 1 technical migration history table\n"
-            f"Forced RLS verified: 55 tables\n",
+            f"Tables verified: 57 domain tables + 1 technical migration history table\n"
+            f"Forced RLS verified: 56 tables\n",
             encoding="utf-8",
         )
 

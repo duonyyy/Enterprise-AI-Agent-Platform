@@ -206,6 +206,7 @@ class InMemoryRevocationStore(BaseRevocationStore):
                 created_at=state.created_at,
                 idle_expires_at=new_idle_exp,
                 absolute_expires_at=state.absolute_expires_at,
+                identity_evidence=state.identity_evidence,
             )
             self._sessions[session_id] = (new_state, new_state.absolute_expires_at)
             return SessionVerificationStatus.OK, new_state

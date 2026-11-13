@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from typing import Any
 from urllib.parse import quote_plus
+from uuid import UUID
 
 from control_api.core.auth import verify_csrf_or_origin
 from control_api.core.dependencies import CurrentAuthenticatedUser, DBSession
 from control_api.core.settings import settings
 from control_api.modules.identity.api.dependencies import (
     clear_correlation_cookie,
+    clear_invitation_handoff_cookie,
     clear_session_cookie,
-    get_clear_session_cookie_headers,
     set_correlation_cookie,
     set_session_cookie,
 )
@@ -23,26 +27,90 @@ from control_api.modules.identity.dto import (
     TokenResponseDTO,
 )
 from control_api.modules.identity.models.errors import RepositoryUnavailableError
+from control_api.modules.identity.models.session import VerifiedIdentityEvidence
 from control_api.modules.identity.providers.oidc_client import oidc_client
 from control_api.modules.identity.security.crypto import generate_secure_token
 from control_api.modules.identity.services.auth_service import identity_service
 from control_api.modules.identity.services.session_service import session_manager
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from platform_common.invitations import normalize_invitation_email
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _extract_id_token_evidence(
+    *,
+    payload: dict[str, Any],
+    issuer: str,
+    subject: str,
+    user_id: str,
+    observed_at: int,
+) -> VerifiedIdentityEvidence | None:
+    """Build strict VerifiedIdentityEvidence from OIDC ID token claims when iat is valid."""
+    raw_iat = payload.get("iat")
+    if type(raw_iat) is int:
+        id_token_iat = raw_iat
+    elif isinstance(raw_iat, float) and raw_iat.is_integer():
+        id_token_iat = int(raw_iat)
+    else:
+        return None
+    if id_token_iat <= 0:
+        return None
+
+    raw_email = payload.get("email")
+    normalized_email = ""
+    if isinstance(raw_email, str) and raw_email.strip():
+        try:
+            normalized_email = normalize_invitation_email(raw_email)
+        except ValueError:
+            normalized_email = ""
+
+    raw_verified = payload.get("email_verified")
+    email_verified = raw_verified is True and bool(normalized_email)
+
+    return VerifiedIdentityEvidence(
+        issuer=issuer,
+        subject=subject,
+        user_id=user_id,
+        email_normalized=normalized_email,
+        email_verified=email_verified,
+        id_token_issued_at=id_token_iat,
+        observed_at=observed_at,
+    )
+
+
 @router.get("/login", response_model=LoginInitiateResponse)
 async def login(
+    request: Request = None,  # type: ignore[assignment]
     response: Response = None,  # type: ignore[assignment]
     return_to: str | None = Query(default=None),
     redirect: bool = Query(default=False),
+    invitation_id: UUID | None = Query(default=None),
+    reauth: bool = Query(default=False),
 ) -> Any:
     """Initiate OIDC Authorization Code Flow with PKCE S256 and browser correlation (Finding R02)."""
     correlation_id = generate_secure_token(32)
+    handoff_cookie = (
+        request.cookies.get(settings.invitation_handoff_cookie_name)
+        if request is not None
+        else None
+    )
+    handoff_digest = (
+        _sha256_hex(handoff_cookie)
+        if invitation_id is not None and isinstance(handoff_cookie, str) and handoff_cookie
+        else None
+    )
     auth_url, state = oidc_client.initiate_login(
-        return_to=return_to, browser_correlation=correlation_id
+        return_to=return_to,
+        browser_correlation=correlation_id,
+        invitation_id=str(invitation_id) if invitation_id is not None else None,
+        handoff_binding_digest=handoff_digest,
+        reauth=reauth,
     )
 
     if redirect:
@@ -100,6 +168,30 @@ async def callback(
         browser_correlation=corr_cookie,
     )
 
+    if tx.pending_handoff_binding_digest:
+        handoff_cookie = (
+            request.cookies.get(settings.invitation_handoff_cookie_name) if request else None
+        )
+        cookie_matches = (
+            isinstance(handoff_cookie, str)
+            and bool(handoff_cookie)
+            and hmac.compare_digest(_sha256_hex(handoff_cookie), tx.pending_handoff_binding_digest)
+        )
+        if not cookie_matches:
+            accept_hdr = request.headers.get("accept", "") if request else ""
+            if "text/html" in accept_hdr and tx.pending_invitation_id:
+                mismatch_res = RedirectResponse(
+                    url=f"/invitations/{tx.pending_invitation_id}/accept?error=handoff_binding_mismatch",
+                    status_code=status.HTTP_302_FOUND,
+                )
+                clear_correlation_cookie(mismatch_res)
+                return mismatch_res
+            clear_correlation_cookie(response)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invitation handoff browser binding mismatch",
+            )
+
     issuer = str(payload.get("iss", settings.oidc_issuer))
     subject = str(payload["sub"])
     display_name = payload.get("name") or payload.get("preferred_username")
@@ -114,10 +206,20 @@ async def callback(
     )
 
     user_id = str(user["id"])
+    observed_at = int(time.time())
+    identity_evidence = _extract_id_token_evidence(
+        payload=payload,
+        issuer=issuer,
+        subject=subject,
+        user_id=user_id,
+        observed_at=observed_at,
+    )
     session_data, session_token = session_manager.create_session(
         user_id=user_id,
         issuer=issuer,
         subject=subject,
+        now=observed_at,
+        identity_evidence=identity_evidence,
     )
 
     # Check client's Accept header: if HTML or browser navigation, 302 redirect with cookie
@@ -201,11 +303,12 @@ async def refresh_session(
 async def logout(
     request: Request,
     response: Response,
-) -> dict[str, str]:
-    """Revoke active session token, put session_id on revocation denylist, and clear cookie.
+) -> Any:
+    """Revoke active session token, put session_id on revocation denylist, and clear cookies.
 
     Idempotent local cleanup for missing, expired, or invalid credentials.
-    Fails closed with HTTP 503 and client cookie deletion if revocation store is unavailable.
+    Fails closed with HTTP 503 and client cookie deletion (session + handoff)
+    if revocation store is unavailable, keeping multiple Set-Cookie headers intact.
     """
     verify_csrf_or_origin(request)
 
@@ -223,15 +326,19 @@ async def logout(
                 and exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE
             ):
                 raise
-            headers = dict(exc.headers) if isinstance(exc, HTTPException) and exc.headers else {}
-            headers.update(get_clear_session_cookie_headers())
-            raise HTTPException(
+            err_response = JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Revocation store unavailable; local session cleared but server-side revocation could not be confirmed",
-                headers=headers,
-            ) from exc
+                content={
+                    "detail": "Revocation store unavailable; local session cleared but server-side revocation could not be confirmed"
+                },
+                headers=dict(exc.headers) if isinstance(exc, HTTPException) and exc.headers else None,
+            )
+            clear_session_cookie(err_response)
+            clear_invitation_handoff_cookie(err_response)
+            return err_response
 
     clear_session_cookie(response)
+    clear_invitation_handoff_cookie(response)
     return {"status": "logged_out"}
 
 

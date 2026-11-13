@@ -40,7 +40,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "SELECT version, name, checksum, applied_by FROM public.schema_migrations ORDER BY version"
         )
         rows = cur.fetchall()
-        assert len(rows) == 4
+        assert len(rows) == 6
         assert rows[0][0] == "0001"
         assert rows[0][1] == "0001_baseline.sql"
         assert rows[1][0] == "0002"
@@ -49,8 +49,12 @@ def test_fresh_migration_bootstrap_and_technical_table(
         assert rows[2][1] == "0003_restore_workspaces_rls.sql"
         assert rows[3][0] == "0004"
         assert rows[3][1] == "0004_identity_discovery_projection.sql"
+        assert rows[4][0] == "0005"
+        assert rows[4][1] == "0005_workspace_invitations.sql"
+        assert rows[5][0] == "0006"
+        assert rows[5][1] == "0006_invitation_acceptance_projection.sql"
 
-        # 2. Verify exactly 56 domain tables across 7 schemas
+        # 2. Verify exactly 57 domain tables (56 baseline + iam.workspace_invitations delta) across 7 schemas
         cur.execute(
             """
             SELECT table_schema, count(*)
@@ -62,9 +66,9 @@ def test_fresh_migration_bootstrap_and_technical_table(
             """
         )
         schema_counts = dict(cur.fetchall())
-        assert sum(schema_counts.values()) == 56
+        assert sum(schema_counts.values()) == 57
         assert schema_counts == {
-            "iam": 5,
+            "iam": 6,
             "catalog": 16,
             "knowledge": 7,
             "runtime": 12,
@@ -118,7 +122,7 @@ def test_migration_upgrade_preserves_data(isolated_database, tmp_path):
             "INSERT INTO iam.workspaces (tenant_id,id,slug,name) VALUES (%s,%s,%s,%s)",
             (tenant, workspace, "upgrade-ws", "Upgrade Workspace"),
         )
-    assert run_migrations(db_url) == ["0003", "0004"]
+    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006"]
     with psycopg.connect(db_url) as conn:
         assert conn.execute(
             "SELECT name FROM iam.workspaces WHERE id=%s", (workspace,)
@@ -187,7 +191,7 @@ def test_migration_advisory_locking(isolated_database):
         ).fetchone() == (True,)
         with pytest.raises(MigrationLockError):
             run_migrations(db_url)
-    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004"]
+    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006"]
 
 
 @pytest.mark.integration
@@ -209,7 +213,14 @@ def test_legacy_database_without_history_is_not_replayed(isolated_database):
 @pytest.mark.integration
 def test_check_and_dry_run_do_not_create_history(isolated_database):
     db_url = isolated_database["owner_url"]
-    assert run_migrations(db_url, dry_run=True) == ["0001", "0002", "0003", "0004"]
+    assert run_migrations(db_url, dry_run=True) == [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+    ]
     from run_migrations import MigrationError
 
     with pytest.raises(MigrationError, match="pending"):

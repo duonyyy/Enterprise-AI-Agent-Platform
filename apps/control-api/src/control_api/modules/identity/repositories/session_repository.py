@@ -18,12 +18,80 @@ from control_api.modules.identity.models.errors import (
 from control_api.modules.identity.models.session import (
     SessionVerificationStatus,
     StoredSessionState,
+    VerifiedIdentityEvidence,
 )
 from control_api.modules.identity.repositories.memory_session_store import (
     InMemoryRevocationStore,
     RevocationDenylist,
 )
 from control_api.modules.identity.repositories.session_base import BaseRevocationStore
+
+_SENTINEL_UNSET = object()
+
+
+def _parse_identity_evidence(
+    raw_evidence: object,
+    *,
+    session_issuer: str,
+    session_subject: str,
+    session_user_id: str,
+) -> VerifiedIdentityEvidence | None | object:
+    """Parse stored VerifiedIdentityEvidence strictly; return _SENTINEL_UNSET on corruption."""
+    if raw_evidence is None:
+        return None
+    if not isinstance(raw_evidence, dict):
+        return _SENTINEL_UNSET
+    ev_issuer = raw_evidence.get("issuer")
+    ev_subject = raw_evidence.get("subject")
+    ev_user_id = raw_evidence.get("user_id")
+    ev_email = raw_evidence.get("email_normalized")
+    ev_verified = raw_evidence.get("email_verified")
+    ev_iat = raw_evidence.get("id_token_issued_at")
+    ev_observed = raw_evidence.get("observed_at")
+    if (
+        not isinstance(ev_issuer, str)
+        or not ev_issuer
+        or not isinstance(ev_subject, str)
+        or not ev_subject
+        or not isinstance(ev_user_id, str)
+        or not ev_user_id
+        or not isinstance(ev_email, str)
+        or type(ev_verified) is not bool
+        or type(ev_iat) is not int
+        or ev_iat <= 0
+        or type(ev_observed) is not int
+        or ev_observed <= 0
+    ):
+        return _SENTINEL_UNSET
+    if (
+        ev_issuer != session_issuer
+        or ev_subject != session_subject
+        or ev_user_id != session_user_id
+    ):
+        return _SENTINEL_UNSET
+    return VerifiedIdentityEvidence(
+        issuer=ev_issuer,
+        subject=ev_subject,
+        user_id=ev_user_id,
+        email_normalized=ev_email,
+        email_verified=ev_verified,
+        id_token_issued_at=ev_iat,
+        observed_at=ev_observed,
+    )
+
+
+def _serialize_identity_evidence(
+    evidence: VerifiedIdentityEvidence,
+) -> dict[str, str | bool | int]:
+    return {
+        "issuer": evidence.issuer,
+        "subject": evidence.subject,
+        "user_id": evidence.user_id,
+        "email_normalized": evidence.email_normalized,
+        "email_verified": evidence.email_verified,
+        "id_token_issued_at": evidence.id_token_issued_at,
+        "observed_at": evidence.observed_at,
+    }
 
 
 def _parse_stored_session_state(raw: str | None) -> StoredSessionState | None:
@@ -58,6 +126,18 @@ def _parse_stored_session_state(raw: str | None) -> StoredSessionState | None:
             or absolute_expires_at <= 0
         ):
             return None
+        parsed_evidence = _SENTINEL_UNSET
+        if "identity_evidence" in data:
+            parsed_evidence = _parse_identity_evidence(
+                data.get("identity_evidence"),
+                session_issuer=issuer,
+                session_subject=subject,
+                session_user_id=user_id,
+            )
+            if parsed_evidence is _SENTINEL_UNSET:
+                return None
+        else:
+            parsed_evidence = None
         return StoredSessionState(
             session_id=session_id,
             user_id=user_id,
@@ -67,6 +147,9 @@ def _parse_stored_session_state(raw: str | None) -> StoredSessionState | None:
             created_at=created_at,
             idle_expires_at=idle_expires_at,
             absolute_expires_at=absolute_expires_at,
+            identity_evidence=(
+                parsed_evidence if isinstance(parsed_evidence, VerifiedIdentityEvidence) else None
+            ),
         )
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
@@ -241,19 +324,21 @@ class RedisRevocationStore(BaseRevocationStore):
         ttl = state.absolute_expires_at - current
         if ttl <= 0:
             raise SessionExpiredError("Session absolute lifetime expired")
-        payload = json.dumps(
-            {
-                "session_id": state.session_id,
-                "user_id": state.user_id,
-                "issuer": state.issuer,
-                "subject": state.subject,
-                "rotation_version": state.rotation_version,
-                "created_at": state.created_at,
-                "idle_expires_at": state.idle_expires_at,
-                "absolute_expires_at": state.absolute_expires_at,
-            },
-            separators=(",", ":"),
-        )
+        raw_payload: dict[str, Any] = {
+            "session_id": state.session_id,
+            "user_id": state.user_id,
+            "issuer": state.issuer,
+            "subject": state.subject,
+            "rotation_version": state.rotation_version,
+            "created_at": state.created_at,
+            "idle_expires_at": state.idle_expires_at,
+            "absolute_expires_at": state.absolute_expires_at,
+        }
+        if state.identity_evidence is not None:
+            raw_payload["identity_evidence"] = _serialize_identity_evidence(
+                state.identity_evidence
+            )
+        payload = json.dumps(raw_payload, separators=(",", ":"))
         try:
             self._client.set(f"auth:session:{state.session_id}", payload, ex=ttl)
         except (redis.RedisError, OSError) as exc:

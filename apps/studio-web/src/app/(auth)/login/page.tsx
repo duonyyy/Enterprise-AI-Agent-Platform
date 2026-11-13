@@ -62,15 +62,22 @@ function LoginForm() {
     const err = searchParams?.get("error");
     const desc = searchParams?.get("error_description");
     const loggedOut = searchParams?.get("logged_out");
+    const reauthRequested = searchParams?.get("reauth") === "1" || searchParams?.get("reauth") === "true";
 
     if (err === "session_expired") {
       setErrorMessage("Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại.");
     } else if (err === "logout_degraded") {
       setErrorMessage("Đã xóa phiên trên trình duyệt, nhưng máy chủ tạm thời chưa thể xác nhận thu hồi phiên tập trung (503).");
+    } else if (err === "handoff_binding_mismatch") {
+      setErrorMessage("Phiên nhận lời mời không khớp với trình duyệt hiện tại. Vui lòng mở lại liên kết lời mời từ email.");
     } else if (err === "unauthorized" || err === "auth_failed") {
       setErrorMessage("Xác thực không thành công hoặc phiên làm việc đã bị thu hồi.");
     } else if (err) {
       setErrorMessage(desc ? `Lỗi xác thực: ${desc}` : `Đăng nhập không thành công (${err}).`);
+    }
+
+    if (reauthRequested && !err) {
+      setInfoMessage("Vui lòng xác thực lại qua Identity Provider để tiếp tục chấp nhận lời mời.");
     }
 
     if (loggedOut === "1" && !err) {
@@ -82,8 +89,22 @@ function LoginForm() {
       .getCurrentUser()
       .then((user) => {
         setCurrentUser(user);
+        if (reauthRequested) {
+          // Never auto-redirect stale-evidence invitation reauth users in a loop
+          return;
+        }
+        const returnTo = searchParams?.get("return_to");
+        if (
+          returnTo &&
+          returnTo.startsWith("/invitations/") &&
+          !returnTo.startsWith("//") &&
+          !returnTo.includes("\\") &&
+          !returnTo.includes("#")
+        ) {
+          router.replace(returnTo);
+          return;
+        }
         if (user.workspaces && user.workspaces.length > 0) {
-          const returnTo = searchParams?.get("return_to");
           let destination: string | null = null;
 
           if (returnTo && returnTo.startsWith("/w/")) {
@@ -120,12 +141,32 @@ function LoginForm() {
     setErrorMessage(null);
     setInfoMessage(null);
     try {
-      const returnTo = searchParams?.get("return_to") || "/login";
-      const { authorization_url } = await defaultApiClient.getLoginUrl(returnTo);
+      const rawReturnTo = searchParams?.get("return_to") || "/login";
+      const safeReturnTo =
+        rawReturnTo.startsWith("/") &&
+        !rawReturnTo.startsWith("//") &&
+        !rawReturnTo.includes("\\") &&
+        !rawReturnTo.includes("#")
+          ? rawReturnTo
+          : "/login";
+      const invitationId = searchParams?.get("invitation_id") || undefined;
+      const reauth =
+        searchParams?.get("reauth") === "1" || searchParams?.get("reauth") === "true";
+      const { authorization_url } = await defaultApiClient.getLoginUrl(safeReturnTo, {
+        invitationId,
+        reauth,
+      });
       if (authorization_url) {
         window.location.href = authorization_url;
       } else {
-        window.location.href = `/v1/auth/login?redirect=true&return_to=${encodeURIComponent(returnTo)}`;
+        const params = new URLSearchParams({ redirect: "true", return_to: safeReturnTo });
+        if (invitationId) {
+          params.set("invitation_id", invitationId);
+        }
+        if (reauth) {
+          params.set("reauth", "true");
+        }
+        window.location.href = `/v1/auth/login?${params.toString()}`;
       }
     } catch (err: unknown) {
       setIsLoading(false);
