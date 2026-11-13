@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise-agent-platform.local/contracts/jsonschema/workspace-invitation-delivery-requested.v1.schema.json",
+  "title": "WorkspaceInvitationDeliveryRequestedV1",
+  "description": "Outbox data payload for workspace.invitation.delivery_requested.v1. Never includes proof, token_hash, ciphertext, invite URL, or recipient PII.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "schema_version",
+    "invitation_id",
+    "generation",
+    "tenant_id",
+    "workspace_id",
+    "delivery_requested_by_user_id",
+    "requested_at"
+  ],
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "workspace.invitation.delivery_requested.v1"
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "invitation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "workspace_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "delivery_requested_by_user_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+

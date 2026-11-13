@@ -13,11 +13,11 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from jsonschema import Draft202012Validator, ValidationError
+from platform_common.principal import AuthenticatedPrincipal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_runtime.mcp.client import McpClientAdapter
-from platform_common.principal import AuthenticatedPrincipal
 
 
 class ToolExecutionError(RuntimeError):
@@ -87,18 +87,28 @@ class McpToolAdapter:
         endpoint = execution_config.get("endpoint")
         remote_tool_name = execution_config.get("remote_tool_name")
         mapping = execution_config.get("approved_mapping")
-        if not isinstance(endpoint, str) or not isinstance(remote_tool_name, str) or not isinstance(mapping, dict):
+        if (
+            not isinstance(endpoint, str)
+            or not isinstance(remote_tool_name, str)
+            or not isinstance(mapping, dict)
+        ):
             raise ToolPolicyDeniedError("Pinned MCP execution config is incomplete")
         mapping = {**mapping, "request_id": operation_key}
         result = await self._client.call_tool(endpoint, remote_tool_name, arguments, mapping)
-        external_reference = result.get("_meta", {}).get("operation_id") if isinstance(result.get("_meta"), dict) else None
+        external_reference = (
+            result.get("_meta", {}).get("operation_id")
+            if isinstance(result.get("_meta"), dict)
+            else None
+        )
         return result, external_reference if isinstance(external_reference, str) else None
 
 
 class ToolDispatcher:
     """A fail-closed, async dispatcher backed by PostgreSQL transactions."""
 
-    def __init__(self, session_factory: Any, adapters: dict[str, ToolAdapter] | None = None) -> None:
+    def __init__(
+        self, session_factory: Any, adapters: dict[str, ToolAdapter] | None = None
+    ) -> None:
         if session_factory is None:
             raise ValueError("ToolDispatcher requires an async PostgreSQL session factory")
         self._session_factory = session_factory
@@ -123,8 +133,13 @@ class ToolDispatcher:
 
     @staticmethod
     async def _scope(session: AsyncSession, principal: AuthenticatedPrincipal) -> None:
-        await session.execute(text("SELECT set_config('app.tenant_id', :value, true)"), {"value": principal.tenant_id})
-        await session.execute(text("SELECT set_config('app.workspace_id', :value, true)"), {"value": principal.workspace_id})
+        await session.execute(
+            text("SELECT set_config('app.tenant_id', :value, true)"), {"value": principal.tenant_id}
+        )
+        await session.execute(
+            text("SELECT set_config('app.workspace_id', :value, true)"),
+            {"value": principal.workspace_id},
+        )
 
     @staticmethod
     def _uuid(value: str, name: str) -> str:
@@ -134,6 +149,40 @@ class ToolDispatcher:
             raise ToolPolicyDeniedError(f"Invalid trusted {name}") from exc
 
     async def _resolve(self, session: AsyncSession, call: ToolInvocation) -> dict[str, Any]:
+        # Re-check live tenant/workspace/membership state inside this DB transaction before tool grants.
+        live_membership = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT * FROM iam.resolve_user_workspace_membership("
+                        "CAST(:user_id AS uuid), CAST(:workspace_id AS uuid))"
+                    ),
+                    {
+                        "user_id": self._uuid(call.principal.user_id, "user_id"),
+                        "workspace_id": self._uuid(call.principal.workspace_id, "workspace_id"),
+                    },
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            live_membership is None
+            or live_membership.get("tenant_status", "active") != "active"
+            or live_membership.get("workspace_status", "active") != "active"
+            or str(live_membership["tenant_id"]) != call.principal.tenant_id
+        ):
+            raise ToolPolicyDeniedError("Active workspace membership required for tool execution")
+
+        live_role = str(live_membership["role"])
+        effective_roles = (
+            [r for r in call.principal.roles if r == live_role]
+            if call.principal.roles
+            else [live_role]
+        )
+        if not effective_roles:
+            raise ToolPolicyDeniedError("Caller role no longer matches live workspace membership")
+
         result = await session.execute(
             text("""
                 SELECT t.id AS tool_id, t.kind, tv.id AS tool_version_id, tv.input_schema,
@@ -166,8 +215,12 @@ class ToolDispatcher:
                   AND principal_kind = 'role' AND principal_key = ANY(CAST(:roles AS text[]))
                 LIMIT 1
             """),
-            {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-             "tool_id": str(tool["tool_id"]), "roles": list(call.principal.roles)},
+            {
+                "tenant_id": call.principal.tenant_id,
+                "workspace_id": call.principal.workspace_id,
+                "tool_id": str(tool["tool_id"]),
+                "roles": effective_roles,
+            },
         )
         if grant.scalar_one_or_none() is None:
             raise ToolPolicyDeniedError("No active server-side tool grant for this principal")
@@ -187,18 +240,27 @@ class ToolDispatcher:
                 WHERE m.tenant_id = CAST(:tenant_id AS uuid) AND m.workspace_id = CAST(:workspace_id AS uuid)
                   AND m.tool_version_id = CAST(:tool_version_id AS uuid)
             """),
-            {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-             "tool_version_id": str(resolved["tool_version_id"])},
+            {
+                "tenant_id": call.principal.tenant_id,
+                "workspace_id": call.principal.workspace_id,
+                "tool_version_id": str(resolved["tool_version_id"]),
+            },
         )
         mapping = mapping_result.mappings().one_or_none()
-        if mapping is None or mapping["mapping_status"] != "approved" or mapping["connection_status"] != "active":
+        if (
+            mapping is None
+            or mapping["mapping_status"] != "approved"
+            or mapping["connection_status"] != "active"
+        ):
             raise ToolPolicyDeniedError("MCP mapping or connection is not active and approved")
         if not isinstance(mapping["discovered_schema_sha256"], str) or (
             mapping["approved_schema_sha256"].strip() != mapping["discovered_schema_sha256"].strip()
         ):
             raise ToolPolicyDeniedError("MCP mapping schema has drifted since review")
         if mapping["secret_ref"] is not None:
-            raise ToolPolicyDeniedError("MCP connection requires an approved server-side secret resolver")
+            raise ToolPolicyDeniedError(
+                "MCP connection requires an approved server-side secret resolver"
+            )
         connection_config = dict(mapping["config"])
         endpoint = connection_config.get("endpoint")
         if not isinstance(endpoint, str):
@@ -215,8 +277,12 @@ class ToolDispatcher:
         }
         return resolved
 
-    async def _verify_approval(self, session: AsyncSession, call: ToolInvocation, tool: dict[str, Any]) -> None:
-        needs_approval = tool["risk"] in ("write", "high_impact") or tool["usage_mode"] == "requires_approval"
+    async def _verify_approval(
+        self, session: AsyncSession, call: ToolInvocation, tool: dict[str, Any]
+    ) -> None:
+        needs_approval = (
+            tool["risk"] in ("write", "high_impact") or tool["usage_mode"] == "requires_approval"
+        )
         if not needs_approval:
             return
         if call.approval_request_id is None:
@@ -230,21 +296,46 @@ class ToolDispatcher:
                   AND workspace_id = CAST(:workspace_id AS uuid) AND run_id = CAST(:run_id AS uuid)
                   AND step_key = :step_key AND expires_at > now()
             """),
-            {"approval_id": self._uuid(call.approval_request_id, "approval_request_id"), "tenant_id": call.principal.tenant_id,
-             "workspace_id": call.principal.workspace_id, "run_id": self._uuid(call.run_id, "run_id"), "step_key": call.step_key},
+            {
+                "approval_id": self._uuid(call.approval_request_id, "approval_request_id"),
+                "tenant_id": call.principal.tenant_id,
+                "workspace_id": call.principal.workspace_id,
+                "run_id": self._uuid(call.run_id, "run_id"),
+                "step_key": call.step_key,
+            },
         )
         approval = result.mappings().one_or_none()
         if approval is None or approval["status"] != "approved":
             raise ToolApprovalRequiredError("No current approved action exists")
         if approval["action_hash"].strip() != action_hash:
-            raise ToolApprovalRequiredError("Approved action does not match the canonical invocation")
+            raise ToolApprovalRequiredError(
+                "Approved action does not match the canonical invocation"
+            )
 
-    async def _reserve(self, call: ToolInvocation, tool: dict[str, Any], request_hash: str) -> ToolResult | None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                await self._scope(session, call.principal)
-                inserted = await session.execute(
-                    text("""
+    async def _reauthorize_before_execution(
+        self,
+        call: ToolInvocation,
+    ) -> dict[str, Any]:
+        """Recheck live membership, grants, mapping, and approval immediately before dispatch."""
+        async with self._session_factory() as session, session.begin():
+            await self._scope(session, call.principal)
+            tool = await self._resolve(session, call)
+            try:
+                Draft202012Validator(tool["input_schema"]).validate(call.arguments)
+            except ValidationError as exc:
+                raise ToolSchemaValidationError(
+                    "Tool arguments do not match the currently authorized pinned schema"
+                ) from exc
+            await self._verify_approval(session, call, tool)
+            return tool
+
+    async def _reserve(
+        self, call: ToolInvocation, tool: dict[str, Any], request_hash: str
+    ) -> ToolResult | None:
+        async with self._session_factory() as session, session.begin():
+            await self._scope(session, call.principal)
+            inserted = await session.execute(
+                text("""
                         INSERT INTO runtime.tool_operations
                             (tenant_id, workspace_id, run_id, tool_version_id, operation_key, request_hash, status)
                         VALUES (CAST(:tenant_id AS uuid), CAST(:workspace_id AS uuid), CAST(:run_id AS uuid),
@@ -252,49 +343,75 @@ class ToolDispatcher:
                         ON CONFLICT (tenant_id, workspace_id, operation_key) DO NOTHING
                         RETURNING id
                     """),
-                    {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-                     "run_id": self._uuid(call.run_id, "run_id"), "tool_version_id": str(tool["tool_version_id"]),
-                     "operation_key": call.operation_key, "request_hash": request_hash},
-                )
-                if inserted.scalar_one_or_none() is not None:
-                    return None
-                existing = (await session.execute(
-                    text("""
+                {
+                    "tenant_id": call.principal.tenant_id,
+                    "workspace_id": call.principal.workspace_id,
+                    "run_id": self._uuid(call.run_id, "run_id"),
+                    "tool_version_id": str(tool["tool_version_id"]),
+                    "operation_key": call.operation_key,
+                    "request_hash": request_hash,
+                },
+            )
+            if inserted.scalar_one_or_none() is not None:
+                return None
+            existing = (
+                (
+                    await session.execute(
+                        text("""
                         SELECT request_hash, status, external_reference FROM runtime.tool_operations
                         WHERE tenant_id = CAST(:tenant_id AS uuid) AND workspace_id = CAST(:workspace_id AS uuid)
                           AND operation_key = :operation_key FOR UPDATE
                     """),
-                    {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-                     "operation_key": call.operation_key},
-                )).mappings().one()
-                if existing["request_hash"].strip() != request_hash:
-                    raise ToolIdempotencyConflictError("operation_key was previously used for different arguments")
-                if existing["status"] == "succeeded":
-                    return ToolResult("succeeded", call.operation_key, True, None, existing["external_reference"])
-                if existing["status"] == "unknown":
-                    raise ToolAmbiguousOutcomeError("Operation outcome is unknown and requires reconciliation")
-                raise ToolIdempotencyConflictError("Operation is already reserved or executing")
+                        {
+                            "tenant_id": call.principal.tenant_id,
+                            "workspace_id": call.principal.workspace_id,
+                            "operation_key": call.operation_key,
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if existing["request_hash"].strip() != request_hash:
+                raise ToolIdempotencyConflictError(
+                    "operation_key was previously used for different arguments"
+                )
+            if existing["status"] == "succeeded":
+                return ToolResult(
+                    "succeeded", call.operation_key, True, None, existing["external_reference"]
+                )
+            if existing["status"] == "unknown":
+                raise ToolAmbiguousOutcomeError(
+                    "Operation outcome is unknown and requires reconciliation"
+                )
+            raise ToolIdempotencyConflictError("Operation is already reserved or executing")
 
-    async def _transition(self, call: ToolInvocation, status: str, *, external_reference: str | None = None) -> None:
-        async with self._session_factory() as session:
-            async with session.begin():
-                await self._scope(session, call.principal)
-                result = await session.execute(
-                    text("""
+    async def _transition(
+        self, call: ToolInvocation, status: str, *, external_reference: str | None = None
+    ) -> None:
+        async with self._session_factory() as session, session.begin():
+            await self._scope(session, call.principal)
+            result = await session.execute(
+                text("""
                         UPDATE runtime.tool_operations
                         SET status = :status, last_attempt_at = now(), external_reference = :external_reference
                         WHERE tenant_id = CAST(:tenant_id AS uuid) AND workspace_id = CAST(:workspace_id AS uuid)
                           AND operation_key = :operation_key
                           AND status = CASE WHEN :status = 'executing' THEN 'reserved' ELSE 'executing' END
                     """),
-                    {"status": status, "external_reference": external_reference, "tenant_id": call.principal.tenant_id,
-                     "workspace_id": call.principal.workspace_id, "operation_key": call.operation_key},
-                )
-                if result.rowcount != 1:
-                    raise ToolExecutionError("Tool operation state transition was lost")
-                if status in {"succeeded", "failed", "unknown"}:
-                    sequence_result = await session.execute(
-                        text("""
+                {
+                    "status": status,
+                    "external_reference": external_reference,
+                    "tenant_id": call.principal.tenant_id,
+                    "workspace_id": call.principal.workspace_id,
+                    "operation_key": call.operation_key,
+                },
+            )
+            if result.rowcount != 1:
+                raise ToolExecutionError("Tool operation state transition was lost")
+            if status in {"succeeded", "failed", "unknown"}:
+                sequence_result = await session.execute(
+                    text("""
                             UPDATE runtime.runs
                             SET next_event_seq = next_event_seq + 1
                             WHERE id = CAST(:run_id AS uuid)
@@ -302,37 +419,48 @@ class ToolDispatcher:
                               AND workspace_id = CAST(:workspace_id AS uuid)
                             RETURNING next_event_seq - 1 AS sequence
                         """),
-                        {"run_id": self._uuid(call.run_id, "run_id"), "tenant_id": call.principal.tenant_id,
-                         "workspace_id": call.principal.workspace_id},
-                    )
-                    sequence = sequence_result.scalar_one_or_none()
-                    if sequence is None:
-                        raise ToolExecutionError("Run disappeared before terminal tool receipt")
-                    receipt = {"operation_key": call.operation_key, "status": status}
-                    await session.execute(
-                        text("""
+                    {
+                        "run_id": self._uuid(call.run_id, "run_id"),
+                        "tenant_id": call.principal.tenant_id,
+                        "workspace_id": call.principal.workspace_id,
+                    },
+                )
+                sequence = sequence_result.scalar_one_or_none()
+                if sequence is None:
+                    raise ToolExecutionError("Run disappeared before terminal tool receipt")
+                receipt = {"operation_key": call.operation_key, "status": status}
+                await session.execute(
+                    text("""
                             UPDATE runtime.tool_operations
                             SET result_ref = :result_ref
                             WHERE tenant_id = CAST(:tenant_id AS uuid)
                               AND workspace_id = CAST(:workspace_id AS uuid)
                               AND operation_key = :operation_key
                         """),
-                        {"result_ref": f"run_event:{sequence}", "tenant_id": call.principal.tenant_id,
-                         "workspace_id": call.principal.workspace_id, "operation_key": call.operation_key},
-                    )
-                    await session.execute(
-                        text("""
+                    {
+                        "result_ref": f"run_event:{sequence}",
+                        "tenant_id": call.principal.tenant_id,
+                        "workspace_id": call.principal.workspace_id,
+                        "operation_key": call.operation_key,
+                    },
+                )
+                await session.execute(
+                    text("""
                             INSERT INTO runtime.run_events
                                 (tenant_id, workspace_id, run_id, sequence, event_type, redacted_payload)
                             VALUES (CAST(:tenant_id AS uuid), CAST(:workspace_id AS uuid), CAST(:run_id AS uuid),
                                     :sequence, 'tool.operation.receipt', CAST(:payload AS jsonb))
                         """),
-                        {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-                         "run_id": self._uuid(call.run_id, "run_id"), "sequence": sequence,
-                         "payload": self._canonical(receipt)},
-                    )
-                    await session.execute(
-                        text("""
+                    {
+                        "tenant_id": call.principal.tenant_id,
+                        "workspace_id": call.principal.workspace_id,
+                        "run_id": self._uuid(call.run_id, "run_id"),
+                        "sequence": sequence,
+                        "payload": self._canonical(receipt),
+                    },
+                )
+                await session.execute(
+                    text("""
                             INSERT INTO governance.audit_events
                                 (tenant_id, workspace_id, actor_subject, action, resource_type, resource_id,
                                  outcome, trace_id, details_redacted)
@@ -340,40 +468,55 @@ class ToolDispatcher:
                                     'tool.invoke', 'runtime.tool_operations', :operation_key, :outcome,
                                     :trace_id, CAST(:details AS jsonb))
                         """),
-                        {"tenant_id": call.principal.tenant_id, "workspace_id": call.principal.workspace_id,
-                         "actor_subject": call.principal.user_id, "operation_key": call.operation_key,
-                         "outcome": "succeeded" if status == "succeeded" else "failed", "trace_id": call.trace_id,
-                         "details": self._canonical(receipt)},
-                    )
+                    {
+                        "tenant_id": call.principal.tenant_id,
+                        "workspace_id": call.principal.workspace_id,
+                        "actor_subject": call.principal.user_id,
+                        "operation_key": call.operation_key,
+                        "outcome": "succeeded" if status == "succeeded" else "failed",
+                        "trace_id": call.trace_id,
+                        "details": self._canonical(receipt),
+                    },
+                )
 
     async def execute(self, call: ToolInvocation) -> ToolResult:
         self._uuid(call.run_id, "run_id")
         if not call.operation_key or len(call.operation_key) > 200:
             raise ToolSchemaValidationError("operation_key is required and must be bounded")
         request_hash = hashlib.sha256(self._canonical(call.arguments).encode("utf-8")).hexdigest()
-        async with self._session_factory() as session:
-            async with session.begin():
-                await self._scope(session, call.principal)
-                tool = await self._resolve(session, call)
-                try:
-                    Draft202012Validator(tool["input_schema"]).validate(call.arguments)
-                except ValidationError as exc:
-                    raise ToolSchemaValidationError("Tool arguments do not match the pinned schema") from exc
-                await self._verify_approval(session, call, tool)
+        async with self._session_factory() as session, session.begin():
+            await self._scope(session, call.principal)
+            tool = await self._resolve(session, call)
+            try:
+                Draft202012Validator(tool["input_schema"]).validate(call.arguments)
+            except ValidationError as exc:
+                raise ToolSchemaValidationError(
+                    "Tool arguments do not match the pinned schema"
+                ) from exc
+            await self._verify_approval(session, call, tool)
         prior = await self._reserve(call, tool, request_hash)
         if prior is not None:
             return prior
         await self._transition(call, "executing")
+        try:
+            tool = await self._reauthorize_before_execution(call)
+        except Exception:
+            await self._transition(call, "failed")
+            raise
         adapter = self._adapters.get(tool["kind"])
         if adapter is None:
             await self._transition(call, "failed")
             raise ToolPolicyDeniedError("No reviewed adapter is registered for this tool kind")
         config = dict(tool["execution_config"])
         try:
-            result, external_reference = await adapter.invoke(config, call.arguments, call.operation_key)
+            result, external_reference = await adapter.invoke(
+                config, call.arguments, call.operation_key
+            )
             Draft202012Validator(tool["output_schema"]).validate(result)
         except Exception:
-            await self._transition(call, "unknown" if tool["risk"] in ("write", "high_impact") else "failed")
+            await self._transition(
+                call, "unknown" if tool["risk"] in ("write", "high_impact") else "failed"
+            )
             raise
         await self._transition(call, "succeeded", external_reference=external_reference)
         return ToolResult("succeeded", call.operation_key, False, result, external_reference)

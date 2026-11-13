@@ -1,10 +1,5 @@
-from control_api.core.dependencies import CurrentUser
-from fastapi import APIRouter
+"""Backward-compatible router re-export for Workspaces module (SPEC-WORKSPACE-001 / Step 03-A)."""
 
-router = APIRouter(prefix="/v1/workspaces/{workspace_id}/workspaces", tags=["workspaces"])
+from control_api.modules.workspaces.api.router import router
 
-
-@router.get("")
-def list_items(workspace_id: str, principal: CurrentUser):
-    return {"module": "workspaces", "workspace_id": principal.workspace_id, "items": []}
-
+__all__ = ["router"]

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 
+from control_api.core.cookies import (
+    clear_invitation_handoff_cookie,
+    set_invitation_handoff_cookie,
+)
 from control_api.core.settings import settings
 from fastapi import Response
 
@@ -83,3 +87,14 @@ def clear_correlation_cookie(response: Response | None) -> None:
             secure=settings.oidc_correlation_cookie_secure,
             samesite=settings.oidc_correlation_cookie_same_site,  # type: ignore[arg-type]
         )
+
+
+__all__ = [
+    "clear_correlation_cookie",
+    "clear_invitation_handoff_cookie",
+    "clear_session_cookie",
+    "get_clear_session_cookie_headers",
+    "set_correlation_cookie",
+    "set_invitation_handoff_cookie",
+    "set_session_cookie",
+]

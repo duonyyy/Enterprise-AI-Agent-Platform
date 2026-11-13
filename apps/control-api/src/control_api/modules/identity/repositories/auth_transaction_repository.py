@@ -98,6 +98,8 @@ class RedisAuthTransactionStore(BaseAuthTransactionStore):
             "return_to": tx.return_to,
             "browser_correlation": tx.browser_correlation,
             "created_at": tx.created_at,
+            "pending_invitation_id": tx.pending_invitation_id,
+            "pending_handoff_binding_digest": tx.pending_handoff_binding_digest,
         }
         try:
             self._client.set(f"auth_tx:{tx.state}", json.dumps(data), ex=self._ttl_seconds)
@@ -135,6 +137,8 @@ class RedisAuthTransactionStore(BaseAuthTransactionStore):
 
         try:
             data = json.loads(raw)
+            pending_inv = data.get("pending_invitation_id")
+            pending_digest = data.get("pending_handoff_binding_digest")
             return AuthTransaction(
                 state=data["state"],
                 nonce=data["nonce"],
@@ -143,6 +147,10 @@ class RedisAuthTransactionStore(BaseAuthTransactionStore):
                 return_to=data["return_to"],
                 browser_correlation=data.get("browser_correlation", ""),
                 created_at=int(data["created_at"]),
+                pending_invitation_id=pending_inv if isinstance(pending_inv, str) and pending_inv else None,
+                pending_handoff_binding_digest=(
+                    pending_digest if isinstance(pending_digest, str) and pending_digest else None
+                ),
             )
         except (KeyError, ValueError, json.JSONDecodeError):
             return None

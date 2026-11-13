@@ -12,7 +12,7 @@ import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from tests.fixtures.oidc_test_server import OidcTestServer
 
@@ -25,7 +25,40 @@ class _OidcRequestHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        path = self.path.split("?")[0]
+        path, _, raw_query = self.path.partition("?")
+        if path == "/protocol/openid-connect/auth":
+            profile = getattr(self.server.oidc, "interactive_login_profile", None)
+            if not isinstance(profile, dict):
+                self.send_response(404)
+                self.end_headers()
+                return
+            qs = parse_qs(raw_query)
+            observed = getattr(self.server.oidc, "observed_auth_queries", None)
+            if isinstance(observed, list):
+                observed.append(dict(qs))
+            redirect_uri = qs.get("redirect_uri", [""])[0]
+            state = qs.get("state", [""])[0]
+            nonce = qs.get("nonce", [""])[0]
+            code_challenge = qs.get("code_challenge", [""])[0]
+            client_id = qs.get("client_id", [""])[0]
+            code = self.server.oidc.create_authorization_code(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                state=state,
+                nonce=nonce,
+                code_challenge=code_challenge,
+                subject=str(profile["subject"]),
+                name=str(profile.get("name", "OIDC User")),
+                email=str(profile["email"]),
+                email_verified=profile.get("email_verified", True),
+                iat_override=profile.get("iat_override"),
+            )
+            sep = "&" if "?" in redirect_uri else "?"
+            target = f"{redirect_uri}{sep}{urlencode({'code': code, 'state': state})}"
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+            return
         if path == "/protocol/openid-connect/certs":
             body = json.dumps(self.server.oidc.get_jwks()).encode("utf-8")
             self.send_response(200)

@@ -91,7 +91,9 @@ class OidcTestServer:
         code_challenge_method: str = "S256",
         subject: str = "user-12345",
         name: str = "Test User",
-        email: str = "test.user@enterprise.vn",
+        email: str | None = "test.user@enterprise.vn",
+        email_verified: Any = True,
+        iat_override: int | None = None,
     ) -> str:
         """Generate authorization code bound to PKCE challenge and user identity."""
         code = f"auth-code-{secrets.token_urlsafe(24)}"
@@ -105,6 +107,8 @@ class OidcTestServer:
             "subject": subject,
             "name": name,
             "email": email,
+            "email_verified": email_verified,
+            "iat_override": iat_override,
             "created_at": time.time(),
         }
         return code
@@ -131,21 +135,25 @@ class OidcTestServer:
             raise ValueError("invalid_grant: redirect_uri mismatch")
 
         now = custom_now if custom_now is not None else int(time.time())
+        iat = auth_data["iat_override"] if auth_data.get("iat_override") is not None else now
 
         # Construct ID Token Claims
-        payload = {
+        payload: dict[str, Any] = {
             "iss": self.issuer,
             "sub": auth_data["subject"],
             "aud": client_id,
             "azp": client_id,
             "nonce": auth_data["nonce"],
             "name": auth_data["name"],
-            "preferred_username": auth_data["email"],
-            "email": auth_data["email"],
-            "iat": now,
+            "iat": iat,
             "exp": now + 3600,
-            "auth_time": now,
+            "auth_time": iat,
         }
+        if auth_data["email"] is not None:
+            payload["preferred_username"] = auth_data["email"]
+            payload["email"] = auth_data["email"]
+        if "email_verified" in auth_data and auth_data["email_verified"] is not Ellipsis:
+            payload["email_verified"] = auth_data["email_verified"]
 
         # Sign ID Token with active RSA key
         header = {"alg": "RS256", "typ": "JWT", "kid": self.active_key.kid}

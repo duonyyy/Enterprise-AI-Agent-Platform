@@ -1,21 +1,26 @@
 import asyncio
 import time
+from typing import Any
 
 from fastapi import FastAPI, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from control_api.core.database import engine
+from control_api.core.errors import RepositoryUnavailableError
 from control_api.core.settings import settings
 from control_api.modules.agents.api.router import router as agents_router
 from control_api.modules.approvals.router import router as approvals_router
 from control_api.modules.identity.api.router import router as identity_router
-from control_api.modules.identity.models.errors import (
-    RepositoryUnavailableError,
-    SessionExpiredError,
-)
+from control_api.modules.identity.models.errors import SessionExpiredError
 from control_api.modules.mcp.api.router import router as mcp_router
 from control_api.modules.skills.api.router import router as skills_router
+from control_api.modules.workspaces.api.invitation_accept_router import (
+    router as invitation_accept_router,
+)
+from control_api.modules.workspaces.api.router import router as workspaces_router
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
 
@@ -106,6 +111,26 @@ async def repository_unavailable_handler(
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def sanitized_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Scrub secret invitation proof inputs from HTTP 422 validation error responses."""
+    is_handoff = request.url.path.endswith("/handoff")
+    sanitized: list[dict[str, Any]] = []
+    for err in exc.errors():
+        cleaned = dict(err)
+        loc = tuple(str(part) for part in cleaned.get("loc", ()))
+        if is_handoff or any(k in loc for k in ("token", "proof", "secret", "password")):
+            cleaned.pop("input", None)
+        sanitized.append(cleaned)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": jsonable_encoder(sanitized)},
+    )
+
+
 @app.exception_handler(SessionExpiredError)
 async def session_expired_handler(
     _request: Request,
@@ -120,6 +145,8 @@ async def session_expired_handler(
 
 
 app.include_router(identity_router)
+app.include_router(invitation_accept_router)
+app.include_router(workspaces_router)
 app.include_router(agents_router)
 app.include_router(approvals_router)
 app.include_router(skills_router)

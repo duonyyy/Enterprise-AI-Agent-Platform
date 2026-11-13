@@ -65,6 +65,8 @@ class OidcClient:
         """Validate return_to URL to prevent open redirects (AU-01 / Finding R08)."""
         if not return_to:
             return "/login"
+        if any(ch in return_to for ch in ("\r", "\n", "\x00", "#")):
+            return "/login"
         # Relative paths on same host are allowed
         if return_to.startswith("/") and not return_to.startswith("//") and "\\" not in return_to:
             # Prevent defaulting to fake workspace
@@ -84,6 +86,10 @@ class OidcClient:
         self,
         return_to: str | None = None,
         browser_correlation: str = "",
+        *,
+        invitation_id: str | None = None,
+        handoff_binding_digest: str | None = None,
+        reauth: bool = False,
     ) -> tuple[str, str]:
         """Initiate OIDC Authorization Code Flow with PKCE S256 and browser-bound correlation."""
         safe_return_to = self.validate_return_to(return_to)
@@ -99,6 +105,8 @@ class OidcClient:
             return_to=safe_return_to,
             browser_correlation=browser_correlation,
             created_at=int(time.time()),
+            pending_invitation_id=invitation_id,
+            pending_handoff_binding_digest=handoff_binding_digest,
         )
         self._run_store_op(lambda: self.store.save(tx))
 
@@ -115,6 +123,8 @@ class OidcClient:
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
+        if reauth:
+            params["prompt"] = "login"
         authorization_url = f"{auth_endpoint}?{urlencode(params)}"
         return authorization_url, state
 

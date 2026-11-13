@@ -89,6 +89,263 @@ export interface WorkspaceTokenResponse {
   expires_in: number;
 }
 
+export interface CreateWorkspaceRequestDTO {
+  name: string;
+  slug: string;
+  tenant_id?: string | null;
+  tenant_slug?: string | null;
+  tenant_name?: string | null;
+  initial_owner_user_id?: string | null;
+}
+
+export interface WorkspaceResponseDTO {
+  workspace_id: string;
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_slug: string;
+  workspace_name: string;
+  status: string;
+  role: string;
+  initial_owner_user_id?: string | null;
+  audit_event_id?: string | null;
+  created_at: string;
+}
+
+export interface WorkspaceSummaryDTO {
+  workspace_id: string;
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  workspace_slug: string;
+  workspace_name: string;
+  status: string;
+  role: string;
+}
+
+export interface WorkspaceListResponseDTO {
+  items: WorkspaceSummaryDTO[];
+}
+
+export type WorkspaceRole = "owner" | "admin" | "developer" | "operator" | "viewer";
+export type InvitableWorkspaceRole = "admin" | "developer" | "operator" | "viewer";
+export type AdminManageableWorkspaceRole = "developer" | "operator" | "viewer";
+export type MembershipStatus = "active" | "invited" | "revoked";
+
+export const WORKSPACE_ROLES: readonly WorkspaceRole[] = [
+  "owner",
+  "admin",
+  "developer",
+  "operator",
+  "viewer",
+];
+export const INVITABLE_WORKSPACE_ROLES: readonly InvitableWorkspaceRole[] = [
+  "admin",
+  "developer",
+  "operator",
+  "viewer",
+];
+export const ADMIN_MANAGEABLE_WORKSPACE_ROLES: readonly AdminManageableWorkspaceRole[] = [
+  "developer",
+  "operator",
+  "viewer",
+];
+
+export function canActorManageTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole
+): boolean {
+  if (actorRole === "owner") {
+    return true;
+  }
+  if (actorRole === "admin") {
+    return targetCurrentRole === "developer" || targetCurrentRole === "operator" || targetCurrentRole === "viewer";
+  }
+  return false;
+}
+
+export function canActorAssignTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole,
+  newRole: WorkspaceRole
+): boolean {
+  if (!canActorManageTargetRole(actorRole, targetCurrentRole)) {
+    return false;
+  }
+  if (actorRole === "owner") {
+    return true;
+  }
+  if (actorRole === "admin") {
+    return newRole === "developer" || newRole === "operator" || newRole === "viewer";
+  }
+  return false;
+}
+
+export function canActorRevokeTargetRole(
+  actorRole: string | undefined,
+  targetCurrentRole: WorkspaceRole
+): boolean {
+  return canActorManageTargetRole(actorRole, targetCurrentRole);
+}
+
+export interface WorkspaceMembershipDTO {
+  membership_id: string;
+  user_id: string;
+  display_name: string | null;
+  role: WorkspaceRole;
+  status: MembershipStatus;
+  joined_at: string;
+}
+
+export interface WorkspaceMembershipListResponseDTO {
+  items: WorkspaceMembershipDTO[];
+  next_cursor?: string | null;
+}
+
+export interface ListWorkspaceMembershipsOptions {
+  limit?: number;
+  cursor?: string | null;
+  status?: MembershipStatus;
+  signal?: AbortSignal;
+}
+
+export interface UpdateWorkspaceMembershipRoleRequestDTO {
+  role: WorkspaceRole;
+  expected_role: WorkspaceRole;
+  expected_status: "active";
+}
+
+export interface WorkspaceMembershipRoleUpdateResponseDTO extends WorkspaceMembershipDTO {
+  outcome: "updated" | "no_op";
+  audit_event_id: string | null;
+}
+
+export interface RevokeWorkspaceMembershipRequestDTO {
+  expected_role: WorkspaceRole;
+  expected_status: "active";
+}
+
+export interface WorkspaceMembershipRevokeResponseDTO extends WorkspaceMembershipDTO {
+  outcome: "revoked" | "already_revoked";
+  audit_event_id: string | null;
+}
+
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+export type InvitationDeliveryState =
+  | "queued"
+  | "sending"
+  | "provider_accepted"
+  | "failed"
+  | "unknown"
+  | "cancelled";
+
+export interface CreateWorkspaceInvitationRequestDTO {
+  email: string;
+  role: InvitableWorkspaceRole;
+}
+
+export interface WorkspaceInvitationResponseDTO {
+  invitation_id: string;
+  tenant_id: string;
+  workspace_id: string;
+  recipient_email_normalized: string;
+  recipient_issuer: string;
+  role: InvitableWorkspaceRole;
+  status: InvitationStatus;
+  generation: number;
+  delivery_state: InvitationDeliveryState;
+  delivery_error_code?: string | null;
+  created_by_user_id: string;
+  delivery_requested_by_user_id: string;
+  revoked_by_user_id?: string | null;
+  accepted_by_user_id?: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  provider_accepted_at?: string | null;
+  revoked_at?: string | null;
+  accepted_at?: string | null;
+  audit_event_id?: string | null;
+  outbox_event_id?: string | null;
+}
+
+export interface WorkspaceInvitationListResponseDTO {
+  items: WorkspaceInvitationResponseDTO[];
+  next_cursor?: string | null;
+}
+
+export interface InvitationHandoffRequestDTO {
+  token: string;
+}
+
+export interface InvitationHandoffResponseDTO {
+  expires_at: string;
+}
+
+export type InvitationPreviewResponseDTO =
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      tenant_slug: string;
+      tenant_name: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: InvitableWorkspaceRole;
+      status: "pending" | "accepted";
+      expires_at: string;
+      can_accept: boolean;
+      acceptance_state: "ready" | "already_accepted";
+    }
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      tenant_slug: string;
+      tenant_name: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: "owner";
+      status: "accepted";
+      expires_at: string;
+      can_accept: false;
+      acceptance_state: "already_accepted";
+    };
+
+export type InvitationAcceptResponseDTO =
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: InvitableWorkspaceRole;
+      acceptance_state: "accepted" | "already_accepted";
+      redirect_url: string;
+    }
+  | {
+      invitation_id: string;
+      tenant_id: string;
+      workspace_id: string;
+      workspace_slug: string;
+      workspace_name: string;
+      role: "owner";
+      acceptance_state: "already_accepted";
+      redirect_url: string;
+    };
+
+export interface LoginUrlOptions {
+  invitationId?: string;
+  reauth?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface ListWorkspaceInvitationsOptions {
+  limit?: number;
+  cursor?: string | null;
+  signal?: AbortSignal;
+}
+
 export class ApiClientError extends Error {
   public readonly status: number;
   public readonly statusText: string;
@@ -123,6 +380,49 @@ export class ApiClientError extends Error {
 
   get isConflict(): boolean {
     return this.status === 409;
+  }
+
+  get isUnprocessable(): boolean {
+    return this.status === 422;
+  }
+
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  get errorCode(): string | undefined {
+    if (typeof this.body === "object" && this.body !== null) {
+      const record = this.body as Record<string, unknown>;
+      if (typeof record.detail === "object" && record.detail !== null) {
+        const detail = record.detail as Record<string, unknown>;
+        if (typeof detail.code === "string") {
+          return detail.code;
+        }
+      }
+      if (typeof record.code === "string") {
+        return record.code;
+      }
+    }
+    return undefined;
+  }
+
+  get errorMessage(): string | undefined {
+    if (typeof this.body === "object" && this.body !== null) {
+      const record = this.body as Record<string, unknown>;
+      if (typeof record.detail === "object" && record.detail !== null) {
+        const detail = record.detail as Record<string, unknown>;
+        if (typeof detail.message === "string") {
+          return detail.message;
+        }
+      }
+      if (typeof record.detail === "string") {
+        return record.detail;
+      }
+      if (typeof record.message === "string") {
+        return record.message;
+      }
+    }
+    return undefined;
   }
 }
 
@@ -311,8 +611,28 @@ export class ControlApiClientV2 {
   }
 
   // --- Auth & Session API (SPEC-AUTH-001) ---
-  async getLoginUrl(returnTo?: string, signal?: AbortSignal): Promise<LoginInitiateResponse> {
-    const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+  async getLoginUrl(
+    returnTo?: string,
+    signalOrOptions?: AbortSignal | LoginUrlOptions
+  ): Promise<LoginInitiateResponse> {
+    const params = new URLSearchParams();
+    if (returnTo) {
+      params.set("return_to", returnTo);
+    }
+    let signal: AbortSignal | undefined;
+    if (signalOrOptions instanceof AbortSignal) {
+      signal = signalOrOptions;
+    } else if (signalOrOptions) {
+      if (signalOrOptions.invitationId) {
+        params.set("invitation_id", signalOrOptions.invitationId);
+      }
+      if (signalOrOptions.reauth) {
+        params.set("reauth", "true");
+      }
+      signal = signalOrOptions.signal;
+    }
+    const qs = params.toString();
+    const query = qs ? `?${qs}` : "";
     return this.request<LoginInitiateResponse>(`/v1/auth/login${query}`, {
       method: "GET",
       signal,
@@ -349,6 +669,212 @@ export class ControlApiClientV2 {
       body: JSON.stringify({ workspace_id: workspaceId }),
       signal,
     });
+  }
+
+  // --- Workspaces API (SPEC-WORKSPACE-001 / Step 03-A) ---
+  async createWorkspace(
+    dto: CreateWorkspaceRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceResponseDTO> {
+    return this.request<WorkspaceResponseDTO>("/v1/workspaces", {
+      method: "POST",
+      body: JSON.stringify(dto),
+      signal,
+    });
+  }
+
+  async listWorkspaces(signal?: AbortSignal): Promise<WorkspaceListResponseDTO> {
+    return this.request<WorkspaceListResponseDTO>("/v1/workspaces", {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async getWorkspace(
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceResponseDTO> {
+    return this.request<WorkspaceResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}`,
+      {
+        method: "GET",
+        signal,
+      }
+    );
+  }
+
+  // --- Workspace Invitations API (ADR-019 / Step 03-B) ---
+  async createWorkspaceInvitation(
+    workspaceId: string,
+    dto: CreateWorkspaceInvitationRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        signal,
+      }
+    );
+  }
+
+  async listWorkspaceInvitations(
+    workspaceId: string,
+    options: ListWorkspaceInvitationsOptions = {}
+  ): Promise<WorkspaceInvitationListResponseDTO> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options.cursor) {
+      params.set("cursor", options.cursor);
+    }
+    const query = params.toString();
+    const suffix = query ? `?${query}` : "";
+    return this.request<WorkspaceInvitationListResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations${suffix}`,
+      {
+        method: "GET",
+        signal: options.signal,
+      }
+    );
+  }
+
+  async resendWorkspaceInvitation(
+    workspaceId: string,
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/resend`,
+      {
+        method: "POST",
+        signal,
+      }
+    );
+  }
+
+  async revokeWorkspaceInvitation(
+    workspaceId: string,
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceInvitationResponseDTO> {
+    return this.request<WorkspaceInvitationResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}/revoke`,
+      {
+        method: "POST",
+        signal,
+      }
+    );
+  }
+
+  // --- Workspace Member Management API (ADR-021 / Step 03-D) ---
+  async listWorkspaceMemberships(
+    workspaceId: string,
+    options?: ListWorkspaceMembershipsOptions
+  ): Promise<WorkspaceMembershipListResponseDTO> {
+    const params = new URLSearchParams();
+    if (options?.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options?.cursor) {
+      params.set("cursor", options.cursor);
+    }
+    if (options?.status) {
+      params.set("status", options.status);
+    }
+    const qs = params.toString();
+    const path = qs
+      ? `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships?${qs}`
+      : `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships`;
+    return this.request<WorkspaceMembershipListResponseDTO>(path, {
+      method: "GET",
+      cache: "no-store",
+      signal: options?.signal,
+    });
+  }
+
+  async updateWorkspaceMembershipRole(
+    workspaceId: string,
+    membershipId: string,
+    dto: UpdateWorkspaceMembershipRoleRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceMembershipRoleUpdateResponseDTO> {
+    return this.request<WorkspaceMembershipRoleUpdateResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships/${encodeURIComponent(membershipId)}/role`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(dto),
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async revokeWorkspaceMembership(
+    workspaceId: string,
+    membershipId: string,
+    dto: RevokeWorkspaceMembershipRequestDTO,
+    signal?: AbortSignal
+  ): Promise<WorkspaceMembershipRevokeResponseDTO> {
+    return this.request<WorkspaceMembershipRevokeResponseDTO>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/memberships/${encodeURIComponent(membershipId)}/revoke`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  // --- Global Invitation Acceptance API (ADR-020 / Step 03-C) ---
+  async createInvitationHandoff(
+    invitationId: string,
+    dto: InvitationHandoffRequestDTO,
+    signal?: AbortSignal
+  ): Promise<InvitationHandoffResponseDTO> {
+    return this.request<InvitationHandoffResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/handoff`,
+      {
+        method: "POST",
+        body: JSON.stringify(dto),
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async previewInvitation(
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<InvitationPreviewResponseDTO> {
+    return this.request<InvitationPreviewResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/preview`,
+      {
+        method: "POST",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        signal,
+      }
+    );
+  }
+
+  async acceptInvitation(
+    invitationId: string,
+    signal?: AbortSignal
+  ): Promise<InvitationAcceptResponseDTO> {
+    return this.request<InvitationAcceptResponseDTO>(
+      `/v1/invitations/${encodeURIComponent(invitationId)}/accept`,
+      {
+        method: "POST",
+        referrerPolicy: "no-referrer",
+        cache: "no-store",
+        signal,
+      }
+    );
   }
 }
 

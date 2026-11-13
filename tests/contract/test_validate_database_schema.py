@@ -49,8 +49,11 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
     assert "reviewed 0002 content fingerprint" in result.stdout
     assert "reviewed 0003 content fingerprint" in result.stdout
     assert "reviewed 0004 content fingerprint" in result.stdout
+    assert "reviewed 0006 content fingerprint" in result.stdout
     assert "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy" in result.stdout
     assert "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections" in result.stdout
+    assert "0005_workspace_invitations.sql adds iam.workspace_invitations" in result.stdout
+    assert "0006_invitation_acceptance_projection.sql defines narrow SECURITY DEFINER invitation acceptance scope projection" in result.stdout
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -67,7 +70,7 @@ def test_missing_migration_file_fails(tmp_path: Path) -> None:
 def test_non_sequential_or_duplicate_migration_filename_fails(tmp_path: Path) -> None:
     validator = _load_validator_module()
     migrations_dir = _copy_migrations(tmp_path)
-    (migrations_dir / "0006_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
+    (migrations_dir / "0008_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Non-sequential migration numbering" in e for e in errors)
@@ -306,3 +309,51 @@ def test_direct_privileged_or_password_clause_is_rejected(tmp_path: Path, clause
     sql = path.read_text(encoding="utf-8")
     path.write_text(sql + f"\nCREATE ROLE fixture_user LOGIN {clause};\n", encoding="utf-8")
     assert any("forbidden direct" in e for e in validator.validate_database_schema(migrations))
+
+
+def test_workspace_invitations_migration_rejects_unapproved_table_or_missing_force_rls(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator_module()
+    migrations = _copy_migrations(tmp_path)
+    inv_path = migrations / "0005_workspace_invitations.sql"
+    original = inv_path.read_text(encoding="utf-8")
+
+    inv_path.write_text(
+        original.replace("COMMIT;", "CREATE TABLE iam.extra_inv (id uuid PRIMARY KEY);\nCOMMIT;"),
+        encoding="utf-8",
+    )
+    assert any("approved ADR-019 table" in e for e in validator.validate_database_schema(migrations))
+
+    inv_path.write_text(
+        original.replace("ALTER TABLE iam.workspace_invitations FORCE ROW LEVEL SECURITY;", ""),
+        encoding="utf-8",
+    )
+    assert any("FORCE ROW LEVEL SECURITY" in e for e in validator.validate_database_schema(migrations))
+
+
+def test_invitation_acceptance_projection_rejects_table_creation_or_fingerprint_drift(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator_module()
+    migrations = _copy_migrations(tmp_path)
+    proj_path = migrations / "0006_invitation_acceptance_projection.sql"
+    original = proj_path.read_text(encoding="utf-8")
+
+    proj_path.write_text(
+        original.replace("COMMIT;", "CREATE TABLE iam.extra_accept (id uuid PRIMARY KEY);\nCOMMIT;"),
+        encoding="utf-8",
+    )
+    errors = validator.validate_database_schema(migrations)
+    assert any("must not contain CREATE TABLE" in e for e in errors)
+    assert any("differs from the reviewed authored SQL fingerprint" in e for e in errors)
+
+    proj_path.write_text(
+        original.replace(
+            "DROP FUNCTION IF EXISTS iam.resolve_invitation_accept_scope(uuid);",
+            "-- removed drop",
+        ),
+        encoding="utf-8",
+    )
+    errors_missing_drop = validator.validate_database_schema(migrations)
+    assert any("must DROP FUNCTION IF EXISTS" in e for e in errors_missing_drop)
