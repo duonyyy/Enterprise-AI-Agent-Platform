@@ -132,7 +132,12 @@ def test_smtp_config_rejects_unsafe_plaintext_or_oversized_timeouts():
         )
 
 
-def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes():
+def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # smtplib resolves the local EHLO name during construction. This loopback
+    # protocol test must not depend on the host's external/reverse DNS latency.
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": "smtp-fixture.test")
     inv_id = str(uuid4())
     event_id = str(uuid4())
     ws_id = str(uuid4())
@@ -159,7 +164,7 @@ def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes
             expires_at_iso="2026-11-15T00:00:00Z",
             role="developer",
         )
-        assert res.outcome == "provider_accepted"
+        assert res.outcome == "provider_accepted", res
         assert res.error_code is None
         assert (
             f"<inv.{inv_id}.g1.{event_id}@platform.local>".encode("ascii") in srv_ok.received_data
@@ -189,7 +194,7 @@ def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes
             expires_at_iso="2026-11-15T00:00:00Z",
             role="developer",
         )
-        assert res.outcome == "transient_failure"
+        assert res.outcome == "transient_failure", res
     finally:
         srv_421.close()
 
@@ -215,7 +220,7 @@ def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes
             expires_at_iso="2026-11-15T00:00:00Z",
             role="developer",
         )
-        assert res.outcome == "permanent_failure"
+        assert res.outcome == "permanent_failure", res
         assert res.error_code == "SMTP_RCPT_REJECTED"
     finally:
         srv_550.close()
@@ -242,7 +247,7 @@ def test_stdlib_smtp_transport_accept_transient_permanent_and_ambiguous_outcomes
             expires_at_iso="2026-11-15T00:00:00Z",
             role="developer",
         )
-        assert res.outcome == "ambiguous_unknown"
+        assert res.outcome == "ambiguous_unknown", res
         assert res.error_code == "SMTP_AMBIGUOUS_DATA_OUTCOME"
     finally:
         srv_drop.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import email as email_stdlib
 import re
+import socket
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +47,12 @@ from tests.integration.test_workspace_invitations_real_postgres_smtp import (
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = ROOT / "database/migrations"
+
+
+@pytest.fixture(autouse=True)
+def _local_smtp_ehlo_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep lock/concurrency deadlines independent of the host's reverse DNS."""
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": "smtp-fixture.test")
 
 
 @contextmanager

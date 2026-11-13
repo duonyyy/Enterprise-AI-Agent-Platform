@@ -650,11 +650,17 @@ def test_concurrency_atomic_rollback_and_resend_revocation_races(
                     "invitation_repository",
                     InvitationRepository(broken_bus),
                 )
-                r_boom = await client.post(
-                    f"/v1/workspaces/{seeded['ws_a']}/invitations",
-                    headers=owner_headers,
-                    json={"email": "rollback@example.com", "role": "viewer"},
-                )
+                # Exercise the HTTP 500 boundary for this deliberately unhandled
+                # failure; other requests retain ASGITransport's exception checks.
+                async with AsyncClient(
+                    transport=ASGITransport(app=app, raise_app_exceptions=False),
+                    base_url="http://localhost:8000",
+                ) as failed_client:
+                    r_boom = await failed_client.post(
+                        f"/v1/workspaces/{seeded['ws_a']}/invitations",
+                        headers=owner_headers,
+                        json={"email": "rollback@example.com", "role": "viewer"},
+                    )
                 assert r_boom.status_code == 500
         finally:
             await async_engine.dispose()
