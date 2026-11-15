@@ -48,7 +48,46 @@ def test_distributions_validate_outside_checkout(tmp_path: Path) -> None:
     environment = tmp_path / "venv"
     _run([uv, "venv", "--python", sys.executable, str(environment)], tmp_path)
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    _run([uv, "pip", "install", "--offline", "--python", str(python), str(wheels[0])], tmp_path)
+    requirements = tmp_path / "locked-dependencies.txt"
+    _run(
+        [
+            uv,
+            "export",
+            "--locked",
+            "--package",
+            "agent-contracts",
+            "--no-dev",
+            "--no-emit-workspace",
+            "--output-file",
+            str(requirements),
+        ],
+        ROOT,
+    )
+    # A lock-based uv sync need not populate registry metadata for a later
+    # unconstrained offline resolver. Exercise a cold installer cache instead:
+    # fetch only locked, hash-verified dependencies, then install the wheel offline.
+    cold_cache = tmp_path / "installer-cache"
+    assert not cold_cache.exists()
+    _run(
+        [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--cache-dir",
+            str(cold_cache),
+            "--require-hashes",
+            "--requirements",
+            str(requirements),
+        ],
+        tmp_path,
+    )
+    _run(
+        [uv, "pip", "install", "--offline", "--no-deps", "--python", str(python), str(wheels[0])],
+        tmp_path,
+    )
+    _run([uv, "pip", "check", "--python", str(python)], tmp_path)
     env = os.environ.copy()
     env.pop("AGENT_SPEC_SCHEMA_PATH", None)
     # -I ignores PYTHONPATH, user site-packages, and the current directory.
