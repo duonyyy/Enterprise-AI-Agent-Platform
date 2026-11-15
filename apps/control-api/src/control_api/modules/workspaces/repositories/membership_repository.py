@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from control_api.core.audit import AuditEventWrite, write_audit_event
 from control_api.core.database import set_rls_context
 from control_api.modules.workspaces.models.enums import (
     ExpectedActiveStatus,
@@ -204,37 +204,22 @@ class MembershipRepository:
         trace_id: str,
         details: dict[str, Any],
     ) -> str:
-        row = (
-            (
-                await session.execute(
-                    text(
-                        "INSERT INTO governance.audit_events ("
-                        "    tenant_id, workspace_id, actor_subject, action, "
-                        "    resource_type, resource_id, outcome, request_id, "
-                        "    trace_id, reason_code, details_redacted"
-                        ") VALUES ("
-                        "    :tenant_id, :workspace_id, :actor_subject, :action, "
-                        "    'membership', :resource_id, 'succeeded', :request_id, "
-                        "    :trace_id, :reason_code, CAST(:details_redacted AS jsonb)"
-                        ") RETURNING id"
-                    ),
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "actor_subject": str(actor_user_id),
-                        "action": action,
-                        "resource_id": str(membership_id),
-                        "request_id": request_id,
-                        "trace_id": trace_id,
-                        "reason_code": action,
-                        "details_redacted": json.dumps(details, sort_keys=True),
-                    },
-                )
-            )
-            .mappings()
-            .one()
+        return await write_audit_event(
+            session,
+            AuditEventWrite(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                actor_subject=str(actor_user_id),
+                action=action,
+                resource_type="membership",
+                resource_id=str(membership_id),
+                outcome="succeeded",
+                request_id=request_id,
+                trace_id=trace_id,
+                reason_code=action,
+                details_redacted=details,
+            ),
         )
-        return str(row["id"])
 
     async def list_memberships(
         self,

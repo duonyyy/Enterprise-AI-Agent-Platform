@@ -6,6 +6,7 @@ from platform_common.errors import (
     StaleUpdateConflictError
 )
 from platform_common.principal import AuthenticatedPrincipal
+from platform_common.rls import set_rls_context
 from platform_common.event_bus import (
     EventBus,
     InMemoryEventBus,
@@ -25,6 +26,7 @@ __all__ = [
     "TenantIsolationViolation",
     "StaleUpdateConflictError",
     "AuthenticatedPrincipal",
+    "set_rls_context",
     "EventBus",
     "InMemoryEventBus",
     "PostgresOutboxEventBus",
