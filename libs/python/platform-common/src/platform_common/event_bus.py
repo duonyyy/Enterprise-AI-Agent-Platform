@@ -18,6 +18,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from platform_common.rls import set_rls_context
+
 
 class EventBusConfigurationError(RuntimeError):
     """Raised when a durable event transport has not been configured."""
@@ -140,14 +142,7 @@ class PostgresOutboxEventBus(EventBus):
         set_rls: bool = True,
     ) -> str:
         if set_rls:
-            await session.execute(
-                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
-                {"tenant_id": tenant_id},
-            )
-            await session.execute(
-                text("SELECT set_config('app.workspace_id', :workspace_id, true)"),
-                {"workspace_id": workspace_id},
-            )
+            await set_rls_context(session, tenant_id=tenant_id, workspace_id=workspace_id, user_id=None)
         if available_at is not None:
             await session.execute(
                 text("""

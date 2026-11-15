@@ -7,11 +7,11 @@ Zero Web/HTTP framework dependencies (AGENT_CODING_RULES.md §2).
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
+from control_api.core.audit import AuditEventWrite, write_audit_event
 from control_api.core.database import set_rls_context
 from control_api.modules.workspaces.models.errors import (
     WorkspaceAccessDeniedError,
@@ -249,48 +249,28 @@ class WorkspaceRepository:
                 .one()
             )
 
-            details_payload = json.dumps(
-                {
-                    "tenant_id": str(tenant_id),
-                    "tenant_slug": str(tenant_row["slug"]),
-                    "workspace_slug": str(ws_row["slug"]),
-                    "initial_owner_user_id": str(owner_user_id),
-                    "membership_id": str(membership_row["id"]),
-                    "tenant_bootstrapped": tenant_bootstrapped,
-                },
-                sort_keys=True,
-            )
-
-            stmt_audit = text(
-                "INSERT INTO governance.audit_events ("
-                "    tenant_id, workspace_id, actor_subject, action, "
-                "    resource_type, resource_id, outcome, request_id, "
-                "    trace_id, reason_code, details_redacted"
-                ") VALUES ("
-                "    :tenant_id, :workspace_id, :actor_subject, :action, "
-                "    'workspace', :resource_id, 'succeeded', :request_id, "
-                "    :trace_id, :reason_code, CAST(:details_redacted AS jsonb)"
-                ") RETURNING id, occurred_at"
-            )
-            audit_row = (
-                (
-                    await session.execute(
-                        stmt_audit,
-                        {
-                            "tenant_id": tenant_id,
-                            "workspace_id": workspace_id,
-                            "actor_subject": str(actor_user_id),
-                            "action": audit_action,
-                            "resource_id": str(workspace_id),
-                            "request_id": request_id,
-                            "trace_id": trace_id,
-                            "reason_code": reason_code,
-                            "details_redacted": details_payload,
-                        },
-                    )
-                )
-                .mappings()
-                .one()
+            audit_event_id = await write_audit_event(
+                session,
+                AuditEventWrite(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    actor_subject=str(actor_user_id),
+                    action=audit_action,
+                    resource_type="workspace",
+                    resource_id=str(workspace_id),
+                    outcome="succeeded",
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    reason_code=reason_code,
+                    details_redacted={
+                        "tenant_id": str(tenant_id),
+                        "tenant_slug": str(tenant_row["slug"]),
+                        "workspace_slug": str(ws_row["slug"]),
+                        "initial_owner_user_id": str(owner_user_id),
+                        "membership_id": str(membership_row["id"]),
+                        "tenant_bootstrapped": tenant_bootstrapped,
+                    },
+                ),
             )
 
         except WorkspaceAccessDeniedError:
@@ -321,7 +301,7 @@ class WorkspaceRepository:
             status=str(ws_row["status"]),
             role=str(membership_row["role"]),
             initial_owner_user_id=str(membership_row["user_id"]),
-            audit_event_id=str(audit_row["id"]),
+            audit_event_id=audit_event_id,
             created_at=created_at_iso,
         )
 

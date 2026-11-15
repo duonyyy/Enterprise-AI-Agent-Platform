@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
+from platform_common.rls import set_rls_context
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -46,29 +46,6 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     if _session_factory is None:  # pragma: no cover - defensive invariant
         raise RuntimeDatabaseUnavailable("Database session factory is unavailable")
     return _session_factory
-
-
-async def set_rls_context(
-    session: AsyncSession,
-    *,
-    tenant_id: str,
-    workspace_id: str,
-    user_id: str | None = None,
-) -> None:
-    """Bind transaction-local RLS context (`is_local = true`) for the active transaction."""
-    await session.execute(
-        text(
-            "SELECT "
-            "set_config('app.tenant_id', :tenant_id, true), "
-            "set_config('app.workspace_id', :workspace_id, true), "
-            "set_config('app.user_id', :user_id, true)"
-        ),
-        {
-            "tenant_id": tenant_id,
-            "workspace_id": workspace_id,
-            "user_id": user_id or "",
-        },
-    )
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:

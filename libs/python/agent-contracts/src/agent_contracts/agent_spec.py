@@ -1,24 +1,32 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field
 from agent_contracts.skill_spec import SkillRef
 
 class MetadataSpec(BaseModel):
-    name: str
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(..., pattern=r"^[a-z0-9_-]+$")
     displayName: Optional[str] = None
     description: Optional[str] = None
 
 class PersonaSpec(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     role: Optional[str] = "Assistant"
     tone: Optional[str] = "Professional"
     language: str = "vi"
     instructions: str
 
 class LimitsSpec(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     maxSteps: int = Field(default=10, ge=1, le=50)
     maxWallTimeSeconds: int = 180
     maxTotalTokens: int = 16000
 
 class AgentSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schemaVersion: Literal["1.0"] = "1.0"
     kind: Literal["Agent"] = "Agent"
     metadata: MetadataSpec
