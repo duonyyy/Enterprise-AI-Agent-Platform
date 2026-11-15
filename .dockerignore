@@ -12,6 +12,15 @@ __pycache__/
 **/.pytest_cache/
 .ruff_cache/
 **/.ruff_cache/
+.mypy_cache/
+**/.mypy_cache/
+.turbo/
+**/.turbo/
+*.tsbuildinfo
+**/.coverage
+**/.coverage.*
+**/htmlcov/
+.agents/skills/ui-styling/scripts/tests/coverage-ui.json
 *.py[cod]
 .env
 .env.*
