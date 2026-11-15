@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from control_api.core.audit import AuditEventWrite, write_audit_event
 from control_api.modules.workspaces.models.errors import (
     InvitationConflictError,
     InvitationForbiddenError,
@@ -319,37 +319,22 @@ async def insert_invitation_audit_event(
     details: dict[str, Any],
 ) -> str:
     """Append an immutable governance audit log record for an invitation lifecycle action."""
-    stmt = text(
-        "INSERT INTO governance.audit_events ("
-        "    tenant_id, workspace_id, actor_subject, action, "
-        "    resource_type, resource_id, outcome, request_id, "
-        "    trace_id, details_redacted"
-        ") VALUES ("
-        "    :tenant_id, :workspace_id, :actor_subject, :action, "
-        "    'workspace_invitation', :resource_id, 'succeeded', :request_id, "
-        "    :trace_id, CAST(:details_redacted AS jsonb)"
-        ") RETURNING id"
+    return await write_audit_event(
+        session,
+        AuditEventWrite(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_subject=str(actor_user_id),
+            action=action,
+            resource_type="workspace_invitation",
+            resource_id=str(invitation_id),
+            outcome="succeeded",
+            request_id=request_id,
+            trace_id=trace_id,
+            reason_code=None,
+            details_redacted=details,
+        ),
     )
-    row = (
-        (
-            await session.execute(
-                stmt,
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "actor_subject": str(actor_user_id),
-                    "action": action,
-                    "resource_id": str(invitation_id),
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                    "details_redacted": json.dumps(details, sort_keys=True),
-                },
-            )
-        )
-        .mappings()
-        .one()
-    )
-    return str(row["id"])
 
 
 async def publish_delivery_outbox(
