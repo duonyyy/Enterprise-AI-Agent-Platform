@@ -40,6 +40,12 @@ Thumbs.db
 .mypy_cache/
 .ruff_cache/
 
+# Generated test coverage
+.coverage
+.coverage.*
+htmlcov/
+/.agents/skills/ui-styling/scripts/tests/coverage-ui.json
+
 # Internal design/review material stays local or in a separate private repository.
 /docs/
 /.private-docs-export/

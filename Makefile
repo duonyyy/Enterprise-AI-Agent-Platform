@@ -7,7 +7,7 @@ help:
 	@echo "  make lint            - Run ruff and pnpm lint"
 	@echo "  make test            - Run all Python and TypeScript unit tests"
 	@echo "  make test-contracts  - Validate JSON schemas and compatibility"
-	@echo "  make migrate         - Run alembic database migrations"
+	@echo "  make migrate         - Run canonical SQL migrations (set MIGRATION_DATABASE_URL)"
 
 dev-up:
 	docker compose -f infra/compose/docker-compose.dev.yml up -d
@@ -27,4 +27,4 @@ test-contracts:
 	uv run pytest tests/contract/
 
 migrate:
-	uv run --package control-api alembic upgrade head
+	uv run python -B scripts/run_migrations.py
