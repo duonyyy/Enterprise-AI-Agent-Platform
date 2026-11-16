@@ -3,28 +3,60 @@
  * Production-grade, contract-compliant HTTP client for Control Plane API
  */
 
-export interface AgentResponse {
+export interface AgentDraftMetadata {
   agent_id: string;
   slug: string;
   display_name: string;
-  lifecycle: "PUBLISHED" | "DRAFT" | "ARCHIVED" | string;
-  description?: string;
-  updated_at?: string;
-  version?: number;
+  revision: number;
+  archived_at: string | null;
+  created_at: string;
+}
+
+export interface AgentDraft {
+  agent_id: string;
+  slug: string;
+  display_name: string;
+  revision: number;
+  archived_at: string | null;
+  created_at: string;
+  spec: Record<string, unknown>;
+}
+
+export interface AgentDraftPage {
+  items: AgentDraftMetadata[];
+  next_cursor: string | null;
 }
 
 export interface CreateAgentDraftDTO {
   slug: string;
   display_name: string;
-  spec?: Record<string, unknown>;
+  spec: Record<string, unknown>;
   description?: string;
 }
 
-export interface CreateAgentDraftResponse {
-  agent_id: string;
-  status: string;
-  slug: string;
+export interface ReplaceAgentDraftSpecDTO {
+  spec: Record<string, unknown>;
 }
+
+export interface AgentErrorDetail {
+  code: string;
+  message: string;
+}
+
+export interface AgentErrorResponse {
+  detail: AgentErrorDetail;
+}
+
+export type AgentResponse = AgentDraftMetadata & {
+  lifecycle?: "PUBLISHED" | "DRAFT" | "ARCHIVED" | string;
+  description?: string;
+  updated_at?: string;
+  version?: number;
+};
+
+export type CreateAgentDraftResponse = AgentDraft & {
+  status?: string;
+};
 
 export interface PublishResponse {
   agent_id: string;
@@ -547,22 +579,85 @@ export class ControlApiClientV2 {
   }
 
   // --- Agents API ---
-  async listAgents(workspaceId: string, signal?: AbortSignal): Promise<AgentResponse[]> {
-    return this.request<AgentResponse[]>(`/v1/workspaces/${encodeURIComponent(workspaceId)}/agents`, {
+  async listAgents(
+    workspaceId: string,
+    options?: { limit?: number; cursor?: string; signal?: AbortSignal } | AbortSignal
+  ): Promise<AgentDraftPage> {
+    let limit: number | undefined;
+    let cursor: string | undefined;
+    let signal: AbortSignal | undefined;
+
+    if (options instanceof AbortSignal) {
+      signal = options;
+    } else if (options) {
+      limit = options.limit;
+      cursor = options.cursor;
+      signal = options.signal;
+    }
+
+    const queryParams = new URLSearchParams();
+    if (limit !== undefined) {
+      queryParams.set("limit", String(limit));
+    }
+    if (cursor !== undefined) {
+      queryParams.set("cursor", cursor);
+    }
+    const queryString = queryParams.toString();
+    const path = `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents${queryString ? `?${queryString}` : ""}`;
+
+    return this.request<AgentDraftPage>(path, {
       method: "GET",
       signal,
     });
+  }
+
+  async getAgentDraft(
+    workspaceId: string,
+    agentId: string,
+    signal?: AbortSignal
+  ): Promise<AgentDraft> {
+    return this.request<AgentDraft>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}`,
+      {
+        method: "GET",
+        signal,
+      }
+    );
   }
 
   async createAgentDraft(
     workspaceId: string,
     dto: CreateAgentDraftDTO,
     signal?: AbortSignal
-  ): Promise<CreateAgentDraftResponse> {
-    return this.request<CreateAgentDraftResponse>(
+  ): Promise<AgentDraft> {
+    return this.request<AgentDraft>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents`,
       {
         method: "POST",
+        body: JSON.stringify(dto),
+        signal,
+      }
+    );
+  }
+
+  async replaceAgentDraftSpec(
+    workspaceId: string,
+    agentId: string,
+    dto: ReplaceAgentDraftSpecDTO,
+    ifMatch: string | number,
+    signal?: AbortSignal
+  ): Promise<AgentDraft> {
+    const rawTag = String(ifMatch).trim();
+    const formattedIfMatch = rawTag.startsWith('"') && rawTag.endsWith('"')
+      ? rawTag
+      : `"${rawTag}"`;
+    return this.request<AgentDraft>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "If-Match": formattedIfMatch,
+        },
         body: JSON.stringify(dto),
         signal,
       }

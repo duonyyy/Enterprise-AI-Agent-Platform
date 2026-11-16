@@ -31,7 +31,17 @@ describe("ControlApiClientV2 Unit Tests", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       capturedInit = init;
-      return new Response(JSON.stringify([{ agent_id: "ag-1", slug: "agent-1", display_name: "Agent 1", lifecycle: "DRAFT" }]), {
+      return new Response(JSON.stringify({
+        items: [{
+          agent_id: "00000000-0000-0000-0000-000000000001",
+          slug: "agent-1",
+          display_name: "Agent 1",
+          revision: 1,
+          archived_at: null,
+          created_at: new Date().toISOString(),
+        }],
+        next_cursor: null,
+      }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -39,8 +49,9 @@ describe("ControlApiClientV2 Unit Tests", () => {
 
     try {
       const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
-      const agents = await client.listAgents("ws-1");
-      assert.equal(agents.length, 1);
+      const page = await client.listAgents("ws-1");
+      assert.equal(page.items.length, 1);
+      assert.equal(page.items[0].slug, "agent-1");
       assert.equal(capturedInit?.credentials, "same-origin");
       assert.equal(capturedInit?.cache, "no-store");
     } finally {
@@ -70,7 +81,10 @@ describe("ControlApiClientV2 Unit Tests", () => {
         if (!refreshed) {
           return new Response(JSON.stringify({ detail: "Token expired" }), { status: 401 });
         }
-        return new Response(JSON.stringify([{ agent_id: "ag-1", slug: "agent-1", display_name: "Agent 1", lifecycle: "DRAFT" }]), {
+        return new Response(JSON.stringify({
+          items: [{ agent_id: "ag-1", slug: "agent-1", display_name: "Agent 1", revision: 1, archived_at: null, created_at: new Date().toISOString() }],
+          next_cursor: null,
+        }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -103,7 +117,7 @@ describe("ControlApiClientV2 Unit Tests", () => {
         client.listApprovals("ws-1"),
       ]);
 
-      assert.equal(agents.length, 1);
+      assert.equal(agents.items.length, 1);
       assert.equal(approvals.length, 0);
       assert.equal(refreshCalls, 1, "Exactly one refresh call made for concurrent 401s");
       assert.equal(agentCalls, 2, "Agent request called once then retried");
@@ -565,6 +579,106 @@ describe("ControlApiClientV2 Unit Tests", () => {
       const promotedPreview = await client.previewInvitation("11111111-1111-1111-1111-111111111111");
       assert.equal(promotedPreview.role, "owner");
       assert.equal(promotedPreview.acceptance_state, "already_accepted");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("agent draft CRUD: create, get, and replace spec with If-Match revision header", async () => {
+    const originalFetch = globalThis.fetch;
+    const recordedCalls: Array<{ url: string; method?: string; headers?: Record<string, string>; body?: string }> = [];
+
+    const sampleDraft = {
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      slug: "assistant",
+      display_name: "Assistant",
+      revision: 1,
+      archived_at: null,
+      created_at: "2026-11-16T00:00:00Z",
+      spec: {
+        schemaVersion: "1.0",
+        kind: "Agent",
+        metadata: { name: "assistant" },
+        mode: "fixed_plan",
+        modelRef: "model-1",
+        persona: { instructions: "Help user" },
+        limits: { maxSteps: 10 },
+      },
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const headersObj: Record<string, string> = {};
+      if (init?.headers) {
+        new Headers(init.headers).forEach((value, key) => {
+          headersObj[key.toLowerCase()] = value;
+        });
+      }
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        headers: headersObj,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "POST" && urlStr.endsWith("/agents")) {
+        return new Response(JSON.stringify(sampleDraft), {
+          status: 201,
+          headers: { "Content-Type": "application/json", ETag: '"1"' },
+        });
+      }
+
+      if (init?.method === "GET" && urlStr.includes("/agents/00000000-0000-0000-0000-000000000001")) {
+        return new Response(JSON.stringify(sampleDraft), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ETag: '"1"', "Cache-Control": "no-store" },
+        });
+      }
+
+      if (init?.method === "PATCH" && urlStr.includes("/agents/00000000-0000-0000-0000-000000000001")) {
+        if (!headersObj["if-match"]) {
+          return new Response(JSON.stringify({ detail: { code: "precondition_required", message: "If-Match required" } }), {
+            status: 428,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ...sampleDraft, revision: 2 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ETag: '"2"', "Cache-Control": "no-store" },
+        });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+
+      // Create draft
+      const created = await client.createAgentDraft("11111111-1111-1111-1111-111111111111", {
+        slug: "assistant",
+        display_name: "Assistant",
+        spec: sampleDraft.spec,
+      });
+      assert.equal(created.agent_id, "00000000-0000-0000-0000-000000000001");
+      assert.equal(created.revision, 1);
+      assert.equal(recordedCalls[0]?.method, "POST");
+
+      // Get draft
+      const fetched = await client.getAgentDraft("11111111-1111-1111-1111-111111111111", created.agent_id);
+      assert.equal(fetched.slug, "assistant");
+      assert.equal(recordedCalls[1]?.method, "GET");
+
+      // Replace spec with numeric revision
+      const updated = await client.replaceAgentDraftSpec(
+        "11111111-1111-1111-1111-111111111111",
+        created.agent_id,
+        { spec: sampleDraft.spec },
+        1
+      );
+      assert.equal(updated.revision, 2);
+      assert.equal(recordedCalls[2]?.method, "PATCH");
+      assert.equal(recordedCalls[2]?.headers?.["if-match"], '"1"');
     } finally {
       globalThis.fetch = originalFetch;
     }

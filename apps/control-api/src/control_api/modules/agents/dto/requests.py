@@ -1,0 +1,31 @@
+"""Request DTOs for Agent draft endpoints matching candidate OpenAPI specification."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CreateAgentDraftDTO(BaseModel):
+    """Payload for creating a new mutable agent draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-z0-9_-]+$")
+    display_name: str = Field(..., min_length=1, max_length=256)
+    spec: dict[str, Any]
+
+
+class ReplaceAgentDraftSpecDTO(BaseModel):
+    """Payload for replacing the full agent draft specification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: dict[str, Any]
+
+
+# Backward compatibility alias
+UpdateAgentDraftDTO = ReplaceAgentDraftSpecDTO
+
+__all__ = ["CreateAgentDraftDTO", "ReplaceAgentDraftSpecDTO", "UpdateAgentDraftDTO"]
