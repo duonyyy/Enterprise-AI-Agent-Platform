@@ -23,10 +23,16 @@ import {
   defaultApiClient,
   AgentDraftMetadata,
   AgentDraft,
+  AgentValidationResult,
   ApiClientError,
 } from "@enterprise/api-client";
 
-import { AgentRequestScope, mergeAgentDraftEdits } from "../../../../../lib/agent-draft-state";
+import {
+  AgentRequestScope,
+  AgentValidationScope,
+  isValidationResultStale,
+  mergeAgentDraftEdits,
+} from "../../../../../lib/agent-draft-state";
 
 type ViewState = "ready" | "loading" | "empty" | "error" | "forbidden" | "stale";
 
@@ -38,9 +44,18 @@ export default function AgentsPage({
   const workspaceId = params.workspaceId || "default";
   const router = useRouter();
   const requestScope = useRef(new AgentRequestScope());
+  const editorScope = useRef(new AgentRequestScope());
+  const validationScope = useRef(new AgentValidationScope());
   useLayoutEffect(() => {
-    requestScope.current.reset();
-    return () => requestScope.current.invalidate();
+    const scope = requestScope.current;
+    const editor = editorScope.current;
+    const validation = validationScope.current;
+    scope.reset();
+    return () => {
+      scope.invalidate();
+      editor.invalidate();
+      validation.invalidate();
+    };
   }, [workspaceId]);
 
   // Data & State
@@ -89,6 +104,35 @@ export default function AgentsPage({
     message: string;
     serverRevision?: number;
   } | null>(null);
+
+  // Validation State (04-B)
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<AgentValidationResult | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [hasEditsSinceValidation, setHasEditsSinceValidation] = useState(false);
+  const invalidateValidation = useCallback(() => {
+    validationScope.current.invalidate();
+    setIsValidating(false);
+    setValidationError(null);
+    setHasEditsSinceValidation(true);
+  }, []);
+
+  const closeEditor = () => {
+    editorScope.current.invalidate();
+    invalidateValidation();
+    setIsEditorOpen(false);
+    setActiveDraft(null);
+    setConflictState(null);
+    setSaveError(null);
+    setValidationResult(null);
+    setHasEditsSinceValidation(false);
+  };
+
+  const validationIsStale = validationResult !== null && (
+    validationResult.agent_id !== activeDraft?.agent_id ||
+    isValidationResultStale(validationResult.revision, activeDraft?.revision ?? 1, hasEditsSinceValidation)
+  );
+  const validationReady = validationResult?.ready === true && !validationIsStale;
 
   // Publish Dialog
   const [publishTargetAgent, setPublishTargetAgent] = useState<AgentDraftMetadata | null>(null);
@@ -336,14 +380,21 @@ export default function AgentsPage({
 
   // Open Editor
   const handleOpenEditor = async (agent: AgentDraftMetadata) => {
+    editorScope.current.reset();
+    invalidateValidation();
     setSaveError(null);
     setConflictState(null);
     setIsSaving(false);
+    setValidationResult(null);
+    setValidationError(null);
+    setHasEditsSinceValidation(false);
+    setIsValidating(false);
 
     const scope = requestScope.current.capture();
+    const editor = editorScope.current.capture();
     try {
-      const draft = await defaultApiClient.getAgentDraft(workspaceId, agent.agent_id, scope.signal);
-      if (!scope.isCurrent()) return;
+      const draft = await defaultApiClient.getAgentDraft(workspaceId, agent.agent_id, editor.signal);
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
       setActiveDraft(draft);
       const spec = draft.spec || {};
       const persona = (spec.persona as { instructions?: string }) || {};
@@ -359,7 +410,7 @@ export default function AgentsPage({
       setEditorMaxTokens(Number(limits.maxTotalTokens || 16000));
       setIsEditorOpen(true);
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
       if (err instanceof ApiClientError && err.status === 404) {
         showToast("Tác tử không tồn tại trong Workspace này.");
         fetchAgents();
@@ -372,10 +423,12 @@ export default function AgentsPage({
   // Reload latest draft from server after 412 conflict
   const handleReloadLatestDraft = async () => {
     if (!activeDraft) return;
+    invalidateValidation();
     const scope = requestScope.current.capture();
+    const editor = editorScope.current.capture();
     try {
-      const freshDraft = await defaultApiClient.getAgentDraft(workspaceId, activeDraft.agent_id, scope.signal);
-      if (!scope.isCurrent()) return;
+      const freshDraft = await defaultApiClient.getAgentDraft(workspaceId, activeDraft.agent_id, editor.signal);
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
       setActiveDraft(freshDraft);
       const spec = freshDraft.spec || {};
       const persona = (spec.persona as { instructions?: string }) || {};
@@ -394,8 +447,64 @@ export default function AgentsPage({
       setSaveError(null);
       showToast(`Đã đồng bộ bản nháp mới nhất (revision ${freshDraft.revision}) từ máy chủ.`);
     } catch {
-      if (!scope.isCurrent()) return;
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
       showToast("Không thể tải lại bản nháp từ máy chủ.");
+    }
+  };
+
+  // Validate Agent Draft Spec (04-B)
+  const handleValidateDraft = async () => {
+    if (!activeDraft) return;
+    setIsValidating(true);
+    setValidationError(null);
+    setValidationResult(null);
+
+    const trimmedInstructions = editorInstructions.trim();
+    const updatedSpec = mergeAgentDraftEdits(activeDraft.spec, {
+      mode: editorMode,
+      modelRef: editorModelRef.trim(),
+      instructions: trimmedInstructions,
+      maxSteps: Number(editorMaxSteps),
+      maxWallTimeSeconds: Number(editorMaxWallTime),
+      maxTotalTokens: Number(editorMaxTokens),
+    });
+
+    const scope = requestScope.current.capture();
+    const editor = editorScope.current.capture();
+    const validation = validationScope.current.begin(activeDraft.agent_id, activeDraft.revision, updatedSpec);
+    try {
+      const result = await defaultApiClient.validateAgentDraft(
+        workspaceId,
+        activeDraft.agent_id,
+        { spec: updatedSpec },
+        validation.signal
+      );
+      if (!scope.isCurrent() || !editor.isCurrent() || !validation.isCurrent()) return;
+      if (!validation.matchesResponse(result)) {
+        throw new Error("Kết quả kiểm tra không khớp Agent hoặc revision hiện tại. Hãy tải lại bản nháp.");
+      }
+      setValidationResult(result);
+      setHasEditsSinceValidation(false);
+      if (result.ready) {
+        showToast("Cấu hình hợp lệ và sẵn sàng công bố.");
+      } else {
+        showToast("Cấu hình chưa sẵn sàng (có phát hiện lỗi phụ thuộc).");
+      }
+    } catch (err: unknown) {
+      if (!scope.isCurrent() || !editor.isCurrent() || !validation.isCurrent()) return;
+      if (err instanceof ApiClientError) {
+        if (err.isUnauthorized) {
+          router.replace(
+            `/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`
+          );
+          return;
+        }
+        setValidationError(err.message || "Lỗi kiểm tra cấu hình.");
+      } else {
+        setValidationError(err instanceof Error ? err.message : "Lỗi không xác định khi kiểm tra cấu hình.");
+      }
+    } finally {
+      if (scope.isCurrent() && editor.isCurrent() && validation.isCurrent()) setIsValidating(false);
     }
   };
 
@@ -403,6 +512,7 @@ export default function AgentsPage({
   const handleSaveDraftSpec = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeDraft) return;
+    invalidateValidation();
 
     const trimmedInstructions = editorInstructions.trim();
     if (!trimmedInstructions) {
@@ -420,19 +530,21 @@ export default function AgentsPage({
     });
 
     const scope = requestScope.current.capture();
+    const editor = editorScope.current.capture();
     try {
       const saved = await defaultApiClient.replaceAgentDraftSpec(
         workspaceId,
         activeDraft.agent_id,
         { spec: updatedSpec },
         activeDraft.revision, // If-Match: "<revision>"
-        scope.signal
+        editor.signal
       );
-      if (!scope.isCurrent()) return;
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
 
       setActiveDraft(saved);
       setConflictState(null);
       setSaveError(null);
+      invalidateValidation();
 
       // Update list
       setAgents((prev) =>
@@ -445,7 +557,7 @@ export default function AgentsPage({
 
       showToast(`Đã lưu thay đổi thành công (revision ${saved.revision}).`);
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
+      if (!scope.isCurrent() || !editor.isCurrent()) return;
       if (err instanceof ApiClientError) {
         if (err.status === 412) {
           // Stale Revision Conflict
@@ -476,7 +588,7 @@ export default function AgentsPage({
         setSaveError(err instanceof Error ? err.message : "Đã xảy ra lỗi không xác định.");
       }
     } finally {
-      if (scope.isCurrent()) setIsSaving(false);
+      if (scope.isCurrent() && editor.isCurrent()) setIsSaving(false);
     }
   };
 
@@ -971,11 +1083,7 @@ export default function AgentsPage({
       {/* Modal: Edit Agent Draft (Optimistic Concurrency Control) */}
       <Modal
         isOpen={isEditorOpen}
-        onClose={() => {
-          setIsEditorOpen(false);
-          setConflictState(null);
-          setSaveError(null);
-        }}
+        onClose={closeEditor}
         title={`Chỉnh sửa Bản nháp: ${activeDraft?.display_name || ""}`}
         description={`Định danh: ${activeDraft?.slug} | Phiên bản sửa đổi hiện tại: revision ${activeDraft?.revision}`}
         maxWidth="600px"
@@ -985,14 +1093,20 @@ export default function AgentsPage({
               variant="secondary"
               size="md"
               type="button"
-              onClick={() => {
-                setIsEditorOpen(false);
-                setConflictState(null);
-                setSaveError(null);
-              }}
-              disabled={isSaving}
+              onClick={closeEditor}
+              disabled={isSaving || isValidating}
             >
               Đóng
+            </Button>
+            <Button
+              variant="outline"
+              size="md"
+              type="button"
+              onClick={handleValidateDraft}
+              isLoading={isValidating}
+              disabled={isSaving}
+            >
+              Kiểm tra cấu hình (Validate)
             </Button>
             <Button
               variant="primary"
@@ -1000,6 +1114,7 @@ export default function AgentsPage({
               type="submit"
               form="edit-agent-form"
               isLoading={isSaving}
+              disabled={isValidating}
             >
               Lưu thay đổi (Save Spec)
             </Button>
@@ -1011,6 +1126,60 @@ export default function AgentsPage({
           onSubmit={handleSaveDraftSpec}
           style={{ display: "flex", flexDirection: "column", gap: "14px" }}
         >
+          {/* Validation Diagnostics & Readiness Box (04-B) */}
+          {validationError && (
+            <div
+              style={{
+                padding: "8px 12px",
+                borderRadius: "var(--radius-xs)",
+                backgroundColor: "var(--color-danger-bg)",
+                border: "1px solid var(--color-danger-border)",
+                color: "var(--color-danger)",
+                fontSize: "12px",
+              }}
+            >
+              {validationError}
+            </div>
+          )}
+
+          {validationResult && (
+            <div
+              style={{
+                padding: "12px 14px",
+                borderRadius: "var(--radius-sm)",
+                backgroundColor: validationReady ? "var(--color-success-bg, #f0fdf4)" : "var(--color-warning-bg)",
+                border: `1px solid ${validationReady ? "var(--color-success-border, #bbf7d0)" : "var(--color-warning-border)"}`,
+                color: "var(--text-primary)",
+                fontSize: "12px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+              }}
+            >
+              {validationIsStale && (
+                <div style={{ color: "var(--color-warning)", fontWeight: 600 }}>
+                  ⚠️ Cấu hình đã thay đổi sau lần kiểm tra gần nhất (Kết quả bên dưới có thể đã cũ).
+                </div>
+              )}
+              <div style={{ fontWeight: 600, color: validationReady ? "var(--color-success, #16a34a)" : "var(--color-danger)" }}>
+                {validationIsStale
+                  ? "Cấu hình hiện tại chưa được kiểm tra. Kết quả trước đã cũ."
+                  : validationReady
+                  ? `✓ Cấu hình hợp lệ và sẵn sàng công bố (Đã đối chiếu dependencies tại revision ${validationResult.revision}).`
+                  : `✕ Cấu hình chưa sẵn sàng công bố (Phát hiện ${validationResult.diagnostics.length} vấn đề):`}
+              </div>
+              {!validationResult.ready && validationResult.diagnostics.length > 0 && (
+                <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                  {validationResult.diagnostics.map((d, idx) => (
+                    <li key={idx} style={{ marginTop: "4px" }}>
+                      <strong>[{d.field}]</strong> <span style={{ color: "var(--text-secondary)" }}>({d.code})</span>: {d.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           {/* Conflict 412 Banner */}
           {conflictState && (
             <div
@@ -1091,7 +1260,10 @@ export default function AgentsPage({
               id="edit-instructions"
               rows={5}
               value={editorInstructions}
-              onChange={(e) => setEditorInstructions(e.target.value)}
+              onChange={(e) => {
+                setEditorInstructions(e.target.value);
+                invalidateValidation();
+              }}
               required
               style={{
                 width: "100%",
@@ -1112,7 +1284,10 @@ export default function AgentsPage({
             <Input
               label="Tham chiếu Mô hình (Model Reference)"
               value={editorModelRef}
-              onChange={(e) => setEditorModelRef(e.target.value)}
+              onChange={(e) => {
+                setEditorModelRef(e.target.value);
+                invalidateValidation();
+              }}
               required
             />
             <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -1122,7 +1297,10 @@ export default function AgentsPage({
               <select
                 id="edit-mode"
                 value={editorMode}
-                onChange={(e) => setEditorMode(e.target.value as "fixed_plan" | "planner_based" | "react")}
+                onChange={(e) => {
+                  setEditorMode(e.target.value as "fixed_plan" | "planner_based" | "react");
+                  invalidateValidation();
+                }}
                 style={{
                   padding: "8px 12px",
                   fontSize: "13px",
@@ -1147,7 +1325,10 @@ export default function AgentsPage({
               min={1}
               max={50}
               value={editorMaxSteps}
-              onChange={(e) => setEditorMaxSteps(Number(e.target.value))}
+              onChange={(e) => {
+                setEditorMaxSteps(Number(e.target.value));
+                invalidateValidation();
+              }}
               required
             />
             <Input
@@ -1155,7 +1336,10 @@ export default function AgentsPage({
               type="number"
               min={1}
               value={editorMaxWallTime}
-              onChange={(e) => setEditorMaxWallTime(Number(e.target.value))}
+              onChange={(e) => {
+                setEditorMaxWallTime(Number(e.target.value));
+                invalidateValidation();
+              }}
               required
             />
             <Input
@@ -1163,7 +1347,10 @@ export default function AgentsPage({
               type="number"
               min={1}
               value={editorMaxTokens}
-              onChange={(e) => setEditorMaxTokens(Number(e.target.value))}
+              onChange={(e) => {
+                setEditorMaxTokens(Number(e.target.value));
+                invalidateValidation();
+              }}
               required
             />
           </div>

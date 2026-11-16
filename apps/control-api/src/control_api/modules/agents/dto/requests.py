@@ -25,7 +25,20 @@ class ReplaceAgentDraftSpecDTO(BaseModel):
     spec: dict[str, Any]
 
 
+class ValidateAgentDraftDTO(BaseModel):
+    """Payload for validating an agent draft. If spec is omitted, persisted draft is validated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: dict[str, Any] = Field(default_factory=dict)
+
+
 # Backward compatibility alias
 UpdateAgentDraftDTO = ReplaceAgentDraftSpecDTO
 
-__all__ = ["CreateAgentDraftDTO", "ReplaceAgentDraftSpecDTO", "UpdateAgentDraftDTO"]
+__all__ = [
+    "CreateAgentDraftDTO",
+    "ReplaceAgentDraftSpecDTO",
+    "UpdateAgentDraftDTO",
+    "ValidateAgentDraftDTO",
+]

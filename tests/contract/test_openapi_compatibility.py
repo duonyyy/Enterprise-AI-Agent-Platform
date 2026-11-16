@@ -541,12 +541,15 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     from control_api.modules.agents.dto.requests import (
         CreateAgentDraftDTO,
         ReplaceAgentDraftSpecDTO,
+        ValidateAgentDraftDTO,
     )
     from control_api.modules.agents.dto.responses import (
+        AgentDiagnosticDTO,
         AgentDraftMetadataDTO,
         AgentDraftPageDTO,
         AgentErrorDetailDTO,
         AgentErrorResponseDTO,
+        AgentValidationResultDTO,
     )
 
     root = Path(__file__).resolve().parents[2]
@@ -657,3 +660,45 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     err_schema = spec["components"]["schemas"]["AgentError"]
     err_val = Draft202012Validator(err_schema)
     assert err_val.is_valid(err_dto.model_dump())
+
+    # Step 04-B: Validate endpoint and DTOs
+    validate_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}/validate"]
+    assert "post" in validate_path
+    assert validate_path["post"]["operationId"] == "validateAgentDraft"
+    val_responses = validate_path["post"]["responses"]
+    for expected_code in ("200", "401", "403", "404", "422", "503"):
+        assert expected_code in val_responses, f"Missing {expected_code} in validate responses"
+
+    # ValidateAgentDraftRequest
+    validate_req_dto = ValidateAgentDraftDTO(spec=valid_spec)
+    val_req_schema = spec["components"]["schemas"]["ValidateAgentDraftRequest"]
+    resolved_val_req_schema = copy.deepcopy(val_req_schema)
+    val_req_validator = Draft202012Validator(resolved_val_req_schema)
+    assert val_req_validator.is_valid(validate_req_dto.model_dump())
+    assert val_req_validator.is_valid({})  # Omission validates the stored draft.
+    assert val_req_validator.is_valid({"spec": {"mode": []}})  # Raw object is diagnosed.
+    assert not val_req_validator.is_valid({"spec": None})
+    assert not val_req_validator.is_valid({"spec": []})
+    assert ValidateAgentDraftDTO().model_fields_set == set()
+    assert ValidateAgentDraftDTO(spec={}).model_fields_set == {"spec"}
+
+    # AgentDiagnostic & AgentValidationResult
+    diag_dto = AgentDiagnosticDTO(
+        field="modelRef",
+        code="dependency_unavailable",
+        message="Model configuration not found in workspace",
+    )
+    diag_schema = spec["components"]["schemas"]["AgentDiagnostic"]
+    diag_val = Draft202012Validator(diag_schema)
+    assert diag_val.is_valid(diag_dto.model_dump())
+
+    val_result_dto = AgentValidationResultDTO(
+        agent_id="00000000-0000-0000-0000-000000000001",
+        revision=1,
+        ready=False,
+        diagnostics=[diag_dto],
+    )
+    res_schema = copy.deepcopy(spec["components"]["schemas"]["AgentValidationResult"])
+    res_schema["properties"]["diagnostics"]["items"] = diag_schema
+    res_val = Draft202012Validator(res_schema)
+    assert res_val.is_valid(val_result_dto.model_dump())

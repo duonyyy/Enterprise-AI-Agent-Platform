@@ -1266,3 +1266,147 @@ def test_a14_workspace_switching_safety_and_publish_stub_real_postgres(agent_tes
             await engine.dispose()
 
     asyncio.run(_scenario())
+
+
+@pytest.mark.integration
+def test_b_validation_real_dependency_sql_is_scoped_and_read_only(agent_test_env):
+    """Real restricted-role SQL/HTTP; auth fixture is isolated, no provider or Tool executes."""
+    fixture = agent_test_env
+    tenant = fixture["seeded"]["tenant_1"]
+    workspace = fixture["seeded"]["ws_1a"]
+    other_workspace = fixture["seeded"]["ws_1b"]
+    user = fixture["seeded"]["dev_1a"]
+    model, other_model, tool, tool_version, mcp_tool, mcp_version, base = [
+        uuid4() for _ in range(7)
+    ]
+    with psycopg.connect(fixture["owner_url"]) as conn:
+        for mid, wid in ((model, workspace), (other_model, other_workspace)):
+            conn.execute(
+                "INSERT INTO catalog.model_configs (tenant_id,workspace_id,id,name,provider,provider_model_id) "
+                "VALUES (%s,%s,%s,%s,'fixture','not-a-live-model')",
+                (tenant, wid, mid, str(mid)),
+            )
+        for tid, vid, kind in ((tool, tool_version, "builtin"), (mcp_tool, mcp_version, "mcp")):
+            conn.execute(
+                "INSERT INTO catalog.tools (tenant_id,workspace_id,id,tool_key,display_name,kind) "
+                "VALUES (%s,%s,%s,%s,'Fixture Tool',%s)",
+                (tenant, workspace, tid, str(tid), kind),
+            )
+            conn.execute(
+                "INSERT INTO catalog.tool_versions (tenant_id,workspace_id,id,tool_id,version,input_schema,output_schema,risk,sha256) "
+                "VALUES (%s,%s,%s,%s,1,'{}','{}','read',%s)",
+                (tenant, workspace, vid, tid, "a" * 64),
+            )
+        conn.execute(
+            "INSERT INTO knowledge.bases (tenant_id,workspace_id,id,slug,name,visibility) "
+            "VALUES (%s,%s,%s,'fixture-base','Fixture Base','restricted')",
+            (tenant, workspace, base),
+        )
+
+    async def scenario():
+        engine = create_async_engine(fixture["sa_url"], poolclass=NullPool)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def database():
+            async with factory() as session, session.begin():
+                yield session
+
+        previous = dict(app.dependency_overrides)
+        app.dependency_overrides[get_db_session] = database
+        spec = _make_valid_spec(name="validation-real", mode="fixed_plan")
+        spec.update(modelRef=str(model), toolRefs=[], skillRefs=[], knowledgeRefs=[])
+        headers = {"Authorization": f"Bearer {fixture['tokens']['dev_1a']}"}
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+            ) as client:
+                created = await client.post(
+                    f"/v1/workspaces/{workspace}/agents",
+                    headers=headers,
+                    json={"slug": "validation-real", "display_name": "Fixture", "spec": spec},
+                )
+                assert created.status_code == 201, created.text
+                agent = created.json()["agent_id"]
+                path = f"/v1/workspaces/{workspace}/agents/{agent}/validate"
+                with psycopg.connect(fixture["owner_url"]) as conn:
+                    audit_before = conn.execute(
+                        "SELECT count(*) FROM governance.audit_events"
+                    ).fetchone()[0]
+                response = await client.post(path, headers=headers)
+                assert response.status_code == 200, response.text
+                assert response.json()["ready"] is True
+                root_null = await client.post(path, headers={**headers, "Content-Type":"application/json"}, content="null")
+                assert root_null.status_code == 422
+                invalid = {**spec, "mode": ["fixed_plan"]}
+                response = await client.post(path, headers=headers, json={"spec": invalid})
+                assert response.status_code == 200 and response.json()["ready"] is False
+                assert response.json()["diagnostics"][0]["code"] == "invalid_spec"
+                assert (
+                    await client.post(path, headers=headers, json={"spec": None})
+                ).status_code == 422
+                response = await client.post(
+                    path, headers=headers, json={"spec": {**spec, "modelRef": str(other_model)}}
+                )
+                assert response.status_code == 200 and response.json()["ready"] is False
+                assert response.json()["diagnostics"][0]["code"] == "dependency_unavailable"
+                tool_spec = {**spec, "toolRefs": [str(tool_version)]}
+                denied = await client.post(path, headers=headers, json={"spec": tool_spec})
+                assert any(
+                    d["code"] == "dependency_not_permitted" for d in denied.json()["diagnostics"]
+                )
+                with psycopg.connect(fixture["owner_url"]) as conn:
+                    conn.execute(
+                        "INSERT INTO catalog.tool_grants (tenant_id,workspace_id,tool_id,principal_kind,principal_key,allowed_operation) "
+                        "VALUES (%s,%s,%s,'role','developer','invoke')",
+                        (tenant, workspace, tool),
+                    )
+                allowed = await client.post(path, headers=headers, json={"spec": tool_spec})
+                assert allowed.status_code == 200 and allowed.json()["ready"] is True
+                denied = await client.post(
+                    path, headers=headers, json={"spec": {**spec, "knowledgeRefs": [str(base)]}}
+                )
+                assert any(
+                    d["code"] == "dependency_not_permitted" for d in denied.json()["diagnostics"]
+                )
+                with psycopg.connect(fixture["owner_url"]) as conn:
+                    conn.execute(
+                        "INSERT INTO knowledge.base_grants (tenant_id,workspace_id,base_id,principal_kind,principal_key,permission) "
+                        "VALUES (%s,%s,%s,'user',%s,'read')",
+                        (tenant, workspace, base, str(user)),
+                    )
+                allowed = await client.post(
+                    path, headers=headers, json={"spec": {**spec, "knowledgeRefs": [str(base)]}}
+                )
+                assert allowed.status_code == 200 and allowed.json()["ready"] is True
+                mcp = await client.post(
+                    path, headers=headers, json={"spec": {**spec, "toolRefs": [str(mcp_version)]}}
+                )
+                assert mcp.status_code == 200 and mcp.json()["ready"] is False
+                assert any(d["code"] == "unsupported_capability" for d in mcp.json()["diagnostics"])
+                with psycopg.connect(fixture["owner_url"]) as conn:
+                    row = conn.execute(
+                        "SELECT revision,draft_spec FROM catalog.agents WHERE id=%s", (UUID(agent),)
+                    ).fetchone()
+                    assert row == (1, spec)
+                    assert (
+                        conn.execute("SELECT count(*) FROM governance.audit_events").fetchone()[0]
+                        == audit_before
+                    )
+                    assert (
+                        conn.execute("SELECT count(*) FROM catalog.agent_tool_bindings").fetchone()[
+                            0
+                        ]
+                        == 0
+                    )
+                    assert (
+                        conn.execute(
+                            "SELECT count(*) FROM catalog.agent_knowledge_bindings"
+                        ).fetchone()[0]
+                        == 0
+                    )
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(previous)
+            await engine.dispose()
+
+    asyncio.run(scenario())

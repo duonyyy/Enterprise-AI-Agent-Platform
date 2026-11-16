@@ -683,5 +683,57 @@ describe("ControlApiClientV2 Unit Tests", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("agent validation endpoint (validateAgentDraft) sends POST and parses diagnostics/readiness", async () => {
+    const recordedCalls: Array<{ url: string; method?: string; body?: string }> = [];
+    const originalFetch = globalThis.fetch;
+
+    const sampleValidationResult = {
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      revision: 1,
+      ready: false,
+      diagnostics: [
+        {
+          field: "modelRef",
+          code: "dependency_unavailable",
+          message: "Model configuration not found in workspace",
+        },
+      ],
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "POST" && urlStr.endsWith("/validate")) {
+        return new Response(JSON.stringify(sampleValidationResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const result = await client.validateAgentDraft(
+        "11111111-1111-1111-1111-111111111111",
+        "00000000-0000-0000-0000-000000000001"
+      );
+      assert.equal(result.agent_id, "00000000-0000-0000-0000-000000000001");
+      assert.equal(result.revision, 1);
+      assert.equal(result.ready, false);
+      assert.equal(result.diagnostics.length, 1);
+      assert.equal(result.diagnostics[0]?.code, "dependency_unavailable");
+      assert.equal(recordedCalls[0]?.method, "POST");
+      assert.ok(recordedCalls[0]?.url.endsWith("/agents/00000000-0000-0000-0000-000000000001/validate"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

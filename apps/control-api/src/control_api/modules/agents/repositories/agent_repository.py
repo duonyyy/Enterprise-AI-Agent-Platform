@@ -25,6 +25,12 @@ from control_api.modules.agents.models.errors import (
     AgentStaleRevisionError,
     AgentValidationError,
 )
+from control_api.modules.agents.models.ports import (
+    ResolvedKnowledgeBase,
+    ResolvedModelConfig,
+    ResolvedSkillVersion,
+    ResolvedToolVersion,
+)
 from control_api.modules.agents.models.records import (
     AgentDraftEntity,
     AgentDraftMetadataEntity,
@@ -213,7 +219,9 @@ class AgentRepository:
         except IntegrityError as exc:
             orig_msg = str(getattr(exc, "orig", exc)).lower()
             if "slug" in orig_msg or "unique" in orig_msg:
-                raise AgentSlugConflictError(f"Agent with slug '{slug}' already exists in workspace") from exc
+                raise AgentSlugConflictError(
+                    f"Agent with slug '{slug}' already exists in workspace"
+                ) from exc
             raise AgentDatabaseUnavailableError("Database integrity constraint violated") from exc
         except SQLAlchemyError as exc:
             logger.warning("Failed to insert agent draft (%s)", type(exc).__name__)
@@ -384,11 +392,15 @@ class AgentRepository:
         )
         try:
             res = (
-                await session.execute(
-                    ws_stmt,
-                    {"tenant_id": tenant_id, "workspace_id": workspace_id},
+                (
+                    await session.execute(
+                        ws_stmt,
+                        {"tenant_id": tenant_id, "workspace_id": workspace_id},
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         except SQLAlchemyError as exc:
             logger.warning("Workspace verification failed (%s)", type(exc).__name__)
             raise AgentDatabaseUnavailableError() from exc
@@ -418,27 +430,223 @@ class AgentRepository:
         )
         try:
             res = (
-                await session.execute(
-                    m_stmt,
-                    {
-                        "tenant_id": tenant_id,
-                        "workspace_id": workspace_id,
-                        "user_id": actor_user_id,
-                    },
+                (
+                    await session.execute(
+                        m_stmt,
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "user_id": actor_user_id,
+                        },
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         except SQLAlchemyError as exc:
             logger.warning("Live membership check failed (%s)", type(exc).__name__)
             raise AgentDatabaseUnavailableError() from exc
 
         if res is None or str(res["status"]) != "active":
-            raise AgentAccessDeniedError("Active workspace membership required for write operations")
+            raise AgentAccessDeniedError(
+                "Active workspace membership required for write operations"
+            )
 
         role = str(res["role"])
         if role not in _PERMITTED_WRITE_ROLES:
             raise AgentAccessDeniedError(
                 f"Role '{role}' is not permitted to {action} agent drafts in this workspace"
             )
+
+    async def resolve_model_config(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        model_id: UUID,
+    ) -> ResolvedModelConfig | None:
+        """Resolve model configuration within workspace scope under RLS."""
+        stmt = text(
+            "SELECT id, tenant_id, workspace_id, name, provider, provider_model_id, status, settings "
+            "FROM catalog.model_configs "
+            "WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :model_id"
+        )
+        try:
+            result = await session.execute(
+                stmt,
+                {"tenant_id": tenant_id, "workspace_id": workspace_id, "model_id": model_id},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
+            return ResolvedModelConfig(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                workspace_id=row["workspace_id"],
+                name=row["name"],
+                provider=row["provider"],
+                provider_model_id=row["provider_model_id"],
+                status=str(row["status"]),
+                settings=dict(row["settings"]) if row["settings"] else {},
+            )
+        except SQLAlchemyError as exc:
+            logger.warning("resolve_model_config database error (%s)", type(exc).__name__)
+            raise AgentDatabaseUnavailableError() from exc
+
+    async def resolve_tool_version(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        tool_version_id: UUID,
+        caller_role: str,
+    ) -> ResolvedToolVersion | None:
+        """Resolve scoped tool identity and invoke grant; MCP readiness is disabled in the service."""
+        stmt = text(
+            "SELECT tv.id, tv.tool_id, tv.tenant_id, tv.workspace_id, t.tool_key, t.kind, "
+            "       tv.version, tv.risk, tv.sha256, "
+            "       EXISTS ( "
+            "           SELECT 1 FROM catalog.tool_grants tg "
+            "           WHERE tg.tenant_id = tv.tenant_id AND tg.workspace_id = tv.workspace_id "
+            "             AND tg.tool_id = tv.tool_id "
+            "             AND tg.principal_kind = 'role' AND tg.principal_key = :caller_role "
+            "             AND tg.allowed_operation = 'invoke' "
+            "       ) AS has_invoke_grant "
+            "FROM catalog.tool_versions tv "
+            "JOIN catalog.tools t ON t.id = tv.tool_id AND t.tenant_id = tv.tenant_id AND t.workspace_id = tv.workspace_id "
+            "WHERE tv.tenant_id = :tenant_id AND tv.workspace_id = :workspace_id AND tv.id = :tool_version_id"
+        )
+        try:
+            result = await session.execute(
+                stmt,
+                {
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
+                    "tool_version_id": tool_version_id,
+                    "caller_role": caller_role,
+                },
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
+            return ResolvedToolVersion(
+                id=row["id"],
+                tool_id=row["tool_id"],
+                tenant_id=row["tenant_id"],
+                workspace_id=row["workspace_id"],
+                tool_key=row["tool_key"],
+                kind=str(row["kind"]),
+                version=row["version"],
+                risk=str(row["risk"]),
+                sha256=row["sha256"],
+                mcp_status=None,
+                has_invoke_grant=bool(row["has_invoke_grant"]),
+            )
+        except SQLAlchemyError as exc:
+            logger.warning("resolve_tool_version database error (%s)", type(exc).__name__)
+            raise AgentDatabaseUnavailableError() from exc
+
+    async def resolve_skill_version(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        skill_id: UUID,
+        skill_version_id: UUID,
+    ) -> ResolvedSkillVersion | None:
+        """Resolve skill version and parent skill status within workspace scope."""
+        stmt = text(
+            "SELECT sv.id AS skill_version_id, sv.skill_id, sv.tenant_id, sv.workspace_id, "
+            "       s.slug AS skill_slug, s.status AS skill_status, "
+            "       sv.version, sv.bundle_sha256 "
+            "FROM catalog.skill_versions sv "
+            "JOIN catalog.skills s ON s.id = sv.skill_id AND s.tenant_id = sv.tenant_id AND s.workspace_id = sv.workspace_id "
+            "WHERE sv.tenant_id = :tenant_id AND sv.workspace_id = :workspace_id AND sv.id = :skill_version_id"
+        )
+        try:
+            result = await session.execute(
+                stmt,
+                {
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
+                    "skill_version_id": skill_version_id,
+                },
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
+            return ResolvedSkillVersion(
+                skill_id=row["skill_id"],
+                skill_version_id=row["skill_version_id"],
+                tenant_id=row["tenant_id"],
+                workspace_id=row["workspace_id"],
+                skill_slug=row["skill_slug"],
+                skill_status=str(row["skill_status"]),
+                version=row["version"],
+                bundle_sha256=row["bundle_sha256"],
+            )
+        except SQLAlchemyError as exc:
+            logger.warning("resolve_skill_version database error (%s)", type(exc).__name__)
+            raise AgentDatabaseUnavailableError() from exc
+
+    async def resolve_knowledge_base(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        base_id: UUID,
+        user_id: UUID,
+        caller_role: str,
+    ) -> ResolvedKnowledgeBase | None:
+        """Resolve knowledge base and verify author's binding permission."""
+        stmt = text(
+            "SELECT kb.id, kb.tenant_id, kb.workspace_id, kb.slug, kb.name, kb.visibility, "
+            "       ( "
+            "           kb.visibility = 'workspace' OR "
+            "           EXISTS ( "
+            "               SELECT 1 FROM knowledge.base_grants bg "
+            "               WHERE bg.tenant_id = kb.tenant_id AND bg.workspace_id = kb.workspace_id "
+            "                 AND bg.base_id = kb.id "
+            "                 AND bg.permission IN ('read', 'manage') "
+            "                 AND ( "
+            "                     (bg.principal_kind = 'user' AND bg.principal_key = :user_id_str) OR "
+            "                     (bg.principal_kind = 'role' AND bg.principal_key = :caller_role) "
+            "                 ) "
+            "           ) "
+            "       ) AS has_access "
+            "FROM knowledge.bases kb "
+            "WHERE kb.tenant_id = :tenant_id AND kb.workspace_id = :workspace_id AND kb.id = :base_id"
+        )
+        try:
+            result = await session.execute(
+                stmt,
+                {
+                    "tenant_id": tenant_id,
+                    "workspace_id": workspace_id,
+                    "base_id": base_id,
+                    "user_id_str": str(user_id),
+                    "caller_role": caller_role,
+                },
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
+            return ResolvedKnowledgeBase(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                workspace_id=row["workspace_id"],
+                slug=row["slug"],
+                name=row["name"],
+                visibility=str(row["visibility"]),
+                has_access=bool(row["has_access"]),
+            )
+        except SQLAlchemyError as exc:
+            logger.warning("resolve_knowledge_base database error (%s)", type(exc).__name__)
+            raise AgentDatabaseUnavailableError() from exc
 
 
 agent_repository = AgentRepository()

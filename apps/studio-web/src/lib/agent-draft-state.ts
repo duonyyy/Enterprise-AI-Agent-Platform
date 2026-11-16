@@ -15,6 +15,23 @@ export class AgentRequestScope {
   }
 }
 
+/** Local request ownership, not a canonical digest or a published content hash. */
+export class AgentValidationScope extends AgentRequestScope {
+  begin(agentId: string, revision: number, spec: Record<string, unknown>) {
+    this.reset();
+    const request = this.capture();
+    const specSignature = JSON.stringify(spec);
+    return {
+      ...request,
+      agentId,
+      revision,
+      specSignature,
+      matchesResponse: (result: { agent_id: string; revision: number }): boolean =>
+        request.isCurrent() && result.agent_id === agentId && result.revision === revision,
+    };
+  }
+}
+
 export interface AgentDraftEdits {
   mode: string;
   modelRef: string;
@@ -22,6 +39,16 @@ export interface AgentDraftEdits {
   maxSteps: number;
   maxWallTimeSeconds: number;
   maxTotalTokens: number;
+}
+
+/** Check whether a validation result has become stale due to revision changes or form edits. */
+export function isValidationResultStale(
+  validationRevision: number | null,
+  currentRevision: number,
+  hasEditsSinceValidation: boolean
+): boolean {
+  if (validationRevision === null) return false;
+  return hasEditsSinceValidation || validationRevision !== currentRevision;
 }
 
 /** A full-spec replacement retains fields the small form does not own. */

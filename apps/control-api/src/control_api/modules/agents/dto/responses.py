@@ -75,12 +75,35 @@ class PublishResponseDTO(BaseModel):
     is_immutable: bool = True
 
 
+class AgentDiagnosticDTO(BaseModel):
+    """Diagnostic detail for a specific field or dependency."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    code: str
+    message: str
+
+
+class AgentValidationResultDTO(BaseModel):
+    """Validation response indicating readiness and diagnostic findings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    revision: int
+    ready: bool
+    diagnostics: list[AgentDiagnosticDTO]
+
+
 __all__ = [
+    "AgentDiagnosticDTO",
     "AgentDraftDTO",
     "AgentDraftMetadataDTO",
     "AgentDraftPageDTO",
     "AgentErrorDetailDTO",
     "AgentErrorResponseDTO",
     "AgentResponseDTO",
+    "AgentValidationResultDTO",
     "PublishResponseDTO",
 ]

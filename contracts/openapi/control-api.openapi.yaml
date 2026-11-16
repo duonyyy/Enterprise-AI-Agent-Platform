@@ -1183,6 +1183,33 @@ paths:
         '422': {$ref: '#/components/responses/AgentInvalidRequest'}
         '428': {$ref: '#/components/responses/AgentPreconditionRequired'}
         '503': {$ref: '#/components/responses/AgentUnavailable'}
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/validate:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    post:
+      summary: Validate agent draft dependencies and publish readiness
+      operationId: validateAgentDraft
+      description: Validates persisted draft or submitted spec against canonical schema and actual scoped dependencies. Does not mutate revision or publish.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ValidateAgentDraftRequest'}
+      responses:
+        '200':
+          description: Validation result and diagnostics
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentValidationResult'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {$ref: '#/components/responses/AgentNotFound'}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
     post:
       summary: Atomically publish immutable agent version
@@ -1303,6 +1330,34 @@ components:
           maxItems: 100
           items: {$ref: '#/components/schemas/AgentDraftMetadata'}
         next_cursor: {type: [string, 'null']}
+    ValidateAgentDraftRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        spec:
+          type: object
+          description: Raw AgentSpec object to diagnose. Structural errors return 200 with invalid_spec diagnostics; explicit null and non-object values return 422. Omit to validate the persisted draft.
+    AgentDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [field, code, message]
+      properties:
+        field: {type: string}
+        code:
+          type: string
+          enum: [invalid_spec, dependency_unavailable, dependency_not_permitted, unsupported_capability]
+        message: {type: string}
+    AgentValidationResult:
+      type: object
+      additionalProperties: false
+      required: [agent_id, revision, ready, diagnostics]
+      properties:
+        agent_id: {type: string, format: uuid}
+        revision: {type: integer, minimum: 1}
+        ready: {type: boolean}
+        diagnostics:
+          type: array
+          items: {$ref: '#/components/schemas/AgentDiagnostic'}
     AgentError:
       type: object
       additionalProperties: false
