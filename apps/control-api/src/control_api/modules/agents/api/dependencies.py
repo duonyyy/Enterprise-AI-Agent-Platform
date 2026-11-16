@@ -4,6 +4,7 @@ from typing import Annotated
 
 from control_api.modules.agents.repositories.agent_repository import agent_repository
 from control_api.modules.agents.services.agent_service import AgentDraftService
+from control_api.modules.agents.services.agent_validation_service import AgentValidationService
 from fastapi import Depends
 
 
@@ -12,6 +13,17 @@ def get_agent_service() -> AgentDraftService:
     return AgentDraftService(agent_repository)
 
 
-AgentServiceDep = Annotated[AgentDraftService, Depends(get_agent_service)]
+def get_agent_validation_service() -> AgentValidationService:
+    """Resolve validation service with production repository and resolver adapters."""
+    return AgentValidationService(repository=agent_repository, resolver=agent_repository)
 
-__all__ = ["AgentServiceDep", "get_agent_service"]
+
+AgentServiceDep = Annotated[AgentDraftService, Depends(get_agent_service)]
+AgentValidationServiceDep = Annotated[AgentValidationService, Depends(get_agent_validation_service)]
+
+__all__ = [
+    "AgentServiceDep",
+    "AgentValidationServiceDep",
+    "get_agent_service",
+    "get_agent_validation_service",
+]

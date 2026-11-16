@@ -47,6 +47,29 @@ export interface AgentErrorResponse {
   detail: AgentErrorDetail;
 }
 
+export type AgentDiagnosticCode =
+  | "invalid_spec"
+  | "dependency_unavailable"
+  | "dependency_not_permitted"
+  | "unsupported_capability";
+
+export interface AgentDiagnostic {
+  field: string;
+  code: AgentDiagnosticCode | string;
+  message: string;
+}
+
+export interface AgentValidationResult {
+  agent_id: string;
+  revision: number;
+  ready: boolean;
+  diagnostics: AgentDiagnostic[];
+}
+
+export interface ValidateAgentDraftDTO {
+  spec?: Record<string, unknown>;
+}
+
 export type AgentResponse = AgentDraftMetadata & {
   lifecycle?: "PUBLISHED" | "DRAFT" | "ARCHIVED" | string;
   description?: string;
@@ -659,6 +682,23 @@ export class ControlApiClientV2 {
           "If-Match": formattedIfMatch,
         },
         body: JSON.stringify(dto),
+        signal,
+      }
+    );
+  }
+
+  async validateAgentDraft(
+    workspaceId: string,
+    agentId: string,
+    dto?: ValidateAgentDraftDTO,
+    signal?: AbortSignal
+  ): Promise<AgentValidationResult> {
+    return this.request<AgentValidationResult>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/validate`,
+      {
+        method: "POST",
+        headers: dto && dto.spec ? { "Content-Type": "application/json" } : undefined,
+        body: dto && dto.spec ? JSON.stringify(dto) : undefined,
         signal,
       }
     );

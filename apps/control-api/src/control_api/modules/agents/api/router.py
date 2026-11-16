@@ -13,19 +13,25 @@ from control_api.modules.agents.api._http_helpers import (
     parse_uuid_param,
     translate_agent_error,
 )
-from control_api.modules.agents.api.dependencies import AgentServiceDep
+from control_api.modules.agents.api.dependencies import (
+    AgentServiceDep,
+    AgentValidationServiceDep,
+)
 from control_api.modules.agents.dto.requests import (
     CreateAgentDraftDTO,
     ReplaceAgentDraftSpecDTO,
+    ValidateAgentDraftDTO,
 )
 from control_api.modules.agents.dto.responses import (
+    AgentDiagnosticDTO,
     AgentDraftDTO,
     AgentDraftMetadataDTO,
     AgentDraftPageDTO,
+    AgentValidationResultDTO,
     PublishResponseDTO,
 )
 from control_api.modules.agents.services.publish_service import publish_agent_revision
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/agents", tags=["agents"])
 
@@ -189,6 +195,58 @@ async def replace_draft_spec(
         )
         await session.commit()
         return result
+    except Exception as exc:
+        raise translate_agent_error(exc) from exc
+
+
+@router.post("/{agent_id}/validate", response_model=AgentValidationResultDTO)
+async def validate_draft(
+    workspace_id: str,
+    agent_id: str,
+    response: Response,
+    request: Request,
+    principal: CurrentUser,
+    session: DBSession,
+    validation_service: AgentValidationServiceDep,
+    dto: ValidateAgentDraftDTO | None = None,
+) -> AgentValidationResultDTO:
+    """Validate persisted draft or pre-validate a submitted spec against scoped dependencies."""
+    _ = workspace_id
+    require_permission(principal, "agent:edit")
+    parsed_agent_id = parse_uuid_param(agent_id, "agent_id")
+    if dto is None and (await request.body()).strip():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_spec",
+                "message": "Request body must be an object when provided",
+            },
+        )
+
+    try:
+        has_spec_override = dto is not None and "spec" in dto.model_fields_set
+        spec_override = dto.spec if has_spec_override else None
+        res = await validation_service.validate_draft(
+            session,
+            principal=principal,
+            agent_id=parsed_agent_id,
+            spec_override=spec_override,
+            has_spec_override=has_spec_override,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return AgentValidationResultDTO(
+            agent_id=str(res.agent_id),
+            revision=res.revision,
+            ready=res.ready,
+            diagnostics=[
+                AgentDiagnosticDTO(
+                    field=d.field,
+                    code=d.code,
+                    message=d.message,
+                )
+                for d in res.diagnostics
+            ],
+        )
     except Exception as exc:
         raise translate_agent_error(exc) from exc
 

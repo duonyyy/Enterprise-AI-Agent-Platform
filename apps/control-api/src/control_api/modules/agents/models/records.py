@@ -31,3 +31,22 @@ class AgentDraftEntity:
     archived_at: datetime | None
     created_at: datetime
     spec: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDiagnosticEntity:
+    """Safe diagnostic for an individual spec field or dependency."""
+
+    field: str
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentValidationResultEntity:
+    """Readiness and semantic dependency validation result for an Agent draft."""
+
+    agent_id: UUID
+    revision: int
+    ready: bool
+    diagnostics: list[AgentDiagnosticEntity]
