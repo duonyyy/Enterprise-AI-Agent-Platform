@@ -16,6 +16,22 @@ This document is the public orientation for the code repository. It describes in
 
 Keep domain logic independent of framework adapters. Do not import another application's internal modules or ORM models across service boundaries. Cross-process calls use reviewed versioned contracts and authenticated transport. Dependency composition belongs at application/worker startup.
 
+## Control API module layout
+
+For new work in the Agents module, follow the Workspace layout:
+
+- `api/`: HTTP routes, error translation and dependency composition.
+- `dto/`: request and response models for the HTTP contract.
+- `services/`: application use cases and validation orchestration.
+- `models/`: business records, errors and repository ports.
+- `repositories/`: PostgreSQL persistence adapters.
+
+Services receive repository ports through their constructors. Compose concrete
+adapters at the API dependency boundary; do not instantiate a repository inside
+a service. Keep transaction ownership, authorization and RLS behavior unchanged
+when reorganizing files. This convention does not require moving unrelated
+existing modules in the same change.
+
 ## Storage and recovery
 
 PostgreSQL is the system of record for application definitions and operational state defined in the [migrations](./database/migrations/). MinIO/S3 holds objects and artifacts; Qdrant is a retrieval index. Redis may support caching or coordination under an approved design. A service in Compose is not proof of a working integration or durable storage configuration.

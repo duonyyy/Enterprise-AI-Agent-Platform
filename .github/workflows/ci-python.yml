@@ -178,6 +178,9 @@ jobs:
           cache: pnpm
       - name: Install locked web dependencies
         run: pnpm install --frozen-lockfile
+      - name: Test Agent editor request isolation and spec preservation
+        run: node --experimental-strip-types --test apps/studio-web/tests/agent-draft-state.test.ts
+
       - name: Build Studio Web
         run: pnpm --filter studio-web build
 

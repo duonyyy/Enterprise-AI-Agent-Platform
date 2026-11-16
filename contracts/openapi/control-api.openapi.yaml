@@ -1075,27 +1075,114 @@ paths:
               schema: *invitation_error_response
   /v1/workspaces/{workspace_id}/agents:
     get:
-      summary: List agents
+      summary: List agent drafts in workspace
+      operationId: listAgentDrafts
       security:
         - SessionCookie: []
         - BearerAuth: []
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+        - name: cursor
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 2048}
       responses:
-        '200': { description: Success }
-        '401': { description: Missing, invalid, expired, or revoked credentials }
-        '403': { description: Workspace access denied or insufficient permissions }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '200':
+          description: Scoped draft metadata page. Empty items stays empty.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraftPage'}
+        '400': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
     post:
       summary: Create agent draft
+      operationId: createAgentDraft
+      description: Cookie-authenticated mutations require trusted Origin/CSRF. Unresolved dependencies do not block structural draft save.
       security:
         - SessionCookie: []
         - BearerAuth: []
-      parameters: [{ name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAgentDraft'}
       responses:
-        '201': { description: Created }
-        '401': { description: Missing, invalid, expired, or revoked credentials }
-        '403': { description: Workspace access denied or insufficient permissions }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '201':
+          description: Committed draft with revision 1
+          headers:
+            ETag: {$ref: '#/components/headers/DraftETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraft'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '409': {$ref: '#/components/responses/AgentConflict'}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+  /v1/workspaces/{workspace_id}/agents/{agent_id}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      summary: Get agent draft
+      operationId: getAgentDraft
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current committed draft; Cache-Control no-store
+          headers:
+            ETag: {$ref: '#/components/headers/DraftETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraft'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {$ref: '#/components/responses/AgentNotFound'}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+    patch:
+      summary: Replace agent draft specification
+      operationId: replaceAgentDraftSpec
+      description: Replaces complete spec only; slug/display_name unchanged. Missing If-Match 428, malformed 400, stale 412. No wildcard/weak/list ETag.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: {type: string, pattern: '^"[1-9][0-9]*"$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReplaceAgentDraftSpec'}
+      responses:
+        '200':
+          description: Committed draft, incremented revision and Cache-Control no-store
+          headers:
+            ETag: {$ref: '#/components/headers/DraftETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraft'}
+        '400': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {$ref: '#/components/responses/AgentNotFound'}
+        '409': {$ref: '#/components/responses/AgentConflict'}
+        '412': {$ref: '#/components/responses/AgentStaleRevision'}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '428': {$ref: '#/components/responses/AgentPreconditionRequired'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
     post:
       summary: Atomically publish immutable agent version
@@ -1150,3 +1237,112 @@ components:
       type: apiKey
       in: cookie
       name: agent_invite_handoff
+  parameters:
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  headers:
+    DraftETag:
+      description: Strong ETag of draft revision; not published version
+      required: true
+      schema: {type: string, pattern: '^"[1-9][0-9]*"$'}
+  schemas:
+    AgentSpec:
+      $ref: ../jsonschema/agent-spec.v1.schema.json
+    CreateAgentDraft:
+      type: object
+      additionalProperties: false
+      required: [slug, display_name, spec]
+      properties:
+        slug: {type: string, minLength: 1, maxLength: 128, pattern: '^[a-z0-9_-]+$'}
+        display_name: {type: string, minLength: 1, maxLength: 256}
+        spec: {$ref: '#/components/schemas/AgentSpec'}
+    ReplaceAgentDraftSpec:
+      type: object
+      additionalProperties: false
+      required: [spec]
+      properties:
+        spec: {$ref: '#/components/schemas/AgentSpec'}
+    AgentDraftMetadata:
+      type: object
+      additionalProperties: false
+      required: [agent_id, slug, display_name, revision, archived_at, created_at]
+      properties:
+        agent_id: {type: string, format: uuid}
+        slug: {type: string}
+        display_name: {type: string}
+        revision: {type: integer, minimum: 1}
+        archived_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+    AgentDraft:
+      type: object
+      additionalProperties: false
+      required: [agent_id, slug, display_name, revision, archived_at, created_at, spec]
+      properties:
+        agent_id: {type: string, format: uuid}
+        slug: {type: string}
+        display_name: {type: string}
+        revision: {type: integer, minimum: 1}
+        archived_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        spec: {$ref: '#/components/schemas/AgentSpec'}
+    AgentDraftPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/AgentDraftMetadata'}
+        next_cursor: {type: [string, 'null']}
+    AgentError:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties:
+        detail:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}
+  responses:
+    AgentInvalidRequest:
+      description: Invalid input, schema, cursor or If-Match syntax. Missing If-Match must use 428, not generic 422.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}
+    AgentNotFound:
+      description: Agent not found in the authorized workspace.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}
+    AgentConflict:
+      description: Slug conflict or archived Agent cannot be modified.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}
+    AgentStaleRevision:
+      description: detail.code stale_revision. Refetch before explicit retry.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}
+    AgentPreconditionRequired:
+      description: detail.code revision_required or precondition_required. If-Match is missing.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}
+    AgentUnavailable:
+      description: Database or session store unavailable. Never return seed or in-memory success.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentError'}

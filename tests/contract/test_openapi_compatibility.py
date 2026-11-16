@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -532,3 +534,126 @@ def test_openapi_workspace_membership_management_schemas_and_rbac_matrix():
             assert not can_assign_target_role("admin", managed_target, elevated)
         for allowed_next in ("developer", "operator", "viewer"):
             assert can_assign_target_role("admin", managed_target, allowed_next)
+
+
+def test_agent_draft_openapi_schemas_and_dto_compatibility():
+    """Verify OpenAPI 3.1 canonical schemas for Step 04-A Agent drafts match runtime DTOs."""
+    from control_api.modules.agents.dto.requests import (
+        CreateAgentDraftDTO,
+        ReplaceAgentDraftSpecDTO,
+    )
+    from control_api.modules.agents.dto.responses import (
+        AgentDraftMetadataDTO,
+        AgentDraftPageDTO,
+        AgentErrorDetailDTO,
+        AgentErrorResponseDTO,
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    spec_path = root / "contracts" / "openapi" / "control-api.openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    # Resolve $ref helper for local OpenAPI components
+    def resolve_component_schema(schema_obj: dict) -> dict:
+        if "$ref" in schema_obj:
+            ref_str = schema_obj["$ref"]
+            if ref_str.startswith("#/components/schemas/"):
+                schema_name = ref_str.split("/")[-1]
+                target = spec["components"]["schemas"][schema_name]
+                if "$ref" in target and target["$ref"].endswith(".json"):
+                    # External jsonschema ref (e.g. AgentSpec)
+                    ref_path = (spec_path.parent / target["$ref"]).resolve()
+                    return json.loads(ref_path.read_text(encoding="utf-8"))
+                return target
+        return schema_obj
+
+    # 1. Path definitions
+    agents_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents"]
+    assert "get" in agents_path
+    assert "post" in agents_path
+    assert agents_path["get"]["operationId"] == "listAgentDrafts"
+    assert agents_path["post"]["operationId"] == "createAgentDraft"
+
+    agent_detail_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}"]
+    assert "get" in agent_detail_path
+    assert "patch" in agent_detail_path
+    assert agent_detail_path["get"]["operationId"] == "getAgentDraft"
+    assert agent_detail_path["patch"]["operationId"] == "replaceAgentDraftSpec"
+
+    # Mandatory precondition responses on PATCH
+    patch_responses = agent_detail_path["patch"]["responses"]
+    for expected_code in ("200", "400", "401", "403", "404", "409", "412", "422", "428", "503"):
+        assert expected_code in patch_responses, f"Missing {expected_code} in PATCH responses"
+
+    # ETag headers
+    assert "ETag" in agents_path["post"]["responses"]["201"]["headers"]
+    assert "ETag" in agent_detail_path["get"]["responses"]["200"]["headers"]
+    assert "ETag" in agent_detail_path["patch"]["responses"]["200"]["headers"]
+
+    # 2. DTO <-> Schema validation
+    valid_spec = {
+        "schemaVersion": "1.0",
+        "kind": "Agent",
+        "metadata": {"name": "knowledge-assistant"},
+        "mode": "fixed_plan",
+        "modelRef": "approved-model-v1",
+        "persona": {"instructions": "Answer concisely using authorized sources."},
+        "toolRefs": [],
+        "skillRefs": [],
+        "knowledgeRefs": [],
+        "limits": {"maxSteps": 10},
+    }
+
+    # CreateAgentDraft
+    create_dto = CreateAgentDraftDTO(
+        slug="knowledge-assistant",
+        display_name="Knowledge Assistant",
+        spec=valid_spec,
+    )
+    agent_spec_schema = json.loads(
+        (root / "contracts/jsonschema/agent-spec.v1.schema.json").read_text(encoding="utf-8")
+    )
+    create_schema = spec["components"]["schemas"]["CreateAgentDraft"]
+    resolved_create_schema = copy.deepcopy(create_schema)
+    resolved_create_schema["properties"]["spec"] = agent_spec_schema
+    create_val = Draft202012Validator(resolved_create_schema)
+    assert create_val.is_valid(create_dto.model_dump())
+    assert not create_val.is_valid({**create_dto.model_dump(), "slug": "Invalid Slug!"})
+
+    # ReplaceAgentDraftSpec
+    replace_dto = ReplaceAgentDraftSpecDTO(spec=valid_spec)
+    replace_schema = spec["components"]["schemas"]["ReplaceAgentDraftSpec"]
+    resolved_replace_schema = copy.deepcopy(replace_schema)
+    resolved_replace_schema["properties"]["spec"] = agent_spec_schema
+    replace_val = Draft202012Validator(resolved_replace_schema)
+    assert replace_val.is_valid(replace_dto.model_dump())
+    assert not replace_val.is_valid({"extra_field": 123})
+
+    # AgentDraftMetadata
+    meta_dto = AgentDraftMetadataDTO(
+        agent_id="00000000-0000-0000-0000-000000000001",
+        slug="knowledge-assistant",
+        display_name="Knowledge Assistant",
+        revision=1,
+        archived_at=None,
+        created_at="2026-11-16T00:00:00Z",
+    )
+    meta_schema = spec["components"]["schemas"]["AgentDraftMetadata"]
+    meta_val = Draft202012Validator(meta_schema)
+    assert meta_val.is_valid(meta_dto.model_dump())
+
+    # AgentDraftPage
+    page_dto = AgentDraftPageDTO(items=[meta_dto], next_cursor=None)
+    # Resolve items ref
+    resolved_page_schema = copy.deepcopy(spec["components"]["schemas"]["AgentDraftPage"])
+    resolved_page_schema["properties"]["items"]["items"] = meta_schema
+    page_val = Draft202012Validator(resolved_page_schema)
+    assert page_val.is_valid(page_dto.model_dump())
+
+    # AgentError
+    err_dto = AgentErrorResponseDTO(
+        detail=AgentErrorDetailDTO(code="stale_revision", message="Draft revision is stale")
+    )
+    err_schema = spec["components"]["schemas"]["AgentError"]
+    err_val = Draft202012Validator(err_schema)
+    assert err_val.is_valid(err_dto.model_dump())

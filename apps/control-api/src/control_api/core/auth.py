@@ -433,6 +433,9 @@ async def get_current_principal(
             detail="Active workspace membership required",
         ) from exc
 
+    if authorization is not None and not authorization.startswith("Bearer "):
+        raise _unauthorized("Invalid authorization header")
+
     # Case A: Bearer token provided
     if authorization and authorization.startswith("Bearer "):
         token = authorization.removeprefix("Bearer ").strip()
