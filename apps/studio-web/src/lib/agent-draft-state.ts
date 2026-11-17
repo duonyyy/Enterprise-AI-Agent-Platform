@@ -195,3 +195,168 @@ export function mergeAgentDraftEdits(
     },
   };
 }
+
+/** Estimate approximate LLM token count from text length. */
+export function estimateTokenCount(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 3.8);
+}
+
+/** Lightweight heuristic check for potential prompt injection or jailbreak patterns. */
+export function detectPromptSafetyRisk(instructions: string): {
+  hasRisk: boolean;
+  reason?: string;
+} {
+  const lower = instructions.toLowerCase();
+  const patterns = [
+    {
+      regex: /ignore (all )?(previous|above) instructions/i,
+      reason: "Phát hiện chỉ lệnh bỏ qua tiền đề (Instruction Override)",
+    },
+    {
+      regex: /disregard.*guidelines/i,
+      reason: "Phát hiện cụm từ vô hiệu hóa ranh giới an toàn",
+    },
+    {
+      regex: /you are now in developer mode/i,
+      reason: "Phát hiện kịch bản Developer Mode Jailbreak",
+    },
+    {
+      regex: /system prompt leak|repeat your system prompt/i,
+      reason: "Phát hiện yêu cầu trích xuất System Prompt",
+    },
+  ];
+  for (const p of patterns) {
+    if (p.regex.test(lower)) {
+      return { hasRisk: true, reason: p.reason };
+    }
+  }
+  return { hasRisk: false };
+}
+
+export interface CategorizedDiagnostic {
+  field: string;
+  message: string;
+  code: string;
+  severity: "critical" | "warning";
+  tabTarget: "persona" | "model" | "dependencies";
+}
+
+/** Categorize diagnostics into Critical Blockers vs Warnings, mapping to their UI tab. */
+export function categorizeDiagnostics(
+  diagnostics: Array<{ field: string; message: string; code: string }>
+): CategorizedDiagnostic[] {
+  return diagnostics.map((d) => {
+    const fieldLower = (d.field || "").toLowerCase();
+    const codeLower = (d.code || "").toLowerCase();
+    const isCritical =
+      codeLower.includes("missing") ||
+      codeLower.includes("forbidden") ||
+      codeLower.includes("invalid") ||
+      codeLower.includes("required") ||
+      codeLower.includes("conflict") ||
+      codeLower.includes("error");
+
+    let tabTarget: "persona" | "model" | "dependencies" = "persona";
+    if (
+      fieldLower.includes("limit") ||
+      fieldLower.includes("step") ||
+      fieldLower.includes("time") ||
+      fieldLower.includes("token") ||
+      fieldLower.includes("model") ||
+      fieldLower.includes("mode")
+    ) {
+      tabTarget = "model";
+    } else if (
+      fieldLower.includes("tool") ||
+      fieldLower.includes("skill") ||
+      fieldLower.includes("knowledge")
+    ) {
+      tabTarget = "dependencies";
+    }
+
+    return {
+      ...d,
+      severity: isCritical ? "critical" : "warning",
+      tabTarget,
+    };
+  });
+}
+
+export interface DraftComparisonDiff {
+  field: string;
+  label: string;
+  serverValue: string;
+  localValue: string;
+  isDifferent: boolean;
+}
+
+/** Compare server spec with uncommitted local edits for side-by-side conflict resolution. */
+export function compareDraftStates(
+  serverSpec: Record<string, unknown> | null,
+  localEdits: AgentDraftEdits
+): DraftComparisonDiff[] {
+  if (!serverSpec) return [];
+  const serverPersona =
+    (serverSpec.persona as { instructions?: string }) || {};
+  const serverLimits =
+    (serverSpec.limits as {
+      maxSteps?: number;
+      maxWallTimeSeconds?: number;
+      maxTotalTokens?: number;
+    }) || {};
+
+  return [
+    {
+      field: "modelRef",
+      label: "Model Reference",
+      serverValue: String(serverSpec.modelRef || ""),
+      localValue: localEdits.modelRef,
+      isDifferent: String(serverSpec.modelRef || "") !== localEdits.modelRef,
+    },
+    {
+      field: "mode",
+      label: "Execution Mode",
+      serverValue: String(serverSpec.mode || "fixed_plan"),
+      localValue: localEdits.mode,
+      isDifferent:
+        String(serverSpec.mode || "fixed_plan") !== localEdits.mode,
+    },
+    {
+      field: "maxSteps",
+      label: "Max Steps",
+      serverValue: String(serverLimits.maxSteps ?? 10),
+      localValue: String(localEdits.maxSteps),
+      isDifferent:
+        Number(serverLimits.maxSteps ?? 10) !== localEdits.maxSteps,
+    },
+    {
+      field: "maxWallTimeSeconds",
+      label: "Max Wall Time (s)",
+      serverValue: String(serverLimits.maxWallTimeSeconds ?? 180),
+      localValue: String(localEdits.maxWallTimeSeconds),
+      isDifferent:
+        Number(serverLimits.maxWallTimeSeconds ?? 180) !==
+        localEdits.maxWallTimeSeconds,
+    },
+    {
+      field: "maxTotalTokens",
+      label: "Max Tokens",
+      serverValue: String(serverLimits.maxTotalTokens ?? 16000),
+      localValue: String(localEdits.maxTotalTokens),
+      isDifferent:
+        Number(serverLimits.maxTotalTokens ?? 16000) !==
+        localEdits.maxTotalTokens,
+    },
+    {
+      field: "instructions",
+      label: "Persona Instructions",
+      serverValue: serverPersona.instructions || "",
+      localValue: localEdits.instructions,
+      isDifferent:
+        (serverPersona.instructions || "").trim() !==
+        localEdits.instructions.trim(),
+    },
+  ];
+}
+

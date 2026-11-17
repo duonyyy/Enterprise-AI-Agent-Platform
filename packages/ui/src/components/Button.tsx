@@ -8,18 +8,22 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   rightIcon?: React.ReactNode;
 }
 
-export const Button: React.FC<ButtonProps> = ({
-  children,
-  variant = "secondary",
-  size = "md",
-  isLoading = false,
-  leftIcon,
-  rightIcon,
-  disabled,
-  style,
-  ...props
-}) => {
-  const isDisabled = disabled || isLoading;
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  (
+    {
+      children,
+      variant = "secondary",
+      size = "md",
+      isLoading = false,
+      leftIcon,
+      rightIcon,
+      disabled,
+      style,
+      ...props
+    },
+    ref
+  ) => {
+    const isDisabled = disabled || isLoading;
 
   const sizeStyles: Record<string, React.CSSProperties> = {
     sm: { height: "28px", padding: "0 10px", fontSize: "12px", gap: "6px" },
@@ -83,6 +87,7 @@ export const Button: React.FC<ButtonProps> = ({
         ...variantStyles[variant],
         ...style,
       }}
+      ref={ref}
       {...props}
     >
       {isLoading ? (
@@ -110,5 +115,7 @@ export const Button: React.FC<ButtonProps> = ({
       `}</style>
     </button>
   );
-};
+});
+
+Button.displayName = "Button";
 
