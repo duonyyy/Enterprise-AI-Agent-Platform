@@ -14,11 +14,13 @@ from control_api.modules.agents.api._http_helpers import (
     translate_agent_error,
 )
 from control_api.modules.agents.api.dependencies import (
+    AgentPublishServiceDep,
     AgentServiceDep,
     AgentValidationServiceDep,
 )
 from control_api.modules.agents.dto.requests import (
     CreateAgentDraftDTO,
+    PublishAgentRequestDTO,
     ReplaceAgentDraftSpecDTO,
     ValidateAgentDraftDTO,
 )
@@ -30,7 +32,6 @@ from control_api.modules.agents.dto.responses import (
     AgentValidationResultDTO,
     PublishResponseDTO,
 )
-from control_api.modules.agents.services.publish_service import publish_agent_revision
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/agents", tags=["agents"])
@@ -256,13 +257,60 @@ async def publish(
     workspace_id: str,
     agent_id: str,
     request: Request,
+    response: Response,
+    dto: PublishAgentRequestDTO,
     principal: CurrentUser,
+    session: DBSession,
+    publish_service: AgentPublishServiceDep,
 ) -> PublishResponseDTO:
-    """Publish endpoint fails closed in 04-A (ADR-022, D04-02)."""
+    """Atomically publish immutable agent version (ADR-022, SPEC-AGENT-001, STEP-04C)."""
+    _ = workspace_id
     verify_csrf_or_origin(request)
     require_permission(principal, "agent:publish")
+    parsed_agent_id = parse_uuid_param(agent_id, "agent_id")
+
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if not idempotency_key or not idempotency_key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "missing_idempotency_key",
+                "message": "Missing or whitespace-only Idempotency-Key header",
+            },
+        )
+    operation_key = idempotency_key.strip()
+    if len(operation_key) > 256 or "\r" in operation_key or "\n" in operation_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "invalid_idempotency_key",
+                "message": "Idempotency-Key must not exceed 256 characters or contain CR/LF control characters",
+            },
+        )
+
+    request_id, trace_id = extract_correlation_ids(request)
     try:
-        res = publish_agent_revision(workspace_id, agent_id, principal.user_id)
-        return PublishResponseDTO(**res)
+        result = await publish_service.publish_agent_revision(
+            session,
+            principal=principal,
+            agent_id=parsed_agent_id,
+            expected_revision=dto.expected_revision,
+            operation_key=operation_key,
+            body=dto.model_dump(),
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response_dto = PublishResponseDTO(
+            agent_id=str(result.agent_id),
+            agent_version_id=str(result.agent_version_id),
+            version=result.version,
+            bundle_sha256=result.bundle_sha256,
+            is_immutable=result.is_immutable,
+            created_at=result.created_at.isoformat(),
+            spec_hash=result.bundle_sha256,
+        )
+        await session.commit()
+        return response_dto
     except Exception as exc:
         raise translate_agent_error(exc) from exc

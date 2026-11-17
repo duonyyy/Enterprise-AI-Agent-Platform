@@ -735,5 +735,76 @@ describe("ControlApiClientV2 Unit Tests", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("publishAgent sends Idempotency-Key header and expected_revision body, returning durable receipt", async () => {
+    const recordedCalls: { url: string; method?: string; headers?: Record<string, string>; body?: string }[] = [];
+    const originalFetch = globalThis.fetch;
+
+    const samplePublishResult = {
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      agent_version_id: "00000000-0000-0000-0000-000000000002",
+      version: 1,
+      bundle_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      is_immutable: true,
+      created_at: "2026-11-16T12:00:00Z",
+      spec_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const headersRecord: Record<string, string> = {};
+      if (init?.headers) {
+        if (typeof (init.headers as Headers).forEach === "function") {
+          (init.headers as Headers).forEach((v, k) => {
+            headersRecord[k] = v;
+          });
+        } else if (Array.isArray(init.headers)) {
+          for (const [k, v] of init.headers) {
+            headersRecord[k] = v;
+          }
+        } else {
+          Object.assign(headersRecord, init.headers);
+        }
+      }
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        headers: headersRecord,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "POST" && urlStr.endsWith("/publish")) {
+        return new Response(JSON.stringify(samplePublishResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const result = await client.publishAgent(
+        "11111111-1111-1111-1111-111111111111",
+        "00000000-0000-0000-0000-000000000001",
+        {
+          expectedRevision: 1,
+          idempotencyKey: "test-idempotency-key-123",
+        }
+      );
+      assert.equal(result.agent_id, "00000000-0000-0000-0000-000000000001");
+      assert.equal(result.agent_version_id, "00000000-0000-0000-0000-000000000002");
+      assert.equal(result.version, 1);
+      assert.equal(result.bundle_sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+      assert.equal(result.is_immutable, true);
+      assert.equal(recordedCalls[0]?.method, "POST");
+      assert.ok(recordedCalls[0]?.url.endsWith("/agents/00000000-0000-0000-0000-000000000001/publish"));
+      const idempKey = recordedCalls[0]?.headers?.["idempotency-key"] || recordedCalls[0]?.headers?.["Idempotency-Key"];
+      assert.equal(idempKey, "test-idempotency-key-123");
+      assert.equal(recordedCalls[0]?.body, JSON.stringify({ expected_revision: 1 }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

@@ -1,21 +1,26 @@
-from typing import List, Literal, Optional
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
 from agent_contracts.skill_spec import SkillRef
+
 
 class MetadataSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     name: str = Field(..., pattern=r"^[a-z0-9_-]+$")
-    displayName: Optional[str] = None
-    description: Optional[str] = None
+    displayName: str | None = None
+    description: str | None = None
+
 
 class PersonaSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    role: Optional[str] = "Assistant"
-    tone: Optional[str] = "Professional"
+    role: str | None = "Assistant"
+    tone: str | None = "Professional"
     language: str = "vi"
     instructions: str
+
 
 class LimitsSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -23,6 +28,7 @@ class LimitsSpec(BaseModel):
     maxSteps: int = Field(default=10, ge=1, le=50)
     maxWallTimeSeconds: int = 180
     maxTotalTokens: int = 16000
+
 
 class AgentSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -33,9 +39,9 @@ class AgentSpec(BaseModel):
     mode: Literal["fixed_plan", "planner_based", "react"] = "fixed_plan"
     modelRef: str
     persona: PersonaSpec
-    toolRefs: List[str] = Field(default_factory=list)
-    skillRefs: List[SkillRef] = Field(default_factory=list)
-    knowledgeRefs: List[str] = Field(default_factory=list)
-    workflowRef: Optional[str] = None
-    approvalPolicyRef: Optional[str] = None
+    toolRefs: list[str] = Field(default_factory=list)
+    skillRefs: list[SkillRef] = Field(default_factory=list)
+    knowledgeRefs: list[str] = Field(default_factory=list)
+    workflowRef: str | None = None
+    approvalPolicyRef: str | None = None
     limits: LimitsSpec = Field(default_factory=LimitsSpec)

@@ -50,3 +50,33 @@ class AgentValidationResultEntity:
     revision: int
     ready: bool
     diagnostics: list[AgentDiagnosticEntity]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPublishReceiptEntity:
+    """Committed durable publish receipt."""
+
+    id: UUID
+    tenant_id: UUID
+    workspace_id: UUID
+    agent_id: UUID
+    operation_key: str
+    request_sha256: str
+    actor_user_id: UUID
+    agent_version_id: UUID
+    response_status: int
+    response_body: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PublishResultEntity:
+    """Published version outcome returned by service/repository."""
+
+    agent_id: UUID
+    agent_version_id: UUID
+    version: int
+    bundle_sha256: str
+    is_immutable: bool
+    created_at: datetime
+    is_replay: bool = False

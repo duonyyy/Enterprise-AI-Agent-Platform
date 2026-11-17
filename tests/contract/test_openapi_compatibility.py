@@ -540,6 +540,7 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     """Verify OpenAPI 3.1 canonical schemas for Step 04-A Agent drafts match runtime DTOs."""
     from control_api.modules.agents.dto.requests import (
         CreateAgentDraftDTO,
+        PublishAgentRequestDTO,
         ReplaceAgentDraftSpecDTO,
         ValidateAgentDraftDTO,
     )
@@ -550,6 +551,7 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
         AgentErrorDetailDTO,
         AgentErrorResponseDTO,
         AgentValidationResultDTO,
+        PublishResponseDTO,
     )
 
     root = Path(__file__).resolve().parents[2]
@@ -702,3 +704,40 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     res_schema["properties"]["diagnostics"]["items"] = diag_schema
     res_val = Draft202012Validator(res_schema)
     assert res_val.is_valid(val_result_dto.model_dump())
+
+    # Step 04-C: Publish endpoint and DTOs
+    publish_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}/publish"]
+    assert "post" in publish_path
+    assert publish_path["post"]["operationId"] == "publishAgentVersion"
+
+    # Idempotency-Key header parameter
+    params = publish_path["post"]["parameters"]
+    idemp_param = next((p for p in params if p.get("name") == "Idempotency-Key"), None)
+    assert idemp_param is not None
+    assert idemp_param["in"] == "header"
+    assert idemp_param["required"] is True
+
+    # PublishAgentRequest
+    pub_req_schema = spec["components"]["schemas"]["PublishAgentRequest"]
+    pub_req_val = Draft202012Validator(pub_req_schema)
+    pub_req_dto = PublishAgentRequestDTO(expected_revision=1)
+    assert pub_req_val.is_valid(pub_req_dto.model_dump())
+    assert not pub_req_val.is_valid({"expected_revision": 0})
+    assert not pub_req_val.is_valid({})
+
+    # PublishAgentResponse
+    pub_res_schema = spec["components"]["schemas"]["PublishAgentResponse"]
+    pub_res_val = Draft202012Validator(pub_res_schema)
+    pub_res_dto = PublishResponseDTO(
+        agent_id="00000000-0000-0000-0000-000000000001",
+        agent_version_id="00000000-0000-0000-0000-000000000002",
+        version=1,
+        bundle_sha256="a" * 64,
+        is_immutable=True,
+        created_at="2026-11-16T12:00:00Z",
+    )
+    assert pub_res_val.is_valid(pub_res_dto.model_dump())
+
+    pub_responses = publish_path["post"]["responses"]
+    for expected_code in ("200", "400", "401", "403", "404", "409", "412", "422", "503"):
+        assert expected_code in pub_responses, f"Missing {expected_code} in publish responses"

@@ -33,11 +33,20 @@ class ValidateAgentDraftDTO(BaseModel):
     spec: dict[str, Any] = Field(default_factory=dict)
 
 
+class PublishAgentRequestDTO(BaseModel):
+    """Payload for atomically publishing an immutable agent version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(..., ge=1, description="Expected current draft revision")
+
+
 # Backward compatibility alias
 UpdateAgentDraftDTO = ReplaceAgentDraftSpecDTO
 
 __all__ = [
     "CreateAgentDraftDTO",
+    "PublishAgentRequestDTO",
     "ReplaceAgentDraftSpecDTO",
     "UpdateAgentDraftDTO",
     "ValidateAgentDraftDTO",

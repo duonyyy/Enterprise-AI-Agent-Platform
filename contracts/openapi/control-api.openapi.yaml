@@ -1211,19 +1211,54 @@ paths:
         '422': {$ref: '#/components/responses/AgentInvalidRequest'}
         '503': {$ref: '#/components/responses/AgentUnavailable'}
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
     post:
       summary: Atomically publish immutable agent version
+      operationId: publishAgentVersion
+      description: Atomically validates dependencies under FOR SHARE locks, allocates sequential immutable version, computes RFC 8785 canonical manifest and SHA-256 digest, seals bindings, records publish receipt, and enqueues outbox event.
       security:
         - SessionCookie: []
         - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: agent_id, in: path, required: true, schema: { type: string } }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: Client-provided idempotency key for durable replay protection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishAgentRequest'
       responses:
-        '200': { description: Published }
-        '401': { description: Missing, invalid, expired, or revoked credentials }
-        '403': { description: Workspace access denied or insufficient permissions }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '200':
+          description: Published immutable version receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAgentResponse'
+        '400':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or insufficient permissions
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '409':
+          $ref: '#/components/responses/AgentConflict'
+        '412':
+          $ref: '#/components/responses/AgentStaleRevision'
+        '422':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '503':
+          $ref: '#/components/responses/AgentUnavailable'
   /v1/workspaces/{workspace_id}/approvals:
     get:
       summary: List pending approval requests
@@ -1358,6 +1393,47 @@ components:
         diagnostics:
           type: array
           items: {$ref: '#/components/schemas/AgentDiagnostic'}
+    PublishAgentRequest:
+      type: object
+      required:
+        - expected_revision
+      additionalProperties: false
+      properties:
+        expected_revision:
+          type: integer
+          minimum: 1
+          description: Committed integer draft revision expected at publication
+    PublishAgentResponse:
+      type: object
+      required:
+        - agent_id
+        - agent_version_id
+        - version
+        - bundle_sha256
+        - is_immutable
+        - created_at
+      additionalProperties: false
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        agent_version_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        is_immutable:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        spec_hash:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
     AgentError:
       type: object
       additionalProperties: false

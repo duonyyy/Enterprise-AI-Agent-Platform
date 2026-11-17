@@ -65,14 +65,25 @@ AgentResponseDTO = AgentDraftMetadataDTO
 
 
 class PublishResponseDTO(BaseModel):
-    """Legacy publish response placeholder."""
+    """Published immutable version receipt."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str
+    agent_version_id: str
     version: int
-    spec_hash: str
+    bundle_sha256: str
     is_immutable: bool = True
+    created_at: str
+    spec_hash: str | None = None
+
+    def model_post_init(self, __context: Any, /) -> None:
+        if self.spec_hash is None:
+            object.__setattr__(self, "spec_hash", self.bundle_sha256)
+
+
+# Backward compatibility alias
+PublishAgentResponseDTO = PublishResponseDTO
 
 
 class AgentDiagnosticDTO(BaseModel):
@@ -105,5 +116,6 @@ __all__ = [
     "AgentErrorResponseDTO",
     "AgentResponseDTO",
     "AgentValidationResultDTO",
+    "PublishAgentResponseDTO",
     "PublishResponseDTO",
 ]

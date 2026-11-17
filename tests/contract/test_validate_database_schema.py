@@ -50,10 +50,24 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
     assert "reviewed 0003 content fingerprint" in result.stdout
     assert "reviewed 0004 content fingerprint" in result.stdout
     assert "reviewed 0006 content fingerprint" in result.stdout
-    assert "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy" in result.stdout
-    assert "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections" in result.stdout
+    assert "reviewed 0007 content fingerprint" in result.stdout
+    assert (
+        "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy"
+        in result.stdout
+    )
+    assert (
+        "0004_identity_discovery_projection.sql defines narrow SECURITY DEFINER identity projections"
+        in result.stdout
+    )
     assert "0005_workspace_invitations.sql adds iam.workspace_invitations" in result.stdout
-    assert "0006_invitation_acceptance_projection.sql defines narrow SECURITY DEFINER invitation acceptance scope projection" in result.stdout
+    assert (
+        "0006_invitation_acceptance_projection.sql defines narrow SECURITY DEFINER invitation acceptance scope projection"
+        in result.stdout
+    )
+    assert (
+        "0007_agent_publish_receipts_and_binding_seals.sql adds catalog.agent_publish_receipts"
+        in result.stdout
+    )
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -63,14 +77,16 @@ def test_missing_migration_file_fails(tmp_path: Path) -> None:
     (migrations_dir / "0002_fail_closed_rls.sql").unlink()
 
     errors = validator.validate_database_schema(migrations_dir)
-    assert any("Missing required canonical migration file: 0002_fail_closed_rls.sql" in e for e in errors)
+    assert any(
+        "Missing required canonical migration file: 0002_fail_closed_rls.sql" in e for e in errors
+    )
     assert validator.main(["--migrations-dir", str(migrations_dir)]) == 1
 
 
 def test_non_sequential_or_duplicate_migration_filename_fails(tmp_path: Path) -> None:
     validator = _load_validator_module()
     migrations_dir = _copy_migrations(tmp_path)
-    (migrations_dir / "0008_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
+    (migrations_dir / "0009_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Non-sequential migration numbering" in e for e in errors)
@@ -89,7 +105,9 @@ def test_missing_domain_table_fails(tmp_path: Path) -> None:
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Missing canonical tables" in e and "ops.eval_results" in e for e in errors)
-    assert any("Unexpected non-canonical tables" in e and "ops.non_canonical_results" in e for e in errors)
+    assert any(
+        "Unexpected non-canonical tables" in e and "ops.non_canonical_results" in e for e in errors
+    )
 
 
 def test_forward_foreign_key_reference_fails(tmp_path: Path) -> None:
@@ -231,7 +249,8 @@ def test_inactive_security_declaration_does_not_count(
     sql = path.read_text(encoding="utf-8")
     if kind == "policy":
         needle = next(
-            line for line in sql.splitlines()
+            line
+            for line in sql.splitlines()
             if line.startswith("CREATE POLICY tenant_isolation ON iam.workspaces ")
         )
         expected = "CREATE POLICY tenant_isolation mismatch"
@@ -298,7 +317,9 @@ def test_transaction_marker_in_comment_does_not_count(tmp_path: Path) -> None:
     sql = path.read_text(encoding="utf-8")
     assert "COMMIT;" in sql
     path.write_text(sql.replace("COMMIT;", "-- COMMIT;"), encoding="utf-8")
-    assert any("explicit BEGIN; / COMMIT;" in e for e in validator.validate_database_schema(migrations))
+    assert any(
+        "explicit BEGIN; / COMMIT;" in e for e in validator.validate_database_schema(migrations)
+    )
 
 
 @pytest.mark.parametrize("clause", ["SUPERUSER", "BYPASSRLS", "PASSWORD 'fixture-only'"])
@@ -323,13 +344,17 @@ def test_workspace_invitations_migration_rejects_unapproved_table_or_missing_for
         original.replace("COMMIT;", "CREATE TABLE iam.extra_inv (id uuid PRIMARY KEY);\nCOMMIT;"),
         encoding="utf-8",
     )
-    assert any("approved ADR-019 table" in e for e in validator.validate_database_schema(migrations))
+    assert any(
+        "approved ADR-019 table" in e for e in validator.validate_database_schema(migrations)
+    )
 
     inv_path.write_text(
         original.replace("ALTER TABLE iam.workspace_invitations FORCE ROW LEVEL SECURITY;", ""),
         encoding="utf-8",
     )
-    assert any("FORCE ROW LEVEL SECURITY" in e for e in validator.validate_database_schema(migrations))
+    assert any(
+        "FORCE ROW LEVEL SECURITY" in e for e in validator.validate_database_schema(migrations)
+    )
 
 
 def test_invitation_acceptance_projection_rejects_table_creation_or_fingerprint_drift(
@@ -341,7 +366,9 @@ def test_invitation_acceptance_projection_rejects_table_creation_or_fingerprint_
     original = proj_path.read_text(encoding="utf-8")
 
     proj_path.write_text(
-        original.replace("COMMIT;", "CREATE TABLE iam.extra_accept (id uuid PRIMARY KEY);\nCOMMIT;"),
+        original.replace(
+            "COMMIT;", "CREATE TABLE iam.extra_accept (id uuid PRIMARY KEY);\nCOMMIT;"
+        ),
         encoding="utf-8",
     )
     errors = validator.validate_database_schema(migrations)

@@ -2,6 +2,6 @@
 
 from control_api.modules.agents.services.agent_service import AgentDraftService
 from control_api.modules.agents.services.agent_validation_service import AgentValidationService
-from control_api.modules.agents.services.publish_service import publish_agent_revision
+from control_api.modules.agents.services.publish_service import AgentPublishService
 
-__all__ = ["AgentDraftService", "AgentValidationService", "publish_agent_revision"]
+__all__ = ["AgentDraftService", "AgentPublishService", "AgentValidationService"]

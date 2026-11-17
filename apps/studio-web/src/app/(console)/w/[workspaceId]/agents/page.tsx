@@ -136,6 +136,7 @@ export default function AgentsPage({
 
   // Publish Dialog
   const [publishTargetAgent, setPublishTargetAgent] = useState<AgentDraftMetadata | null>(null);
+  const [publishIdempotencyKey, setPublishIdempotencyKey] = useState<string>("");
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
 
@@ -592,7 +593,7 @@ export default function AgentsPage({
     }
   };
 
-  // Submit Publish Agent (Fail-closed in 04-A per ADR-022)
+  // Submit Publish Agent (ADR-022, SPEC-AGENT-001, STEP-04C)
   const handleConfirmPublish = async () => {
     if (!publishTargetAgent) return;
     setIsPublishing(true);
@@ -600,15 +601,36 @@ export default function AgentsPage({
 
     const scope = requestScope.current.capture();
     try {
-      await defaultApiClient.publishAgent(workspaceId, publishTargetAgent.agent_id, scope.signal);
+      const res = await defaultApiClient.publishAgent(
+        workspaceId,
+        publishTargetAgent.agent_id,
+        {
+          expectedRevision: publishTargetAgent.revision,
+          idempotencyKey: publishIdempotencyKey,
+        },
+        scope.signal
+      );
       if (!scope.isCurrent()) return;
-      showToast(`Đã xuất bản Tác tử "${publishTargetAgent.display_name}".`);
+      showToast(`Đã xuất bản Tác tử "${publishTargetAgent.display_name}" thành phiên bản ${res.version}.`);
       setPublishTargetAgent(null);
+      await fetchAgents();
     } catch (err: unknown) {
       if (!scope.isCurrent()) return;
-      if (err instanceof ApiClientError && err.status === 503) {
+      if (err instanceof ApiClientError && err.status === 409) {
         setPublishMessage(
-          "Tính năng xuất bản phiên bản bất biến (Publish) bị vô hiệu hóa an toàn trong Bước 04-A và sẽ được kích hoạt tại Bước 04-C theo thiết kế ADR-022. Bản nháp không bị thay đổi."
+          "Xung đột xuất bản: Khóa idempotency đã được dùng với yêu cầu khác hoặc đang được xử lý đồng thời."
+        );
+        return;
+      }
+      if (err instanceof ApiClientError && err.status === 412) {
+        setPublishMessage(
+          "Bản nháp đã bị thay đổi trước khi xuất bản. Vui lòng đóng hộp thoại và tải lại trang."
+        );
+        return;
+      }
+      if (err instanceof ApiClientError && err.status === 422) {
+        setPublishMessage(
+          "Tác tử chưa sẵn sàng xuất bản: phụ thuộc hoặc cấu hình không hợp lệ. Vui lòng kiểm tra lại chẩn đoán."
         );
         return;
       }
@@ -753,12 +775,22 @@ export default function AgentsPage({
           <Button
             variant="copper"
             size="sm"
+            disabled={Boolean(item.archived_at)}
             onClick={(e) => {
               e.stopPropagation();
               setPublishMessage(null);
               setPublishTargetAgent(item);
+              setPublishIdempotencyKey(
+                typeof crypto !== "undefined" && crypto.randomUUID
+                  ? crypto.randomUUID()
+                  : `pub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+              );
             }}
-            title="Publish (Disabled in 04-A)"
+            title={
+              item.archived_at
+                ? "Tác tử đã bị lưu trữ, không thể xuất bản"
+                : "Xuất bản phiên bản bất biến (Step 04-C)"
+            }
             style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}
           >
             <BrandIcon name="action-publish" size={13} color="currentColor" />
@@ -1357,7 +1389,7 @@ export default function AgentsPage({
         </form>
       </Modal>
 
-      {/* Modal: Publish Notice (Fail-closed in 04-A) */}
+      {/* Modal: Publish Confirmation (Step 04-C) */}
       <Modal
         isOpen={Boolean(publishTargetAgent)}
         onClose={() => {
@@ -1366,7 +1398,7 @@ export default function AgentsPage({
         }}
         title="Xuất bản Phiên bản Bất biến (Publish)"
         description={`Tác tử: ${publishTargetAgent?.display_name} (${publishTargetAgent?.slug})`}
-        maxWidth="500px"
+        maxWidth="520px"
         footer={
           <>
             <Button
@@ -1378,7 +1410,7 @@ export default function AgentsPage({
                 setPublishMessage(null);
               }}
             >
-              Đóng
+              Hủy
             </Button>
             <Button
               variant="copper"
@@ -1387,14 +1419,14 @@ export default function AgentsPage({
               onClick={handleConfirmPublish}
               isLoading={isPublishing}
             >
-              Thực hiện xuất bản
+              Xác nhận Xuất bản
             </Button>
           </>
         }
       >
         <div style={{ display: "flex", flexDirection: "column", gap: "12px", fontSize: "13px", color: "var(--text-secondary)" }}>
           <p style={{ margin: 0 }}>
-            Theo quyết định kiến trúc <strong>ADR-022</strong> và <strong>D04-02</strong>, việc công bố phiên bản bất biến yêu cầu cơ chế khóa liên kết và sổ cái biên nhận giao dịch (sẽ được triển khai tại <strong>Bước 04-C</strong>).
+            Xuất bản tác tử sẽ tạo một bản ghi phiên bản bất biến (immutable version) gắn kèm manifest định danh RFC 8785, khóa liên kết công cụ / tri thức / kỹ năng, và lưu biên nhận giao dịch bền vững (ADR-022 / STEP-04C).
           </p>
           <div
             style={{
@@ -1405,9 +1437,13 @@ export default function AgentsPage({
               fontFamily: "var(--font-mono)",
               fontSize: "12px",
               color: "var(--text-muted)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
             }}
           >
-            Trạng thái hiện tại: STEP-04A Draft CRUD ONLY. Publish bị vô hiệu hóa an toàn (fail-closed, HTTP 503 capability_unavailable).
+            <div>Bản nháp Revision: <strong>{publishTargetAgent?.revision}</strong></div>
+            <div>Khóa Idempotency: <span style={{ wordBreak: "break-all" }}>{publishIdempotencyKey}</span></div>
           </div>
           {publishMessage && (
             <div

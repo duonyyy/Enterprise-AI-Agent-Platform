@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
-from control_api.modules.agents.models.records import AgentDraftEntity, AgentDraftMetadataEntity
+from control_api.modules.agents.models.records import (
+    AgentDraftEntity,
+    AgentDraftMetadataEntity,
+    AgentPublishReceiptEntity,
+    PublishResultEntity,
+)
 
 SessionT_contra = TypeVar("SessionT_contra", contravariant=True)
 
@@ -60,6 +65,31 @@ class AgentRepositoryPort(Protocol[SessionT_contra]):
         request_id: str | None = None,
         trace_id: str | None = None,
     ) -> AgentDraftEntity: ...
+
+    async def get_publish_receipt(
+        self,
+        session: SessionT_contra,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        agent_id: UUID,
+        operation_key: str,
+    ) -> AgentPublishReceiptEntity | None: ...
+
+    async def publish_version(
+        self,
+        session: SessionT_contra,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        agent_id: UUID,
+        expected_revision: int,
+        operation_key: str,
+        request_sha256: str,
+        actor_user_id: UUID,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> PublishResultEntity: ...
 
 
 @dataclass(frozen=True, slots=True)

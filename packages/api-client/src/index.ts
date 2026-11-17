@@ -81,12 +81,21 @@ export type CreateAgentDraftResponse = AgentDraft & {
   status?: string;
 };
 
+export interface PublishAgentRequestDTO {
+  expected_revision: number;
+}
+
 export interface PublishResponse {
   agent_id: string;
+  agent_version_id: string;
   version: number;
-  spec_hash: string;
+  bundle_sha256: string;
   is_immutable: boolean;
+  created_at: string;
+  spec_hash?: string;
 }
+
+export type PublishAgentResponse = PublishResponse;
 
 export interface ApprovalRequest {
   id: string;
@@ -707,12 +716,18 @@ export class ControlApiClientV2 {
   async publishAgent(
     workspaceId: string,
     agentId: string,
+    options: { expectedRevision: number; idempotencyKey: string },
     signal?: AbortSignal
   ): Promise<PublishResponse> {
     return this.request<PublishResponse>(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/publish`,
       {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": options.idempotencyKey,
+        },
+        body: JSON.stringify({ expected_revision: options.expectedRevision }),
         signal,
       }
     );
