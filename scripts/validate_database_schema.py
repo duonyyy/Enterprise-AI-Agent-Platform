@@ -42,7 +42,7 @@ REVIEWED_INVITATION_ACCEPT_PROJECTION_FINGERPRINT: Final[str] = (
     "e494e79970e1ad5f889de5ad6106707892ee80285c844eb9db9aaaddb529a8b8"
 )
 REVIEWED_AGENT_PUBLISH_RECEIPTS_FINGERPRINT: Final[str] = (
-    "9b9211f87610e42c84e927ab659330b158f702b856023a8ea4a7ab2499ce7bb6"
+    "19ebc65f674b09b2a9fde5d160f1fd4543a85905e4544a8f78e55e947aaaf434"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")

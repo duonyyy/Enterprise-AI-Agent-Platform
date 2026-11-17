@@ -51,6 +51,26 @@ logger = logging.getLogger(__name__)
 
 _PERMITTED_WRITE_ROLES = frozenset({"owner", "admin", "developer"})
 
+# Approved non-secret model generation settings for manifest snapshot.
+# Secret values (api_key, credentials, tokens) are NEVER included.
+# This allowlist follows R04-SNAPSHOT; changes require manifest contract review.
+_MODEL_SETTINGS_ALLOWLIST = frozenset({
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_output_tokens",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop_sequences",
+    "response_format",
+    "seed",
+})
+
+_MODEL_SETTINGS_DENYLIST = frozenset({
+    "api_key", "api_secret", "token", "credential", "password",
+    "secret", "access_key", "private_key",
+})
+
 
 def _encode_cursor(created_at: datetime, agent_id: UUID) -> str:
     payload = f"{created_at.isoformat()}|{agent_id}"
@@ -548,6 +568,33 @@ class AgentRepository:
             row = result.mappings().one_or_none()
             if row is None:
                 return None
+            # Lock the authority grant row that the publish decision relies on,
+            # preventing it from being revoked mid-transaction (R04C-02).
+            if for_share and row["has_invoke_grant"]:
+                try:
+                    await session.execute(
+                        text(
+                            "SELECT 1 FROM catalog.tool_grants "
+                            "WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id "
+                            "  AND tool_id = :tool_id "
+                            "  AND principal_kind = 'role' AND principal_key = :caller_role "
+                            "  AND allowed_operation = 'invoke' "
+                            "FOR SHARE"
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "tool_id": row["tool_id"],
+                            "caller_role": caller_role,
+                        },
+                    )
+                except SQLAlchemyError as exc:
+                    logger.warning(
+                        "resolve_tool_version grant lock error (%s)",
+                        type(exc).__name__,
+                    )
+                    raise AgentDatabaseUnavailableError() from exc
+
             return ResolvedToolVersion(
                 id=row["id"],
                 tool_id=row["tool_id"],
@@ -576,7 +623,7 @@ class AgentRepository:
         for_share: bool = False,
     ) -> ResolvedSkillVersion | None:
         """Resolve skill version and parent skill status within workspace scope."""
-        lock_clause = " FOR SHARE OF sv" if for_share else ""
+        lock_clause = " FOR SHARE OF sv, s" if for_share else ""  # R04C-02: lock parent skill too
         stmt = text(
             "SELECT sv.id AS skill_version_id, sv.skill_id, sv.tenant_id, sv.workspace_id, "
             "       s.slug AS skill_slug, s.status AS skill_status, "
@@ -658,6 +705,37 @@ class AgentRepository:
             row = result.mappings().one_or_none()
             if row is None:
                 return None
+            # Lock the authority grant row for restricted bases, preventing
+            # revocation mid-transaction (R04C-02).
+            if for_share and row["visibility"] != "workspace" and row["has_access"]:
+                try:
+                    await session.execute(
+                        text(
+                            "SELECT 1 FROM knowledge.base_grants "
+                            "WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id "
+                            "  AND base_id = :base_id "
+                            "  AND permission IN ('read', 'manage') "
+                            "  AND ( "
+                            "      (principal_kind = 'user' AND principal_key = :user_id_str) OR "
+                            "      (principal_kind = 'role' AND principal_key = :caller_role) "
+                            "  ) "
+                            "FOR SHARE"
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "workspace_id": workspace_id,
+                            "base_id": base_id,
+                            "user_id_str": str(user_id),
+                            "caller_role": caller_role,
+                        },
+                    )
+                except SQLAlchemyError as exc:
+                    logger.warning(
+                        "resolve_knowledge_base grant lock error (%s)",
+                        type(exc).__name__,
+                    )
+                    raise AgentDatabaseUnavailableError() from exc
+
             return ResolvedKnowledgeBase(
                 id=row["id"],
                 tenant_id=row["tenant_id"],
@@ -967,11 +1045,22 @@ class AgentRepository:
             raise AgentDatabaseUnavailableError() from exc
 
         # Step 8: Build canonical manifest and compute bundle SHA-256
+        # Filter model settings through allowlist — never include secrets
+        effective_settings: dict[str, Any] = {}
+        for key, value in model_cfg.settings.items():
+            lower_key = key.lower()
+            if any(deny in lower_key for deny in _MODEL_SETTINGS_DENYLIST):
+                continue  # Never include anything that looks like a secret
+            if key in _MODEL_SETTINGS_ALLOWLIST:
+                effective_settings[key] = value
+
         model_dict = {
             "id": str(model_cfg.id),
             "name": model_cfg.name,
             "provider": model_cfg.provider,
             "providerModelId": model_cfg.provider_model_id,
+            "effectiveSettings": effective_settings,
+            "modelConfigId": str(model_cfg.id),
         }
         sorted_tools = sorted(
             [

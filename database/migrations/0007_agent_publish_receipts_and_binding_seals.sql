@@ -139,8 +139,7 @@ BEGIN
       AND id = NEW.id;
 
     IF NOT FOUND THEN
-        -- Row was deleted in the same transaction
-        RETURN NEW;
+        RAISE EXCEPTION 'Agent version % cannot be verified as sealed (row not visible)', NEW.id;
     END IF;
 
     IF v_sealed_at IS NULL THEN

@@ -28,10 +28,14 @@ import {
 } from "@enterprise/api-client";
 
 import {
+  AgentPublishScope,
   AgentRequestScope,
   AgentValidationScope,
+  clearPendingPublishIntent,
+  getPendingPublishIntent,
   isValidationResultStale,
   mergeAgentDraftEdits,
+  savePendingPublishIntent,
 } from "../../../../../lib/agent-draft-state";
 
 type ViewState = "ready" | "loading" | "empty" | "error" | "forbidden" | "stale";
@@ -46,15 +50,18 @@ export default function AgentsPage({
   const requestScope = useRef(new AgentRequestScope());
   const editorScope = useRef(new AgentRequestScope());
   const validationScope = useRef(new AgentValidationScope());
+  const publishScope = useRef(new AgentPublishScope());
   useLayoutEffect(() => {
     const scope = requestScope.current;
     const editor = editorScope.current;
     const validation = validationScope.current;
+    const publish = publishScope.current;
     scope.reset();
     return () => {
       scope.invalidate();
       editor.invalidate();
       validation.invalidate();
+      publish.invalidate();
     };
   }, [workspaceId]);
 
@@ -137,8 +144,10 @@ export default function AgentsPage({
   // Publish Dialog
   const [publishTargetAgent, setPublishTargetAgent] = useState<AgentDraftMetadata | null>(null);
   const [publishIdempotencyKey, setPublishIdempotencyKey] = useState<string>("");
+  const [publishRevision, setPublishRevision] = useState<number>(1);
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
+  const [isRecoveredIntent, setIsRecoveredIntent] = useState(false);
 
   // Notification Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -217,9 +226,11 @@ export default function AgentsPage({
     setIsCreateModalOpen(false);
     setIsSubmitting(false);
     setIsSaving(false);
+    publishScope.current.invalidate();
     setPublishTargetAgent(null);
     setIsPublishing(false);
     setPublishMessage(null);
+    setIsRecoveredIntent(false);
     setToastMessage(null);
     setCurrentPage(1);
     setNextCursor(null);
@@ -593,54 +604,123 @@ export default function AgentsPage({
     }
   };
 
-  // Submit Publish Agent (ADR-022, SPEC-AGENT-001, STEP-04C)
+  const closePublishModal = () => {
+    // R04C-05: Invalidate in-flight callbacks for this dialog
+    // R04C-04: Note that pending intent in storage is retained; unresolved intent can be recovered
+    publishScope.current.invalidate();
+    setPublishTargetAgent(null);
+    setPublishMessage(null);
+    setIsPublishing(false);
+    setIsRecoveredIntent(false);
+  };
+
+  const handleCreateFreshIntent = () => {
+    if (!publishTargetAgent) return;
+    clearPendingPublishIntent(workspaceId, publishTargetAgent.agent_id);
+    const freshKey =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `pub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    setPublishIdempotencyKey(freshKey);
+    setPublishRevision(publishTargetAgent.revision);
+    setIsRecoveredIntent(false);
+    setPublishMessage(null);
+  };
+
+  // Submit Publish Agent (ADR-022, SPEC-AGENT-001, STEP-04C, R04C-04, R04C-05)
   const handleConfirmPublish = async () => {
     if (!publishTargetAgent) return;
+
+    const targetAgent = publishTargetAgent;
+    const targetAgentId = targetAgent.agent_id;
+    const targetRevision = publishRevision;
+    const targetKey = publishIdempotencyKey;
+
+    // R04C-05: Bind request to this exact operation scope
+    const publishOp = publishScope.current.begin(
+      workspaceId,
+      targetAgentId,
+      targetKey,
+      targetRevision
+    );
+
+    // R04C-04: Persist pending publish intent BEFORE dispatching request
+    savePendingPublishIntent({
+      workspaceId,
+      agentId: targetAgentId,
+      operationKey: targetKey,
+      expectedRevision: targetRevision,
+      status: "pending",
+      createdAt: Date.now(),
+    });
+
     setIsPublishing(true);
     setPublishMessage(null);
 
-    const scope = requestScope.current.capture();
+    const workspaceSignal = requestScope.current.capture();
     try {
       const res = await defaultApiClient.publishAgent(
         workspaceId,
-        publishTargetAgent.agent_id,
+        targetAgentId,
         {
-          expectedRevision: publishTargetAgent.revision,
-          idempotencyKey: publishIdempotencyKey,
+          expectedRevision: targetRevision,
+          idempotencyKey: targetKey,
         },
-        scope.signal
+        publishOp.signal
       );
-      if (!scope.isCurrent()) return;
-      showToast(`Đã xuất bản Tác tử "${publishTargetAgent.display_name}" thành phiên bản ${res.version}.`);
+
+      // R04C-05: Check BOTH workspace scope and exact operation scope
+      if (!workspaceSignal.isCurrent() || !publishOp.isCurrent()) return;
+      if (!publishOp.matchesResponse(res)) return;
+
+      // Successful publish confirmed by server receipt: clear pending intent
+      clearPendingPublishIntent(workspaceId, targetAgentId);
+
+      showToast(`Đã xuất bản Tác tử "${targetAgent.display_name}" thành phiên bản ${res.version}.`);
       setPublishTargetAgent(null);
+      setIsRecoveredIntent(false);
       await fetchAgents();
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
-      if (err instanceof ApiClientError && err.status === 409) {
-        setPublishMessage(
-          "Xung đột xuất bản: Khóa idempotency đã được dùng với yêu cầu khác hoặc đang được xử lý đồng thời."
-        );
-        return;
+      if (!workspaceSignal.isCurrent() || !publishOp.isCurrent()) return;
+
+      if (err instanceof ApiClientError) {
+        // Definitive client/server errors: clear pending intent so user can start fresh
+        if (err.status === 412) {
+          clearPendingPublishIntent(workspaceId, targetAgentId);
+          setPublishMessage(
+            "Bản nháp đã bị thay đổi trước khi xuất bản. Vui lòng đóng hộp thoại và tải lại trang."
+          );
+          return;
+        }
+        if (err.status === 422) {
+          clearPendingPublishIntent(workspaceId, targetAgentId);
+          setPublishMessage(
+            "Tác tử chưa sẵn sàng xuất bản: phụ thuộc hoặc cấu hình không hợp lệ. Vui lòng kiểm tra lại chẩn đoán."
+          );
+          return;
+        }
+        if (err.status === 403) {
+          clearPendingPublishIntent(workspaceId, targetAgentId);
+          setPublishMessage("Từ chối truy cập: Bạn không có quyền xuất bản Tác tử.");
+          return;
+        }
+        if (err.status === 409) {
+          // Idempotency conflict with different request
+          setPublishMessage(
+            "Xung đột xuất bản: Khóa idempotency đã được dùng với yêu cầu khác hoặc đang được xử lý đồng thời."
+          );
+          return;
+        }
+        setPublishMessage(err.message || "Dịch vụ xuất bản tạm thời không khả dụng.");
+      } else {
+        // Unknown error / network abort / timeout: keep pending intent in storage for recovery
+        setPublishMessage(err instanceof Error ? err.message : "Dịch vụ xuất bản tạm thời không khả dụng.");
       }
-      if (err instanceof ApiClientError && err.status === 412) {
-        setPublishMessage(
-          "Bản nháp đã bị thay đổi trước khi xuất bản. Vui lòng đóng hộp thoại và tải lại trang."
-        );
-        return;
-      }
-      if (err instanceof ApiClientError && err.status === 422) {
-        setPublishMessage(
-          "Tác tử chưa sẵn sàng xuất bản: phụ thuộc hoặc cấu hình không hợp lệ. Vui lòng kiểm tra lại chẩn đoán."
-        );
-        return;
-      }
-      if (err instanceof ApiClientError && err.status === 403) {
-        setPublishMessage("Từ chối truy cập: Bạn không có quyền xuất bản Tác tử.");
-        return;
-      }
-      setPublishMessage(err instanceof Error ? err.message : "Dịch vụ xuất bản tạm thời không khả dụng.");
     } finally {
-      if (scope.isCurrent()) setIsPublishing(false);
+      // R04C-05: Only reset publishing spinner if this operation is still current
+      if (workspaceSignal.isCurrent() && publishOp.isCurrent()) {
+        setIsPublishing(false);
+      }
     }
   };
 
@@ -780,11 +860,27 @@ export default function AgentsPage({
               e.stopPropagation();
               setPublishMessage(null);
               setPublishTargetAgent(item);
-              setPublishIdempotencyKey(
-                typeof crypto !== "undefined" && crypto.randomUUID
-                  ? crypto.randomUUID()
-                  : `pub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
-              );
+
+              // R04C-04: Check if there is an unresolved pending intent for this agent
+              const pending = getPendingPublishIntent(workspaceId, item.agent_id);
+              if (pending && pending.status === "pending") {
+                // Recover: use exact operation key and expected revision from the pending intent
+                setPublishIdempotencyKey(pending.operationKey);
+                setPublishRevision(pending.expectedRevision);
+                setIsRecoveredIntent(true);
+                setPublishMessage(
+                  `Phát hiện ý định xuất bản trước đó đang chờ xác nhận kết quả (Khóa: ${pending.operationKey.substring(0, 8)}…, revision: ${pending.expectedRevision}). Bạn có thể tiếp tục khôi phục hoặc tạo ý định mới.`
+                );
+              } else {
+                // Explicit fresh intent
+                const freshKey =
+                  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+                    ? crypto.randomUUID()
+                    : `pub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                setPublishIdempotencyKey(freshKey);
+                setPublishRevision(item.revision);
+                setIsRecoveredIntent(false);
+              }
             }}
             title={
               item.archived_at
@@ -1392,26 +1488,33 @@ export default function AgentsPage({
       {/* Modal: Publish Confirmation (Step 04-C) */}
       <Modal
         isOpen={Boolean(publishTargetAgent)}
-        onClose={() => {
-          setPublishTargetAgent(null);
-          setPublishMessage(null);
-        }}
+        onClose={closePublishModal}
         title="Xuất bản Phiên bản Bất biến (Publish)"
         description={`Tác tử: ${publishTargetAgent?.display_name} (${publishTargetAgent?.slug})`}
-        maxWidth="520px"
+        maxWidth="540px"
         footer={
           <>
             <Button
               variant="secondary"
               size="md"
               type="button"
-              onClick={() => {
-                setPublishTargetAgent(null);
-                setPublishMessage(null);
-              }}
+              onClick={closePublishModal}
+              disabled={isPublishing}
             >
               Hủy
             </Button>
+            {isRecoveredIntent && (
+              <Button
+                variant="outline"
+                size="md"
+                type="button"
+                onClick={handleCreateFreshIntent}
+                disabled={isPublishing}
+                title="Hủy bỏ khôi phục và tạo khóa xuất bản mới cho bản nháp hiện tại"
+              >
+                Tạo ý định mới (New Intent)
+              </Button>
+            )}
             <Button
               variant="copper"
               size="md"
@@ -1419,7 +1522,7 @@ export default function AgentsPage({
               onClick={handleConfirmPublish}
               isLoading={isPublishing}
             >
-              Xác nhận Xuất bản
+              {isRecoveredIntent ? "Khôi phục / Thử lại" : "Xác nhận Xuất bản"}
             </Button>
           </>
         }
@@ -1442,8 +1545,20 @@ export default function AgentsPage({
               gap: "4px",
             }}
           >
-            <div>Bản nháp Revision: <strong>{publishTargetAgent?.revision}</strong></div>
+            <div>
+              Bản nháp Revision: <strong>rev {publishRevision}</strong>
+              {isRecoveredIntent && publishRevision !== publishTargetAgent?.revision && (
+                <span style={{ color: "var(--color-warning)", marginLeft: "6px" }}>
+                  (Ý định trước: rev {publishRevision}, hiện tại: rev {publishTargetAgent?.revision})
+                </span>
+              )}
+            </div>
             <div>Khóa Idempotency: <span style={{ wordBreak: "break-all" }}>{publishIdempotencyKey}</span></div>
+            {isRecoveredIntent && (
+              <div style={{ color: "var(--color-primary)", fontSize: "11px", marginTop: "2px" }}>
+                ℹ️ Đang khôi phục thao tác xuất bản trước chưa nhận được phản hồi.
+              </div>
+            )}
           </div>
           {publishMessage && (
             <div
