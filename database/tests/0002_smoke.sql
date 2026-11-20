@@ -1,4 +1,4 @@
--- Smoke test for freshly applied Unified v2.0 baseline (56 tables).
+-- Smoke test for the current migration chain, including Agent publish sealing.
 -- Must be run with a non-BYPASSRLS role able to insert test rows; all changes intentionally ROLLBACK.
 BEGIN;
 
@@ -15,11 +15,11 @@ INSERT INTO catalog.agents (id,tenant_id,workspace_id,slug,display_name)
 VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc','11111111-1111-4111-8111-111111111111',
         'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','agent-sample','Sample Agent');
 INSERT INTO catalog.agent_versions
- (id,tenant_id,workspace_id,agent_id,version,schema_version,frozen_spec,bundle_sha256)
+ (id,tenant_id,workspace_id,agent_id,version,schema_version,frozen_spec,bundle_sha256,bundle_manifest)
 VALUES
  ('dddddddd-dddd-4ddd-8ddd-dddddddddddd','11111111-1111-4111-8111-111111111111',
   'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-  1,'1.0','{"persona":"test"}'::jsonb,repeat('a',64));
+  1,'1.0','{"persona":"test"}'::jsonb,repeat('a',64),'{"smoke_fixture":true}'::jsonb);
 INSERT INTO catalog.agent_publications
  (tenant_id,workspace_id,agent_id,agent_version_id,environment)
 VALUES
@@ -42,6 +42,10 @@ VALUES
  ('33333333-4444-4555-8666-777777777777','11111111-1111-4111-8111-111111111111',
   'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','dddddddd-dddd-4ddd-8ddd-dddddddddddd',
   '11111111-2222-4333-8444-555555555555','22222222-3333-4444-8555-666666666666');
+
+-- Finalize bindings after insertion, as required by migration 0007.
+UPDATE catalog.agent_versions SET bindings_sealed_at = now()
+WHERE id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
 -- 4. Insert Tool, ToolVersion, and MCP Connection, Snapshot, Discovered Item, Tool Mapping
 INSERT INTO catalog.tools (id,tenant_id,workspace_id,tool_key,display_name,kind)
