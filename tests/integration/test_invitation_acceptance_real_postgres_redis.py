@@ -176,7 +176,7 @@ def test_migration_0006_upgrade_and_rls_privilege_isolation(
     app_url = isolated_database["app_url"]
 
     sql_files = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql"))
-    pre_0006 = [p for p in sql_files if not p.name.startswith("0006_")]
+    pre_0006 = [p for p in sql_files if p.name[:4] < "0006"]
     assert len(pre_0006) == 5
 
     # Upgrade incrementally 0001..0005 then apply 0006
