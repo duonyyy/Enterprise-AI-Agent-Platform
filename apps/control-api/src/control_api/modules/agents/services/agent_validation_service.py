@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from agent_contracts.manifest import CanonicalizationError, canonicalize_json
 from agent_contracts.validation import AgentSpecValidationError, validate_agent_spec_raw
 from control_api.modules.agents.models.errors import AgentNotFoundError
 from control_api.modules.agents.models.ports import (
@@ -119,6 +120,18 @@ class AgentValidationService:
                 diagnostics=diagnostics,
             )
 
+        # 2b. RFC 8785 (JCS) canonicalizability check (RF04-05)
+        try:
+            canonicalize_json(spec)
+        except CanonicalizationError:
+            diagnostics.append(
+                AgentDiagnosticEntity(
+                    field="spec",
+                    code="invalid_spec",
+                    message="Agent specification contains values that cannot be canonically serialized under RFC 8785",
+                )
+            )
+
         # 3. Slug immutability invariant
         spec_name = (
             spec.get("metadata", {}).get("name") if isinstance(spec.get("metadata"), dict) else None
@@ -216,9 +229,10 @@ class AgentValidationService:
                     )
                 )
 
-        # 8. Tool references validation (B01, B02, B04)
+        # 8. Tool references validation (B01, B02, B04, RF04-02)
         tool_refs = spec.get("toolRefs")
         if isinstance(tool_refs, list):
+            seen_tool_version_ids: set[UUID] = set()
             for i, tool_ref in enumerate(tool_refs):
                 if not isinstance(tool_ref, str):
                     diagnostics.append(
@@ -231,38 +245,6 @@ class AgentValidationService:
                     continue
                 try:
                     tool_uuid = UUID(tool_ref)
-                    tool_res = await self._resolver.resolve_tool_version(
-                        session,
-                        tenant_id=tenant_id,
-                        workspace_id=workspace_id,
-                        tool_version_id=tool_uuid,
-                        caller_role=caller_role,
-                    )
-                    if tool_res is None:
-                        diagnostics.append(
-                            AgentDiagnosticEntity(
-                                field=f"toolRefs[{i}]",
-                                code="dependency_unavailable",
-                                message="Tool version not found in workspace",
-                            )
-                        )
-                    else:
-                        if tool_res.kind == "mcp":
-                            diagnostics.append(
-                                AgentDiagnosticEntity(
-                                    field=f"toolRefs[{i}]",
-                                    code="unsupported_capability",
-                                    message="MCP readiness requires an approved owner resolver; this capability is unavailable",
-                                )
-                            )
-                        if not tool_res.has_invoke_grant:
-                            diagnostics.append(
-                                AgentDiagnosticEntity(
-                                    field=f"toolRefs[{i}]",
-                                    code="dependency_not_permitted",
-                                    message=f"Caller role '{caller_role}' lacks invoke grant for tool",
-                                )
-                            )
                 except (ValueError, TypeError, AttributeError):
                     diagnostics.append(
                         AgentDiagnosticEntity(
@@ -271,10 +253,54 @@ class AgentValidationService:
                             message="Tool reference must be a valid UUID in workspace",
                         )
                     )
+                    continue
+                if tool_uuid in seen_tool_version_ids:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"toolRefs[{i}]",
+                            code="invalid_spec",
+                            message="Duplicate tool version reference in toolRefs",
+                        )
+                    )
+                    continue
+                seen_tool_version_ids.add(tool_uuid)
+                tool_res = await self._resolver.resolve_tool_version(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    tool_version_id=tool_uuid,
+                    caller_role=caller_role,
+                )
+                if tool_res is None:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"toolRefs[{i}]",
+                            code="dependency_unavailable",
+                            message="Tool version not found in workspace",
+                        )
+                    )
+                else:
+                    if tool_res.kind == "mcp":
+                        diagnostics.append(
+                            AgentDiagnosticEntity(
+                                field=f"toolRefs[{i}]",
+                                code="unsupported_capability",
+                                message="MCP readiness requires an approved owner resolver; this capability is unavailable",
+                            )
+                        )
+                    if not tool_res.has_invoke_grant:
+                        diagnostics.append(
+                            AgentDiagnosticEntity(
+                                field=f"toolRefs[{i}]",
+                                code="dependency_not_permitted",
+                                message=f"Caller role '{caller_role}' lacks invoke grant for tool",
+                            )
+                        )
 
-        # 9. Skill references validation (B01, B02, B03, B04)
+        # 9. Skill references validation (B01, B02, B03, B04, RF04-02)
         skill_refs = spec.get("skillRefs")
         if isinstance(skill_refs, list):
+            seen_skill_versions_by_skill: dict[UUID, UUID] = {}
             for i, skill_ref in enumerate(skill_refs):
                 if not isinstance(skill_ref, dict):
                     diagnostics.append(
@@ -288,41 +314,10 @@ class AgentValidationService:
                 skill_id_str = skill_ref.get("skillId")
                 ver_id_str = skill_ref.get("skillVersionId")
                 try:
-                    skill_uuid = UUID(str(skill_id_str))
-                    ver_uuid = UUID(str(ver_id_str))
-                    skill_res = await self._resolver.resolve_skill_version(
-                        session,
-                        tenant_id=tenant_id,
-                        workspace_id=workspace_id,
-                        skill_id=skill_uuid,
-                        skill_version_id=ver_uuid,
-                    )
-                    if skill_res is None:
-                        diagnostics.append(
-                            AgentDiagnosticEntity(
-                                field=f"skillRefs[{i}]",
-                                code="dependency_unavailable",
-                                message="Skill version not found in workspace",
-                            )
-                        )
-                    else:
-                        # Version-pair integrity (B03)
-                        if skill_res.skill_id != skill_uuid:
-                            diagnostics.append(
-                                AgentDiagnosticEntity(
-                                    field=f"skillRefs[{i}]",
-                                    code="dependency_unavailable",
-                                    message="Skill version does not belong to the specified skill",
-                                )
-                            )
-                        if skill_res.skill_status != "active":
-                            diagnostics.append(
-                                AgentDiagnosticEntity(
-                                    field=f"skillRefs[{i}]",
-                                    code="dependency_unavailable",
-                                    message=f"Skill is {skill_res.skill_status}",
-                                )
-                            )
+                    if not isinstance(skill_id_str, str) or not isinstance(ver_id_str, str):
+                        raise TypeError("Skill reference IDs must be strings")
+                    skill_uuid = UUID(skill_id_str)
+                    ver_uuid = UUID(ver_id_str)
                 except (ValueError, TypeError, AttributeError):
                     diagnostics.append(
                         AgentDiagnosticEntity(
@@ -331,10 +326,64 @@ class AgentValidationService:
                             message="Skill reference must contain valid UUIDs for skillId and skillVersionId",
                         )
                     )
+                    continue
+                if skill_uuid in seen_skill_versions_by_skill:
+                    if seen_skill_versions_by_skill[skill_uuid] == ver_uuid:
+                        diagnostics.append(
+                            AgentDiagnosticEntity(
+                                field=f"skillRefs[{i}]",
+                                code="invalid_spec",
+                                message="Duplicate skill reference in skillRefs",
+                            )
+                        )
+                        continue
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"skillRefs[{i}]",
+                            code="invalid_spec",
+                            message="Conflicting skill reference: multiple versions of the same skill cannot be bound",
+                        )
+                    )
+                else:
+                    seen_skill_versions_by_skill[skill_uuid] = ver_uuid
+                skill_res = await self._resolver.resolve_skill_version(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    skill_id=skill_uuid,
+                    skill_version_id=ver_uuid,
+                )
+                if skill_res is None:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"skillRefs[{i}]",
+                            code="dependency_unavailable",
+                            message="Skill version not found in workspace",
+                        )
+                    )
+                else:
+                    # Version-pair integrity (B03)
+                    if skill_res.skill_id != skill_uuid:
+                        diagnostics.append(
+                            AgentDiagnosticEntity(
+                                field=f"skillRefs[{i}]",
+                                code="dependency_unavailable",
+                                message="Skill version does not belong to the specified skill",
+                            )
+                        )
+                    if skill_res.skill_status != "active":
+                        diagnostics.append(
+                            AgentDiagnosticEntity(
+                                field=f"skillRefs[{i}]",
+                                code="dependency_unavailable",
+                                message=f"Skill is {skill_res.skill_status}",
+                            )
+                        )
 
-        # 10. Knowledge references validation (B01, B02, B08)
+        # 10. Knowledge references validation (B01, B02, B08, RF04-02)
         knowledge_refs = spec.get("knowledgeRefs")
         if isinstance(knowledge_refs, list):
+            seen_kb_ids: set[UUID] = set()
             for i, base_ref in enumerate(knowledge_refs):
                 if not isinstance(base_ref, str):
                     diagnostics.append(
@@ -347,36 +396,47 @@ class AgentValidationService:
                     continue
                 try:
                     base_uuid = UUID(base_ref)
-                    kb_res = await self._resolver.resolve_knowledge_base(
-                        session,
-                        tenant_id=tenant_id,
-                        workspace_id=workspace_id,
-                        base_id=base_uuid,
-                        user_id=actor_user_id,
-                        caller_role=caller_role,
-                    )
-                    if kb_res is None:
-                        diagnostics.append(
-                            AgentDiagnosticEntity(
-                                field=f"knowledgeRefs[{i}]",
-                                code="dependency_unavailable",
-                                message="Knowledge base not found in workspace",
-                            )
-                        )
-                    elif not kb_res.has_access:
-                        diagnostics.append(
-                            AgentDiagnosticEntity(
-                                field=f"knowledgeRefs[{i}]",
-                                code="dependency_not_permitted",
-                                message="Access denied to restricted knowledge base in workspace",
-                            )
-                        )
                 except (ValueError, TypeError, AttributeError):
                     diagnostics.append(
                         AgentDiagnosticEntity(
                             field=f"knowledgeRefs[{i}]",
                             code="dependency_unavailable",
                             message="Knowledge reference must be a valid UUID in workspace",
+                        )
+                    )
+                    continue
+                if base_uuid in seen_kb_ids:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"knowledgeRefs[{i}]",
+                            code="invalid_spec",
+                            message="Duplicate knowledge base reference in knowledgeRefs",
+                        )
+                    )
+                    continue
+                seen_kb_ids.add(base_uuid)
+                kb_res = await self._resolver.resolve_knowledge_base(
+                    session,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    base_id=base_uuid,
+                    user_id=actor_user_id,
+                    caller_role=caller_role,
+                )
+                if kb_res is None:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"knowledgeRefs[{i}]",
+                            code="dependency_unavailable",
+                            message="Knowledge base not found in workspace",
+                        )
+                    )
+                elif not kb_res.has_access:
+                    diagnostics.append(
+                        AgentDiagnosticEntity(
+                            field=f"knowledgeRefs[{i}]",
+                            code="dependency_not_permitted",
+                            message="Access denied to restricted knowledge base in workspace",
                         )
                     )
 

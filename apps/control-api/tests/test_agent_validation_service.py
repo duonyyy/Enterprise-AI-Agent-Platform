@@ -805,3 +805,122 @@ def test_mcp_readiness_is_unsupported_until_owner_resolver_is_approved(hashes_eq
         d.field == "toolRefs[0]" and d.code == "unsupported_capability" for d in result.diagnostics
     )
     assert not any("drift" in d.message.lower() for d in result.diagnostics)
+
+
+def test_rf04_02_duplicate_and_conflicting_dependency_refs_are_diagnosed() -> None:
+    """RF04-02: Duplicate tool/KB/skill refs and two versions of one skill must fail readiness with invalid_spec."""
+    principal, agent_id, spec, _, resolver, service = _validation_fixture()
+    tenant_id = UUID(principal.tenant_id)
+    workspace_id = UUID(principal.workspace_id)
+
+    tool_v1 = uuid4()
+    tool_v2 = uuid4()
+    shared_tool_id = uuid4()
+    skill_id = uuid4()
+    skill_v1 = uuid4()
+    skill_v2 = uuid4()
+    kb_id = uuid4()
+
+    resolver.resolve_tool_version = AsyncMock(
+        side_effect=lambda _s, *, tool_version_id, **_: ResolvedToolVersion(
+            id=tool_version_id,
+            tool_id=shared_tool_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            tool_key="calc",
+            kind="builtin",
+            version=1 if tool_version_id == tool_v1 else 2,
+            risk="read",
+            sha256="a" * 64,
+            mcp_status=None,
+            has_invoke_grant=True,
+        )
+    )
+    resolver.resolve_skill_version = AsyncMock(
+        side_effect=lambda _s, *, skill_id, skill_version_id, **_: ResolvedSkillVersion(
+            skill_id=skill_id,
+            skill_version_id=skill_version_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            skill_slug="my-skill",
+            skill_status="active",
+            version=1 if skill_version_id == skill_v1 else 2,
+            bundle_sha256="b" * 64,
+        )
+    )
+    resolver.resolve_knowledge_base = AsyncMock(
+        return_value=ResolvedKnowledgeBase(
+            id=kb_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            slug="kb-main",
+            name="KB Main",
+            visibility="workspace",
+            has_access=True,
+        )
+    )
+
+    # 1. Duplicate toolRefs (uppercase vs lowercase normalized UUID)
+    spec_dup_tool = {**spec, "toolRefs": [str(tool_v1).lower(), str(tool_v1).upper()]}
+    res_tool = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=spec_dup_tool)
+    )
+    assert res_tool.ready is False
+    assert any(d.field == "toolRefs[1]" and d.code == "invalid_spec" for d in res_tool.diagnostics)
+
+    # 2. Two DIFFERENT toolVersionIds of the same parent tool ARE allowed by schema UNIQUE (..., tool_version_id)
+    spec_two_tool_versions = {**spec, "toolRefs": [str(tool_v1), str(tool_v2)]}
+    res_two_tv = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=spec_two_tool_versions)
+    )
+    assert res_two_tv.ready is True, f"Expected ready=True, got {res_two_tv.diagnostics}"
+
+    # 3. Duplicate skill pair
+    spec_dup_skill = {
+        **spec,
+        "skillRefs": [
+            {"skillId": str(skill_id), "skillVersionId": str(skill_v1)},
+            {"skillId": str(skill_id).upper(), "skillVersionId": str(skill_v1).upper()},
+        ],
+    }
+    res_dup_skill = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=spec_dup_skill)
+    )
+    assert res_dup_skill.ready is False
+    assert any(d.field == "skillRefs[1]" and d.code == "invalid_spec" for d in res_dup_skill.diagnostics)
+
+    # 4. Two different versions of the same skill conflict with UNIQUE (..., skill_id)
+    spec_two_skill_ver = {
+        **spec,
+        "skillRefs": [
+            {"skillId": str(skill_id), "skillVersionId": str(skill_v1)},
+            {"skillId": str(skill_id), "skillVersionId": str(skill_v2)},
+        ],
+    }
+    res_two_sv = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=spec_two_skill_ver)
+    )
+    assert res_two_sv.ready is False
+    assert any(d.field == "skillRefs[1]" and d.code == "invalid_spec" for d in res_two_sv.diagnostics)
+
+    # 5. Duplicate knowledgeRefs (case-normalized UUID)
+    spec_dup_kb = {**spec, "knowledgeRefs": [str(kb_id).lower(), str(kb_id).upper()]}
+    res_kb = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=spec_dup_kb)
+    )
+    assert res_kb.ready is False
+    assert any(d.field == "knowledgeRefs[1]" and d.code == "invalid_spec" for d in res_kb.diagnostics)
+
+
+def test_rf04_05_uncanonicalizable_spec_reports_ready_false_without_500() -> None:
+    """RF04-05: Numbers outside RFC 8785 exact integer range must produce invalid_spec diagnostic."""
+    principal, agent_id, spec, _, _, service = _validation_fixture()
+    large_spec = {
+        **spec,
+        "limits": {**spec["limits"], "maxTotalTokens": 2**53},
+    }
+    res = asyncio.run(
+        service.validate_draft(MagicMock(), principal=principal, agent_id=agent_id, spec_override=large_spec)
+    )
+    assert res.ready is False
+    assert any(d.field == "spec" and d.code == "invalid_spec" for d in res.diagnostics)

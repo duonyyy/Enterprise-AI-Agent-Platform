@@ -81,7 +81,11 @@ export type CreateAgentDraftResponse = AgentDraft & {
   status?: string;
 };
 
+/** Maximum PostgreSQL int32 value supported for draft and publication revisions. */
+export const MAX_REVISION_INT32 = 2_147_483_647;
+
 export interface PublishAgentRequestDTO {
+  /** Committed integer draft revision in [1, MAX_REVISION_INT32]. */
   expected_revision: number;
 }
 
@@ -96,6 +100,58 @@ export interface PublishResponse {
 }
 
 export type PublishAgentResponse = PublishResponse;
+
+export interface AgentVersionMetadata {
+  agent_id: string;
+  agent_version_id: string;
+  version: number;
+  bundle_sha256: string;
+  is_immutable: boolean;
+  created_at: string;
+  published_by?: string | null;
+  model_name?: string | null;
+}
+
+export interface AgentVersionPage {
+  items: AgentVersionMetadata[];
+  next_cursor: string | null;
+}
+
+export type AgentEnvironment = "development" | "staging" | "production";
+
+export interface AgentPublication {
+  publication_id: string;
+  agent_id: string;
+  agent_version_id: string;
+  version: number;
+  environment: AgentEnvironment;
+  revision: number;
+  bundle_sha256: string;
+  published_at: string;
+}
+
+export interface AgentPublicationList {
+  items: AgentPublication[];
+}
+
+export interface PromoteAgentVersionRequestDTO {
+  agent_version_id: string;
+  environment: AgentEnvironment;
+  /** Expected publication pointer revision in [0, MAX_REVISION_INT32] (0 for initial). */
+  expected_publication_revision: number;
+}
+
+export interface PromoteAgentVersionResponse {
+  publication_id: string;
+  agent_id: string;
+  agent_version_id: string;
+  version: number;
+  environment: AgentEnvironment;
+  revision: number;
+  bundle_sha256: string;
+  published_at: string;
+  is_noop: boolean;
+}
 
 export interface ApprovalRequest {
   id: string;
@@ -728,6 +784,72 @@ export class ControlApiClientV2 {
           "Idempotency-Key": options.idempotencyKey,
         },
         body: JSON.stringify({ expected_revision: options.expectedRevision }),
+        signal,
+      }
+    );
+  }
+
+  async listAgentVersions(
+    workspaceId: string,
+    agentId: string,
+    options?: { limit?: number; cursor?: string; signal?: AbortSignal } | AbortSignal
+  ): Promise<AgentVersionPage> {
+    let limit: number | undefined;
+    let cursor: string | undefined;
+    let signal: AbortSignal | undefined;
+
+    if (options instanceof AbortSignal) {
+      signal = options;
+    } else if (options) {
+      limit = options.limit;
+      cursor = options.cursor;
+      signal = options.signal;
+    }
+
+    const queryParams = new URLSearchParams();
+    if (limit !== undefined) {
+      queryParams.set("limit", String(limit));
+    }
+    if (cursor !== undefined) {
+      queryParams.set("cursor", cursor);
+    }
+    const query = queryParams.toString();
+    const path = `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/versions${query ? `?${query}` : ""}`;
+
+    return this.request<AgentVersionPage>(path, {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async listAgentPublications(
+    workspaceId: string,
+    agentId: string,
+    signal?: AbortSignal
+  ): Promise<AgentPublicationList> {
+    return this.request<AgentPublicationList>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/publications`,
+      {
+        method: "GET",
+        signal,
+      }
+    );
+  }
+
+  async promoteAgentVersion(
+    workspaceId: string,
+    agentId: string,
+    dto: PromoteAgentVersionRequestDTO,
+    signal?: AbortSignal
+  ): Promise<PromoteAgentVersionResponse> {
+    return this.request<PromoteAgentVersionResponse>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/promotions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(dto),
         signal,
       }
     );

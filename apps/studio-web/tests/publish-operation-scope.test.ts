@@ -10,6 +10,42 @@ import {
   type PendingPublishIntent,
 } from "../src/lib/agent-draft-state.ts";
 
+test("publish recovery separates accounts in the same workspace and tab", () => {
+  setPendingPublishStorage([]);
+  const common = { workspaceId: "same-workspace", agentId: "same-agent", expectedRevision: 2, status: "pending" as const, createdAt: Date.now() };
+  savePendingPublishIntent({ ...common, actorId: "actor-a", operationKey: "a-committed-response-lost" });
+  assert.equal(getPendingPublishIntent("actor-b", common.workspaceId, common.agentId), null);
+  savePendingPublishIntent({ ...common, actorId: "actor-b", operationKey: "b-new-intent" });
+  clearPendingPublishIntent("actor-b", common.workspaceId, common.agentId);
+  const recoveredA = getPendingPublishIntent("actor-a", common.workspaceId, common.agentId);
+  assert.equal(recoveredA?.operationKey, "a-committed-response-lost");
+  assert.equal(recoveredA?.expectedRevision, 2);
+});
+
+test("publish recovery validates stored metadata and never adopts unscoped legacy entries", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const entries = new Map<string, string>();
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => entries.set(key, value),
+  } });
+  try {
+    entries.set("enterprise_pending_publish_intents", JSON.stringify([{ workspaceId: "ws", agentId: "agent", operationKey: "legacy" }]));
+    assert.equal(getPendingPublishIntent("actor-a", "ws", "agent"), null);
+    savePendingPublishIntent({ actorId: "actor-a", workspaceId: "ws", agentId: "agent", operationKey: "known-actor", expectedRevision: 1, status: "pending", createdAt: Date.now() });
+    assert.equal(getPendingPublishIntent("actor-a", "ws", "agent")?.operationKey, "known-actor");
+    const key = "enterprise_pending_publish_intents_v2";
+    entries.set(key, JSON.stringify({ malformed: true }));
+    assert.equal(getPendingPublishIntent("actor-a", "ws", "agent"), null);
+    entries.set(key, JSON.stringify([null, { actorId: "actor-a" }]));
+    assert.equal(getPendingPublishStorage().length, 0);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "sessionStorage", original);
+    else Reflect.deleteProperty(globalThis, "sessionStorage");
+    setPendingPublishStorage([]);
+  }
+});
+
 test("R04C-05: AgentPublishScope binds operation lifetime to exact agent and operation", () => {
   const scope = new AgentPublishScope();
   const opA = scope.begin("ws-1", "agent-a", "key-a", 1);
@@ -86,6 +122,7 @@ test("R04C-04: Pending publish intent is preserved across close/reopen and recov
 
   // 1. Save pending intent when publish begins
   const intent: PendingPublishIntent = {
+    actorId: "actor-a",
     workspaceId: ws,
     agentId,
     operationKey: opKey,
@@ -96,23 +133,23 @@ test("R04C-04: Pending publish intent is preserved across close/reopen and recov
   savePendingPublishIntent(intent);
 
   // 2. Simulate dialog close and reopen for the same agent
-  const retrieved = getPendingPublishIntent(ws, agentId);
+  const retrieved = getPendingPublishIntent("actor-a", ws, agentId);
   assert.ok(retrieved !== null);
   assert.equal(retrieved.operationKey, opKey, "Exact operation key preserved");
   assert.equal(retrieved.expectedRevision, expectedRevision, "Exact expected revision preserved");
   assert.equal(retrieved.status, "pending");
 
   // 3. Opening dialog for a DIFFERENT agent returns null (generates fresh intent)
-  const otherAgent = getPendingPublishIntent(ws, "agent-other-uuid");
+  const otherAgent = getPendingPublishIntent("actor-a", ws, "agent-other-uuid");
   assert.equal(otherAgent, null);
 
   // 4. Opening in a DIFFERENT workspace returns null
-  const otherWs = getPendingPublishIntent("ws-different", agentId);
+  const otherWs = getPendingPublishIntent("actor-a", "ws-different", agentId);
   assert.equal(otherWs, null);
 
   // 5. Explicit clear (e.g. after successful commit or when user clicks 'New Intent')
-  clearPendingPublishIntent(ws, agentId);
-  assert.equal(getPendingPublishIntent(ws, agentId), null);
+  clearPendingPublishIntent("actor-a", ws, agentId);
+  assert.equal(getPendingPublishIntent("actor-a", ws, agentId), null);
 });
 
 test("R04C-04: Retry of unresolved intent preserves old revision even if draft was edited", () => {
@@ -125,6 +162,7 @@ test("R04C-04: Retry of unresolved intent preserves old revision even if draft w
 
   // Save pending intent for revision 2
   savePendingPublishIntent({
+    actorId: "actor-a",
     workspaceId: ws,
     agentId,
     operationKey: originalKey,
@@ -137,7 +175,7 @@ test("R04C-04: Retry of unresolved intent preserves old revision even if draft w
   const currentDraftRevision = 3;
 
   // When recovering pending intent, it must yield originalRevision (2), not currentDraftRevision (3)
-  const pending = getPendingPublishIntent(ws, agentId);
+  const pending = getPendingPublishIntent("actor-a", ws, agentId);
   assert.ok(pending);
   assert.equal(pending.expectedRevision, originalRevision);
   assert.notEqual(pending.expectedRevision, currentDraftRevision);

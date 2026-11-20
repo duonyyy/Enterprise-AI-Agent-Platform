@@ -9,7 +9,10 @@ from uuid import UUID
 from control_api.modules.agents.models.records import (
     AgentDraftEntity,
     AgentDraftMetadataEntity,
+    AgentPublicationEntity,
     AgentPublishReceiptEntity,
+    AgentVersionMetadataEntity,
+    PromoteResultEntity,
     PublishResultEntity,
 )
 
@@ -91,6 +94,42 @@ class AgentRepositoryPort(Protocol[SessionT_contra]):
         trace_id: str | None = None,
     ) -> PublishResultEntity: ...
 
+    async def list_versions(
+        self,
+        session: SessionT_contra,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        agent_id: UUID,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> tuple[list[AgentVersionMetadataEntity], str | None]: ...
+
+    async def list_publications(
+        self,
+        session: SessionT_contra,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        agent_id: UUID,
+    ) -> list[AgentPublicationEntity]: ...
+
+    async def promote_version(
+        self,
+        session: SessionT_contra,
+        *,
+        tenant_id: UUID,
+        workspace_id: UUID,
+        agent_id: UUID,
+        agent_version_id: UUID,
+        environment: str,
+        expected_publication_revision: int,
+        actor_user_id: UUID,
+        caller_roles: list[str],
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> PromoteResultEntity: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedModelConfig:
@@ -119,6 +158,7 @@ class ResolvedToolVersion:
     has_invoke_grant: bool
     connection_status: str | None = None
     approved_schema_sha256: str | None = None
+    tool_status: str = "active"
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,6 +10,8 @@ Authority:
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1180,48 +1182,92 @@ def test_a12_audit_failure_rollback_and_archived_agent_real_postgres(agent_test_
 
 
 def test_a13_studio_web_ui_agent_crud_verification():
-    """A13: Browser/Studio Web UI static and structural contract verification.
+    """A13: Studio Web consumer/handler behavior and anti-pattern verification (RF04-09).
+
+    Note: This verifies real TypeScript consumer/handler logic in Node plus module
+    anti-pattern checks across the split Studio components; it is NOT a rendered browser test.
 
     Verifies:
-    - No SEED_AGENTS, ag_local, fake IDs, or mock viewState switcher.
-    - Presence of real HTTP 412 CAS conflict handling (conflict banner, retaining unsaved edits, retry buttons).
-    - If-Match: "${draft.revision}" used in PATCH request.
-    - True empty state rendering without fake fallback rows.
+    - Split Studio agent components exist and contain no SEED_AGENTS, ag_local, or fake/mock fallbacks.
+    - Typed API client sends real If-Match strong ETag headers on PATCH and parses CRUD/publish contracts.
+    - Actual Studio handlers/state helpers enforce CAS 412 conflict preservation, pending-save edit
+      preservation, validation staleness, scope cancellation, and no fake completion.
     """
-    page_path = ROOT / "apps/studio-web/src/app/(console)/w/[workspaceId]/agents/page.tsx"
-    assert page_path.exists(), f"Studio Web agents page missing: {page_path}"
-    content = page_path.read_text(encoding="utf-8")
+    agents_dir = ROOT / "apps/studio-web/src/app/(console)/w/[workspaceId]/agents"
+    component_files = [
+        agents_dir / "page.tsx",
+        agents_dir / "agent-list.tsx",
+        agents_dir / "agent-create-modal.tsx",
+        agents_dir / "agent-workshop.tsx",
+        agents_dir / "agent-release-modal.tsx",
+    ]
+    for path in component_files:
+        assert path.exists(), f"Studio Web agent component missing: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert "SEED_AGENTS" not in content, f"Forbidden SEED_AGENTS in {path.name}"
+        assert "ag_local" not in content, f"Forbidden ag_local in {path.name}"
+        assert "fake-" not in content, f"Forbidden fake- in {path.name}"
+        assert "mock-" not in content, f"Forbidden mock- in {path.name}"
 
-    # Anti-patterns strictly forbidden
-    assert "SEED_AGENTS" not in content
-    assert "ag_local" not in content
-    assert "fake-" not in content
-    assert "mock-" not in content
+    node_bin = shutil.which("node")
+    assert node_bin is not None, "Node.js is required to run Studio consumer/handler verification"
 
-    # Mandatory real implementations
-    assert "If-Match" in content
-    assert "412" in content
-    assert "Xung đột sửa đổi" in content
-    assert "Tải lại bản mới nhất từ máy chủ" in content
-    assert "Giữ lại thay đổi hiện tại để sao chép" in content
-    assert "Chưa có Tác tử AI nào trong không gian này" in content
-    assert "defaultApiClient.listAgents" in content
-    assert "defaultApiClient.getAgentDraft" in content
-    assert "defaultApiClient.createAgentDraft" in content
-    assert "defaultApiClient.replaceAgentDraftSpec" in content
+    studio_cmd = [
+        node_bin,
+        "--experimental-strip-types",
+        "--test",
+        str(ROOT / "apps/studio-web/tests/agent-draft-state.test.ts"),
+        str(ROOT / "apps/studio-web/tests/agent-lifecycle-comprehensive.test.ts"),
+        str(ROOT / "apps/studio-web/tests/agent-lifecycle-handlers.test.ts"),
+    ]
+    studio_proc = subprocess.run(studio_cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert studio_proc.returncode == 0, (
+        f"Studio Web consumer/handler tests failed:\nSTDOUT:\n{studio_proc.stdout}\nSTDERR:\n{studio_proc.stderr}"
+    )
+
+    sdk_cmd = [
+        node_bin,
+        "--experimental-strip-types",
+        "--test",
+        str(ROOT / "packages/api-client/src/index.test.ts"),
+    ]
+    sdk_proc = subprocess.run(sdk_cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert sdk_proc.returncode == 0, (
+        f"@enterprise/api-client consumer tests failed:\nSTDOUT:\n{sdk_proc.stdout}\nSTDERR:\n{sdk_proc.stderr}"
+    )
 
 
 @pytest.mark.integration
-def test_a14_workspace_switching_safety_and_publish_stub_real_postgres(agent_test_env):
-    """A14: Browser workspace switch / late response cancellation + publish stub fails closed (HTTP 503)."""
-    # 1. Verify Studio Web implements AbortController on workspaceId change
-    page_path = ROOT / "apps/studio-web/src/app/(console)/w/[workspaceId]/agents/page.tsx"
-    content = page_path.read_text(encoding="utf-8")
-    assert "AbortController" in content
-    assert "abortControllerRef" in content
+def test_a14_workspace_switching_safety_and_publish_contract_real_postgres(agent_test_env):
+    """A14: Scope cancellation safety (Node consumer tests) + real 04-C/D publish contract on PostgreSQL (RF04-09).
 
-    # 2. Verify Publish endpoint fails closed with HTTP 503 capability_unavailable
+    Verifies:
+    1. Studio scope helpers (`AgentRequestScope` backed by `AbortController`) and page/workshop
+       handlers cancel stale requests and isolate workspace/actor scopes without leaking late callbacks.
+    2. Real PostgreSQL publish endpoint fails closed (400 missing Idempotency-Key, 422 unresolved
+       dependencies with zero partial versions/receipts), and succeeds atomically (200) only when
+       scoped dependencies are valid — without creating environment publication pointers.
+    """
+    node_bin = shutil.which("node")
+    assert node_bin is not None, "Node.js is required to run scope-cancellation consumer tests"
+
+    scope_cmd = [
+        node_bin,
+        "--experimental-strip-types",
+        "--test",
+        str(ROOT / "apps/studio-web/tests/agent-draft-state.test.ts"),
+        str(ROOT / "apps/studio-web/tests/agent-lifecycle-handlers.test.ts"),
+        str(ROOT / "apps/studio-web/tests/publish-operation-scope.test.ts"),
+        str(ROOT / "apps/studio-web/tests/promotion-operation-scope.test.ts"),
+    ]
+    scope_proc = subprocess.run(scope_cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert scope_proc.returncode == 0, (
+        f"Scope/cancellation tests failed:\nSTDOUT:\n{scope_proc.stdout}\nSTDERR:\n{scope_proc.stderr}"
+    )
+
+    # 2. Verify real PostgreSQL publish fail-closed and atomic version creation contract
     sa_url = agent_test_env["sa_url"]
+    tenant_1 = agent_test_env["seeded"]["tenant_1"]
     ws_1a = agent_test_env["seeded"]["ws_1a"]
     dev_token = agent_test_env["tokens"]["dev_1a"]
     owner_url = agent_test_env["owner_url"]
@@ -1239,28 +1285,110 @@ def test_a14_workspace_switching_safety_and_publish_stub_real_postgres(agent_tes
 
         try:
             async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
-                # Create draft
-                spec = _make_valid_spec(name="publish-agent", display_name="Publish Agent")
+                # 2a. Create draft with unresolved modelRef
+                unresolved_spec = _make_valid_spec(
+                    name="publish-agent",
+                    display_name="Publish Agent",
+                    mode="fixed_plan",
+                )
                 c_resp = await client.post(
                     f"/v1/workspaces/{ws_1a}/agents",
                     headers={"Authorization": f"Bearer {dev_token}"},
-                    json={"slug": "publish-agent", "display_name": "Publish Agent", "spec": spec},
+                    json={"slug": "publish-agent", "display_name": "Publish Agent", "spec": unresolved_spec},
                 )
                 assert c_resp.status_code == 201, c_resp.text
                 agent_id = c_resp.json()["agent_id"]
 
-                # Call POST publish -> MUST fail closed with 503
-                pub_resp = await client.post(
+                # Missing Idempotency-Key -> 400 fail closed
+                no_key_resp = await client.post(
                     f"/v1/workspaces/{ws_1a}/agents/{agent_id}/publish",
                     headers={"Authorization": f"Bearer {dev_token}"},
+                    json={"expected_revision": 1},
                 )
-                assert pub_resp.status_code == 503
-                assert _get_error_code(pub_resp) == "capability_unavailable"
+                assert no_key_resp.status_code == 400, no_key_resp.text
+                assert _get_error_code(no_key_resp) == "missing_idempotency_key"
 
-                # Assert zero rows created in catalog.agent_versions
+                # Unresolved dependency -> 422 fail closed, zero versions/receipts created
+                unresolved_pub = await client.post(
+                    f"/v1/workspaces/{ws_1a}/agents/{agent_id}/publish",
+                    headers={
+                        "Authorization": f"Bearer {dev_token}",
+                        "Idempotency-Key": str(uuid4()),
+                    },
+                    json={"expected_revision": 1},
+                )
+                assert unresolved_pub.status_code == 422, unresolved_pub.text
+
                 with psycopg.connect(owner_url) as conn:
-                    count = conn.execute("SELECT count(*) FROM catalog.agent_versions").fetchone()[0]
-                    assert count == 0, f"Expected 0 published versions, got {count}"
+                    version_count = conn.execute(
+                        "SELECT count(*) FROM catalog.agent_versions WHERE agent_id = %s",
+                        (agent_id,),
+                    ).fetchone()[0]
+                    receipt_count = conn.execute(
+                        "SELECT count(*) FROM catalog.agent_publish_receipts WHERE agent_id = %s",
+                        (agent_id,),
+                    ).fetchone()[0]
+                    assert version_count == 0, f"Expected 0 published versions, got {version_count}"
+                    assert receipt_count == 0, f"Expected 0 publish receipts, got {receipt_count}"
+
+                # 2b. Seed an active scoped model config, update draft via CAS, and verify real publish
+                model_id = uuid4()
+                with psycopg.connect(owner_url) as conn:
+                    conn.execute(
+                        "INSERT INTO catalog.model_configs (tenant_id, workspace_id, id, name, provider, provider_model_id, status) "
+                        "VALUES (%s, %s, %s, 'a14-model', 'fixture', 'fixture-model-1', 'active')",
+                        (tenant_1, ws_1a, model_id),
+                    )
+
+                resolvable_spec = {
+                    **unresolved_spec,
+                    "modelRef": str(model_id),
+                    "toolRefs": [],
+                    "skillRefs": [],
+                    "knowledgeRefs": [],
+                }
+                patch_resp = await client.patch(
+                    f"/v1/workspaces/{ws_1a}/agents/{agent_id}",
+                    headers={
+                        "Authorization": f"Bearer {dev_token}",
+                        "If-Match": '"1"',
+                    },
+                    json={"spec": resolvable_spec},
+                )
+                assert patch_resp.status_code == 200, patch_resp.text
+                assert patch_resp.json()["revision"] == 2
+
+                op_key = str(uuid4())
+                pub_resp = await client.post(
+                    f"/v1/workspaces/{ws_1a}/agents/{agent_id}/publish",
+                    headers={
+                        "Authorization": f"Bearer {dev_token}",
+                        "Idempotency-Key": op_key,
+                    },
+                    json={"expected_revision": 2},
+                )
+                assert pub_resp.status_code == 200, pub_resp.text
+                pub_body = pub_resp.json()
+                assert pub_body["version"] == 1
+                assert pub_body["is_immutable"] is True
+                assert len(pub_body["bundle_sha256"]) == 64
+
+                with psycopg.connect(owner_url) as conn:
+                    version_count = conn.execute(
+                        "SELECT count(*) FROM catalog.agent_versions WHERE agent_id = %s",
+                        (agent_id,),
+                    ).fetchone()[0]
+                    receipt_count = conn.execute(
+                        "SELECT count(*) FROM catalog.agent_publish_receipts WHERE agent_id = %s AND operation_key = %s",
+                        (agent_id, op_key),
+                    ).fetchone()[0]
+                    pub_pointer_count = conn.execute(
+                        "SELECT count(*) FROM catalog.agent_publications WHERE agent_id = %s",
+                        (agent_id,),
+                    ).fetchone()[0]
+                    assert version_count == 1
+                    assert receipt_count == 1
+                    assert pub_pointer_count == 0, "Publish must not mutate environment publication pointers"
         finally:
             app.dependency_overrides.clear()
             await engine.dispose()

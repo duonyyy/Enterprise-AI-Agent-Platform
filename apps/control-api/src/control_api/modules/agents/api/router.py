@@ -14,12 +14,14 @@ from control_api.modules.agents.api._http_helpers import (
     translate_agent_error,
 )
 from control_api.modules.agents.api.dependencies import (
+    AgentPromotionServiceDep,
     AgentPublishServiceDep,
     AgentServiceDep,
     AgentValidationServiceDep,
 )
 from control_api.modules.agents.dto.requests import (
     CreateAgentDraftDTO,
+    PromoteAgentVersionRequestDTO,
     PublishAgentRequestDTO,
     ReplaceAgentDraftSpecDTO,
     ValidateAgentDraftDTO,
@@ -29,7 +31,12 @@ from control_api.modules.agents.dto.responses import (
     AgentDraftDTO,
     AgentDraftMetadataDTO,
     AgentDraftPageDTO,
+    AgentPublicationDTO,
+    AgentPublicationListDTO,
     AgentValidationResultDTO,
+    AgentVersionMetadataDTO,
+    AgentVersionPageDTO,
+    PromoteAgentVersionResponseDTO,
     PublishResponseDTO,
 )
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
@@ -312,5 +319,137 @@ async def publish(
         )
         await session.commit()
         return response_dto
+    except Exception as exc:
+        raise translate_agent_error(exc) from exc
+
+
+@router.get("/{agent_id}/versions", response_model=AgentVersionPageDTO)
+async def list_agent_versions(
+    workspace_id: str,
+    agent_id: str,
+    response: Response,
+    principal: CurrentUser,
+    session: DBSession,
+    promotion_service: AgentPromotionServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
+) -> AgentVersionPageDTO:
+    """List immutable published agent versions with keyset pagination (ordered version DESC)."""
+    _ = workspace_id
+    response.headers["Cache-Control"] = "no-store"
+    require_permission(principal, "agent:read")
+    parsed_agent_id = parse_uuid_param(agent_id, "agent_id")
+
+    try:
+        items, next_cursor = await promotion_service.list_versions(
+            session,
+            principal=principal,
+            agent_id=parsed_agent_id,
+            limit=limit,
+            cursor=cursor,
+        )
+        return AgentVersionPageDTO(
+            items=[
+                AgentVersionMetadataDTO(
+                    agent_id=str(it.agent_id),
+                    agent_version_id=str(it.agent_version_id),
+                    version=it.version,
+                    bundle_sha256=it.bundle_sha256,
+                    is_immutable=it.is_immutable,
+                    created_at=it.created_at.isoformat(),
+                    published_by=str(it.published_by) if it.published_by else None,
+                    model_name=it.model_name,
+                )
+                for it in items
+            ],
+            next_cursor=next_cursor,
+        )
+    except Exception as exc:
+        raise translate_agent_error(exc) from exc
+
+
+@router.get("/{agent_id}/publications", response_model=AgentPublicationListDTO)
+async def list_agent_publications(
+    workspace_id: str,
+    agent_id: str,
+    response: Response,
+    principal: CurrentUser,
+    session: DBSession,
+    promotion_service: AgentPromotionServiceDep,
+) -> AgentPublicationListDTO:
+    """List current active publications across development, staging, and production environments."""
+    _ = workspace_id
+    response.headers["Cache-Control"] = "no-store"
+    require_permission(principal, "agent:read")
+    parsed_agent_id = parse_uuid_param(agent_id, "agent_id")
+
+    try:
+        items = await promotion_service.list_publications(
+            session,
+            principal=principal,
+            agent_id=parsed_agent_id,
+        )
+        return AgentPublicationListDTO(
+            items=[
+                AgentPublicationDTO(
+                    publication_id=str(it.publication_id),
+                    agent_id=str(it.agent_id),
+                    agent_version_id=str(it.agent_version_id),
+                    version=it.version,
+                    environment=it.environment,
+                    revision=it.revision,
+                    bundle_sha256=it.bundle_sha256,
+                    published_at=it.published_at.isoformat(),
+                )
+                for it in items
+            ]
+        )
+    except Exception as exc:
+        raise translate_agent_error(exc) from exc
+
+
+@router.post("/{agent_id}/promotions", response_model=PromoteAgentVersionResponseDTO)
+async def promote_agent_version(
+    workspace_id: str,
+    agent_id: str,
+    dto: PromoteAgentVersionRequestDTO,
+    request: Request,
+    response: Response,
+    principal: CurrentUser,
+    session: DBSession,
+    promotion_service: AgentPromotionServiceDep,
+) -> PromoteAgentVersionResponseDTO:
+    """Promote or rollback an agent version to an environment using CAS (ADR-022, STEP-04D)."""
+    _ = workspace_id
+    verify_csrf_or_origin(request)
+    require_permission(principal, "agent:promote")
+    parsed_agent_id = parse_uuid_param(agent_id, "agent_id")
+    request_id, trace_id = extract_correlation_ids(request)
+
+    try:
+        res = await promotion_service.promote_version(
+            session,
+            principal=principal,
+            agent_id=parsed_agent_id,
+            agent_version_id=dto.agent_version_id,
+            environment=dto.environment,
+            expected_publication_revision=dto.expected_publication_revision,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        resp_dto = PromoteAgentVersionResponseDTO(
+            publication_id=str(res.publication_id),
+            agent_id=str(res.agent_id),
+            agent_version_id=str(res.agent_version_id),
+            version=res.version,
+            environment=res.environment,
+            revision=res.revision,
+            bundle_sha256=res.bundle_sha256,
+            published_at=res.published_at.isoformat(),
+            is_noop=res.is_noop,
+        )
+        await session.commit()
+        return resp_dto
     except Exception as exc:
         raise translate_agent_error(exc) from exc

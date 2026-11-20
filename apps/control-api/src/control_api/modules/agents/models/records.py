@@ -80,3 +80,46 @@ class PublishResultEntity:
     is_immutable: bool
     created_at: datetime
     is_replay: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AgentVersionMetadataEntity:
+    """Read projection for an immutable published agent version."""
+
+    agent_id: UUID
+    agent_version_id: UUID
+    version: int
+    bundle_sha256: str
+    is_immutable: bool
+    created_at: datetime
+    published_by: UUID | None = None
+    model_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPublicationEntity:
+    """Active publication pointer for an environment."""
+
+    publication_id: UUID
+    agent_id: UUID
+    agent_version_id: UUID
+    version: int
+    environment: str
+    revision: int
+    bundle_sha256: str
+    published_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PromoteResultEntity:
+    """Outcome of promoting an agent version to an environment."""
+
+    publication_id: UUID
+    agent_id: UUID
+    agent_version_id: UUID
+    version: int
+    environment: str
+    revision: int
+    bundle_sha256: str
+    published_at: datetime
+    is_noop: bool = False

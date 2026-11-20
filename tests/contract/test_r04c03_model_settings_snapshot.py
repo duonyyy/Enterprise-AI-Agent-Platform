@@ -138,3 +138,95 @@ class TestModelSettingsSnapshot:
         assert "modelConfigId" in model
         assert "effectiveSettings" in model
         assert model["effectiveSettings"]["temperature"] == 0.5
+
+    def test_rf04_06_allows_output_schema_field_names_and_benign_stop_delimiters(self) -> None:
+        from control_api.modules.agents.repositories.agent_repository import (
+            extract_effective_model_settings,
+        )
+
+        settings = {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "usage_summary",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "total_tokens": {"type": "integer"},
+                            "password_policy_score": {"type": "number"},
+                            "secret_santa_assignee": {"type": "string"},
+                        },
+                        "required": ["total_tokens"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "stop_sequences": ["</secret_section>", "Password:", "---END---"],
+            "api_key": "sk-proj-stripped-from-snapshot-1234567890",
+        }
+        effective = extract_effective_model_settings(settings)
+        assert "api_key" not in effective
+        assert effective["response_format"]["json_schema"]["schema"]["properties"]["total_tokens"] == {
+            "type": "integer"
+        }
+        assert effective["stop_sequences"] == ["</secret_section>", "Password:", "---END---"]
+
+    def test_rf04_06_rejects_credential_bearing_response_format_and_stop_sequences(self) -> None:
+        import pytest
+        from control_api.modules.agents.models.errors import AgentValidationError
+        from control_api.modules.agents.repositories.agent_repository import (
+            extract_effective_model_settings,
+        )
+
+        bad_cases = [
+            {"response_format": {"type": "json_object", "api_key": "sk-proj-secret1234567890"}},
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "usage",
+                        "auth_token": "tok-12345",
+                        "schema": {"type": "object", "properties": {}},
+                    },
+                }
+            },
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "usage",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "total_tokens": {"type": "integer", "api_key": "smuggled"},
+                            },
+                        },
+                    },
+                }
+            },
+            {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "usage",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "note": {
+                                    "type": "string",
+                                    "default": "Bearer eyJhbGciOiJIUzI1NiJ9.secretpayload",
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+            {"stop_sequences": ["Bearer eyJhbGciOiJIUzI1NiJ9.secretpayload"]},
+            {"stop_sequences": ["api_key=sk-proj-1234567890abcdef"]},
+            {"stop_sequences": ["-----BEGIN PRIVATE KEY-----\nMIIE"]},
+        ]
+        for bad in bad_cases:
+            with pytest.raises(AgentValidationError) as exc_info:
+                extract_effective_model_settings(bad)
+            assert exc_info.value.code == "invalid_model_setting"

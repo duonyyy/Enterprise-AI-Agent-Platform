@@ -107,6 +107,69 @@ class AgentValidationResultDTO(BaseModel):
     diagnostics: list[AgentDiagnosticDTO]
 
 
+class AgentVersionMetadataDTO(BaseModel):
+    """Metadata for an immutable published agent version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    agent_version_id: str
+    version: int
+    bundle_sha256: str
+    is_immutable: bool
+    created_at: str
+    published_by: str | None = None
+    model_name: str | None = None
+
+
+class AgentVersionPageDTO(BaseModel):
+    """Paginated list of immutable agent versions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AgentVersionMetadataDTO]
+    next_cursor: str | None = None
+
+
+class AgentPublicationDTO(BaseModel):
+    """Current publication pointer for an environment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    publication_id: str
+    agent_id: str
+    agent_version_id: str
+    version: int
+    environment: str
+    revision: int
+    bundle_sha256: str
+    published_at: str
+
+
+class AgentPublicationListDTO(BaseModel):
+    """List of active environment publications."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AgentPublicationDTO]
+
+
+class PromoteAgentVersionResponseDTO(BaseModel):
+    """Outcome of promoting an agent version to an environment (Step 04-D)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    publication_id: str
+    agent_id: str
+    agent_version_id: str
+    version: int
+    environment: str
+    revision: int
+    bundle_sha256: str
+    published_at: str
+    is_noop: bool = False
+
+
 __all__ = [
     "AgentDiagnosticDTO",
     "AgentDraftDTO",
@@ -114,8 +177,13 @@ __all__ = [
     "AgentDraftPageDTO",
     "AgentErrorDetailDTO",
     "AgentErrorResponseDTO",
+    "AgentPublicationDTO",
+    "AgentPublicationListDTO",
     "AgentResponseDTO",
     "AgentValidationResultDTO",
+    "AgentVersionMetadataDTO",
+    "AgentVersionPageDTO",
+    "PromoteAgentVersionResponseDTO",
     "PublishAgentResponseDTO",
     "PublishResponseDTO",
 ]

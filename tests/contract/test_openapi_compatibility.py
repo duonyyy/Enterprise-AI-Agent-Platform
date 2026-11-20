@@ -722,7 +722,11 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     pub_req_val = Draft202012Validator(pub_req_schema)
     pub_req_dto = PublishAgentRequestDTO(expected_revision=1)
     assert pub_req_val.is_valid(pub_req_dto.model_dump())
+    assert pub_req_val.is_valid({"expected_revision": 2_147_483_647})
     assert not pub_req_val.is_valid({"expected_revision": 0})
+    assert not pub_req_val.is_valid({"expected_revision": 2_147_483_648})
+    assert not pub_req_val.is_valid({"expected_revision": False})
+    assert not pub_req_val.is_valid({"expected_revision": "1"})
     assert not pub_req_val.is_valid({})
 
     # PublishAgentResponse
@@ -741,3 +745,104 @@ def test_agent_draft_openapi_schemas_and_dto_compatibility():
     pub_responses = publish_path["post"]["responses"]
     for expected_code in ("200", "400", "401", "403", "404", "409", "412", "422", "503"):
         assert expected_code in pub_responses, f"Missing {expected_code} in publish responses"
+
+
+def test_agent_promotions_and_versions_openapi_contract() -> None:
+    """Verify Step 04-D OpenAPI 3.1 endpoints, DTOs and JSON Schemas for versions, publications, and promotions."""
+    root = Path(__file__).resolve().parents[2]
+    spec_path = root / "contracts" / "openapi" / "control-api.openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+
+    # 1. Versions endpoint
+    ver_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}/versions"]
+    assert "get" in ver_path
+    assert ver_path["get"]["operationId"] == "listAgentVersions"
+    for expected_code in ("200", "400", "401", "403", "404", "422", "503"):
+        assert expected_code in ver_path["get"]["responses"]
+
+    # 2. Publications endpoint
+    pub_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}/publications"]
+    assert "get" in pub_path
+    assert pub_path["get"]["operationId"] == "listAgentPublications"
+    for expected_code in ("200", "401", "403", "404", "503"):
+        assert expected_code in pub_path["get"]["responses"]
+
+    # 3. Promotions endpoint
+    promo_path = spec["paths"]["/v1/workspaces/{workspace_id}/agents/{agent_id}/promotions"]
+    assert "post" in promo_path
+    assert promo_path["post"]["operationId"] == "promoteAgentVersion"
+    for expected_code in ("200", "400", "401", "403", "404", "409", "412", "422", "503"):
+        assert expected_code in promo_path["post"]["responses"]
+
+    # 4. JSON Schema validation
+    schemas = spec["components"]["schemas"]
+    req_schema = schemas["PromoteAgentVersionRequest"]
+    res_schema = schemas["PromoteAgentVersionResponse"]
+    ver_schema = schemas["AgentVersionMetadata"]
+    pub_schema = schemas["AgentPublication"]
+
+    req_validator = Draft202012Validator(req_schema)
+    res_validator = Draft202012Validator(res_schema)
+    ver_validator = Draft202012Validator(ver_schema)
+    pub_validator = Draft202012Validator(pub_schema)
+
+    assert req_validator.is_valid({
+        "agent_version_id": "00000000-0000-0000-0000-000000000001",
+        "environment": "production",
+        "expected_publication_revision": 0,
+    })
+    assert req_validator.is_valid({
+        "agent_version_id": "00000000-0000-0000-0000-000000000001",
+        "environment": "production",
+        "expected_publication_revision": 2_147_483_647,
+    })
+    assert not req_validator.is_valid({
+        "agent_version_id": "00000000-0000-0000-0000-000000000001",
+        "environment": "production",
+        "expected_publication_revision": 2_147_483_648,
+    })
+    assert not req_validator.is_valid({
+        "agent_version_id": "00000000-0000-0000-0000-000000000001",
+        "environment": "production",
+        "expected_publication_revision": False,
+    })
+    assert not req_validator.is_valid({
+        "agent_version_id": "00000000-0000-0000-0000-000000000001",
+        "environment": "production",
+        "expected_publication_revision": "0",
+    })
+    assert not req_validator.is_valid({"expected_publication_revision": -1})
+
+    assert res_validator.is_valid({
+        "publication_id": "00000000-0000-0000-0000-000000000001",
+        "agent_id": "00000000-0000-0000-0000-000000000002",
+        "agent_version_id": "00000000-0000-0000-0000-000000000003",
+        "version": 1,
+        "environment": "production",
+        "revision": 1,
+        "bundle_sha256": "a" * 64,
+        "published_at": "2026-11-17T12:00:00Z",
+        "is_noop": False,
+    })
+
+    assert ver_validator.is_valid({
+        "agent_id": "00000000-0000-0000-0000-000000000001",
+        "agent_version_id": "00000000-0000-0000-0000-000000000002",
+        "version": 1,
+        "bundle_sha256": "b" * 64,
+        "is_immutable": True,
+        "created_at": "2026-11-17T12:00:00Z",
+        "published_by": "00000000-0000-0000-0000-000000000003",
+        "model_name": "Claude 3.5 Sonnet",
+    })
+
+    assert pub_validator.is_valid({
+        "publication_id": "00000000-0000-0000-0000-000000000001",
+        "agent_id": "00000000-0000-0000-0000-000000000002",
+        "agent_version_id": "00000000-0000-0000-0000-000000000003",
+        "version": 1,
+        "environment": "development",
+        "revision": 2,
+        "bundle_sha256": "c" * 64,
+        "published_at": "2026-11-17T12:00:00Z",
+    })

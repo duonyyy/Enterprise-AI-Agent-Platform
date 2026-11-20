@@ -349,3 +349,75 @@ def test_publish_service_computes_request_digest_and_delegates() -> None:
     assert call_kwargs["expected_revision"] == 1
     assert call_kwargs["operation_key"] == "op-key-01"
     assert len(call_kwargs["request_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "bad_revision",
+    [False, True, "1", "0", 1.5, 0.1, 2_147_483_648, 2**53, 10**80],
+)
+def test_rf04_04_05_publish_rejects_coerced_and_oversized_revisions(bad_revision: Any) -> None:
+    """RF04-04 / RF04-05: expected_revision rejects bools, strings, fractions, and > int32 max with 422."""
+    principal = _principal()
+    agent_id = uuid4()
+    mock_service = MagicMock(spec=AgentPublishService)
+    mock_service.publish_agent_revision = AsyncMock()
+
+    session = MagicMock()
+    session.commit = AsyncMock()
+
+    async def database_override():
+        yield session
+
+    overrides = dict(app.dependency_overrides)
+    try:
+        app.dependency_overrides[get_current_principal] = lambda: principal
+        app.dependency_overrides[get_db_session] = database_override
+        app.dependency_overrides[get_agent_publish_service] = lambda: mock_service
+
+        with TestClient(app) as client:
+            resp = client.post(
+                f"/v1/workspaces/{principal.workspace_id}/agents/{agent_id}/publish",
+                headers={"Idempotency-Key": "rf04-04-key"},
+                json={"expected_revision": bad_revision},
+            )
+            assert resp.status_code == 422, resp.text
+            mock_service.publish_agent_revision.assert_not_awaited()
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+
+def test_rf04_04_publish_accepts_whole_number_json_integer_and_int32_max() -> None:
+    """RF04-04: Whole-number 1.0 and int32 max (2147483647) are accepted per canonical JSON Schema integer."""
+    from control_api.modules.agents.dto.requests import PublishAgentRequestDTO
+
+    whole = PublishAgentRequestDTO.model_validate({"expected_revision": 1.0})
+    assert whole.expected_revision == 1
+    assert type(whole.expected_revision) is int
+
+    max_rev = PublishAgentRequestDTO.model_validate({"expected_revision": 2_147_483_647})
+    assert max_rev.expected_revision == 2_147_483_647
+
+
+def test_rf04_05_publish_service_translates_canonicalization_error_to_validation_error() -> None:
+    """RF04-05: Direct service call with uncanonicalizable body raises AgentValidationError (422), not 500."""
+    from control_api.modules.agents.models.errors import AgentValidationError
+
+    mock_repo = MagicMock()
+    mock_repo.publish_version = AsyncMock()
+    service = AgentPublishService(mock_repo)
+    principal = _principal()
+
+    with pytest.raises(AgentValidationError) as exc_info:
+        asyncio.run(
+            service.publish_agent_revision(
+                MagicMock(),
+                principal=principal,
+                agent_id=uuid4(),
+                expected_revision=1,
+                operation_key="op-uncanon",
+                body={"expected_revision": 2**53},
+            )
+        )
+    assert exc_info.value.code == "invalid_spec"
+    mock_repo.publish_version.assert_not_awaited()
