@@ -1183,20 +1183,194 @@ paths:
         '422': {$ref: '#/components/responses/AgentInvalidRequest'}
         '428': {$ref: '#/components/responses/AgentPreconditionRequired'}
         '503': {$ref: '#/components/responses/AgentUnavailable'}
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/validate:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    post:
+      summary: Validate agent draft dependencies and publish readiness
+      operationId: validateAgentDraft
+      description: Validates persisted draft or submitted spec against canonical schema and actual scoped dependencies. Does not mutate revision or publish.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ValidateAgentDraftRequest'}
+      responses:
+        '200':
+          description: Validation result and diagnostics
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentValidationResult'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {$ref: '#/components/responses/AgentNotFound'}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
   /v1/workspaces/{workspace_id}/agents/{agent_id}/publish:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
     post:
       summary: Atomically publish immutable agent version
+      operationId: publishAgentVersion
+      description: Atomically validates dependencies under FOR SHARE locks, allocates sequential immutable version, computes RFC 8785 canonical manifest and SHA-256 digest, seals bindings, records publish receipt, and enqueues outbox event.
       security:
         - SessionCookie: []
         - BearerAuth: []
       parameters:
-        - { name: workspace_id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: agent_id, in: path, required: true, schema: { type: string } }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: Client-provided idempotency key for durable replay protection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishAgentRequest'
       responses:
-        '200': { description: Published }
-        '401': { description: Missing, invalid, expired, or revoked credentials }
-        '403': { description: Workspace access denied or insufficient permissions }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '200':
+          description: Published immutable version receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAgentResponse'
+        '400':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or insufficient permissions
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '409':
+          $ref: '#/components/responses/AgentConflict'
+        '412':
+          $ref: '#/components/responses/AgentStaleRevision'
+        '422':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '503':
+          $ref: '#/components/responses/AgentUnavailable'
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      summary: List published agent versions
+      operationId: listAgentVersions
+      description: Returns bounded list of immutable published versions for an agent with metadata, model summary, and bundle hash.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 2048
+      responses:
+        '200':
+          description: Page of published agent versions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersionPage'
+        '400':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or insufficient permissions
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '422':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '503':
+          $ref: '#/components/responses/AgentUnavailable'
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/publications:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      summary: List current agent publications across environments
+      operationId: listAgentPublications
+      description: Returns current publication pointers for development, staging, and production environments.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of active environment publications
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentPublicationList'
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or insufficient permissions
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '503':
+          $ref: '#/components/responses/AgentUnavailable'
+  /v1/workspaces/{workspace_id}/agents/{agent_id}/promotions:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - $ref: '#/components/parameters/AgentId'
+    post:
+      summary: Promote or rollback agent version to an environment using CAS
+      operationId: promoteAgentVersion
+      description: Atomically updates the publication pointer for an environment using Compare-And-Swap (CAS) revision. Rollback reuses this endpoint to select an older version.
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromoteAgentVersionRequest'
+      responses:
+        '200':
+          description: Environment promotion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromoteAgentVersionResponse'
+        '400':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '401':
+          description: Missing, invalid, expired, or revoked credentials
+        '403':
+          description: Workspace access denied or insufficient permissions (Owner/Admin only)
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '409':
+          $ref: '#/components/responses/AgentConflict'
+        '412':
+          $ref: '#/components/responses/AgentStaleRevision'
+        '422':
+          $ref: '#/components/responses/AgentInvalidRequest'
+        '503':
+          $ref: '#/components/responses/AgentUnavailable'
   /v1/workspaces/{workspace_id}/approvals:
     get:
       summary: List pending approval requests
@@ -1303,6 +1477,231 @@ components:
           maxItems: 100
           items: {$ref: '#/components/schemas/AgentDraftMetadata'}
         next_cursor: {type: [string, 'null']}
+    ValidateAgentDraftRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        spec:
+          type: object
+          description: Raw AgentSpec object to diagnose. Structural errors return 200 with invalid_spec diagnostics; explicit null and non-object values return 422. Omit to validate the persisted draft.
+    AgentDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [field, code, message]
+      properties:
+        field: {type: string}
+        code:
+          type: string
+          enum: [invalid_spec, dependency_unavailable, dependency_not_permitted, unsupported_capability]
+        message: {type: string}
+    AgentValidationResult:
+      type: object
+      additionalProperties: false
+      required: [agent_id, revision, ready, diagnostics]
+      properties:
+        agent_id: {type: string, format: uuid}
+        revision: {type: integer, minimum: 1}
+        ready: {type: boolean}
+        diagnostics:
+          type: array
+          items: {$ref: '#/components/schemas/AgentDiagnostic'}
+    PublishAgentRequest:
+      type: object
+      required:
+        - expected_revision
+      additionalProperties: false
+      properties:
+        expected_revision:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Committed integer draft revision expected at publication
+    PublishAgentResponse:
+      type: object
+      required:
+        - agent_id
+        - agent_version_id
+        - version
+        - bundle_sha256
+        - is_immutable
+        - created_at
+      additionalProperties: false
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        agent_version_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        is_immutable:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        spec_hash:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    AgentVersionMetadata:
+      type: object
+      required:
+        - agent_id
+        - agent_version_id
+        - version
+        - bundle_sha256
+        - is_immutable
+        - created_at
+      additionalProperties: false
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        agent_version_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        is_immutable:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        published_by:
+          type: string
+          format: uuid
+          nullable: true
+        model_name:
+          type: string
+          nullable: true
+    AgentVersionPage:
+      type: object
+      required:
+        - items
+        - next_cursor
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentVersionMetadata'
+        next_cursor:
+          type: string
+          nullable: true
+    AgentPublication:
+      type: object
+      required:
+        - publication_id
+        - agent_id
+        - agent_version_id
+        - version
+        - environment
+        - revision
+        - bundle_sha256
+        - published_at
+      additionalProperties: false
+      properties:
+        publication_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        agent_version_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        environment:
+          type: string
+          enum: [development, staging, production]
+        revision:
+          type: integer
+          minimum: 1
+        bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        published_at:
+          type: string
+          format: date-time
+    AgentPublicationList:
+      type: object
+      required:
+        - items
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentPublication'
+    PromoteAgentVersionRequest:
+      type: object
+      required:
+        - agent_version_id
+        - environment
+        - expected_publication_revision
+      additionalProperties: false
+      properties:
+        agent_version_id:
+          type: string
+          format: uuid
+        environment:
+          type: string
+          enum: [development, staging, production]
+        expected_publication_revision:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+          description: Expected publication pointer revision (0 for initial publication to an environment)
+    PromoteAgentVersionResponse:
+      type: object
+      required:
+        - publication_id
+        - agent_id
+        - agent_version_id
+        - version
+        - environment
+        - revision
+        - bundle_sha256
+        - published_at
+        - is_noop
+      additionalProperties: false
+      properties:
+        publication_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        agent_version_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        environment:
+          type: string
+          enum: [development, staging, production]
+        revision:
+          type: integer
+          minimum: 1
+        bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        published_at:
+          type: string
+          format: date-time
+        is_noop:
+          type: boolean
     AgentError:
       type: object
       additionalProperties: false

@@ -222,7 +222,7 @@ def _seed_runtime_run(owner_url: str, *, tenant_id: UUID, workspace_id: UUID, us
     agent_id = uuid4()
     version_id = uuid4()
     run_id = uuid4()
-    with psycopg.connect(owner_url, autocommit=True) as conn:
+    with psycopg.connect(owner_url) as conn:
         conn.execute(
             """
             INSERT INTO catalog.agents (tenant_id, workspace_id, id, slug, display_name)
@@ -234,10 +234,14 @@ def _seed_runtime_run(owner_url: str, *, tenant_id: UUID, workspace_id: UUID, us
             """
             INSERT INTO catalog.agent_versions (
                 tenant_id, workspace_id, id, agent_id, version,
-                schema_version, frozen_spec, bundle_sha256
-            ) VALUES (%s, %s, %s, %s, 1, '1.0', '{"name":"sse-agent"}', %s)
+                schema_version, frozen_spec, bundle_sha256, bundle_manifest
+            ) VALUES (%s, %s, %s, %s, 1, '1.0', '{"name":"sse-agent"}', %s, '{"fixture":"sse"}')
             """,
             (tenant_id, workspace_id, version_id, agent_id, "a" * 64),
+        )
+        conn.execute(
+            "UPDATE catalog.agent_versions SET bindings_sealed_at = now() WHERE id = %s",
+            (version_id,),
         )
         conn.execute(
             """

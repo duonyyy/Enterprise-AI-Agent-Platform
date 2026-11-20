@@ -92,11 +92,14 @@ def test_immutable_audit_events_rejects_mutation(
 
 @pytest.mark.integration
 def test_immutable_agent_versions_rejects_mutation(
-    migrated_database: dict[str, Any],
+    isolated_database: dict[str, Any],
 ) -> None:
     """Verifies that catalog.agent_versions cannot be updated or deleted."""
-    owner_url = migrated_database["owner_url"]
-    app_url = migrated_database["app_url"]
+    from run_migrations import run_migrations
+
+    owner_url = isolated_database["owner_url"]
+    run_migrations(owner_url)
+    app_url = isolated_database["app_url"]
 
     tenant_id = uuid4()
     workspace_id = uuid4()
@@ -106,54 +109,75 @@ def test_immutable_agent_versions_rejects_mutation(
 
     with psycopg.connect(owner_url) as owner:
         with owner.cursor() as cur:
-            cur.execute("INSERT INTO iam.tenants (id, slug, name) VALUES (%s, %s, %s)", (tenant_id, f"t-{tenant_id.hex[:8]}", "Tenant AG"))
-            cur.execute("INSERT INTO iam.workspaces (tenant_id, id, slug, name) VALUES (%s, %s, %s, %s)", (tenant_id, workspace_id, f"ws-{workspace_id.hex[:8]}", "WS AG"))
-            cur.execute("INSERT INTO catalog.agents (tenant_id, workspace_id, id, slug, display_name) VALUES (%s, %s, %s, %s, %s)", (tenant_id, workspace_id, agent_id, "ag-v", "Agent V"))
+            cur.execute(
+                "INSERT INTO iam.tenants (id, slug, name) VALUES (%s, %s, %s)",
+                (tenant_id, f"t-{tenant_id.hex[:8]}", "Tenant AG"),
+            )
+            cur.execute(
+                "INSERT INTO iam.workspaces (tenant_id, id, slug, name) VALUES (%s, %s, %s, %s)",
+                (tenant_id, workspace_id, f"ws-{workspace_id.hex[:8]}", "WS AG"),
+            )
+            cur.execute(
+                "INSERT INTO catalog.agents (tenant_id, workspace_id, id, slug, display_name) VALUES (%s, %s, %s, %s, %s)",
+                (tenant_id, workspace_id, agent_id, "ag-v", "Agent V"),
+            )
             cur.execute(
                 """
                 INSERT INTO catalog.agent_versions (
                     tenant_id, workspace_id, id, agent_id, version,
-                    schema_version, frozen_spec, bundle_sha256
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    schema_version, frozen_spec, bundle_sha256, bundle_manifest
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '{"fixture":"immutability"}')
                 """,
-                (tenant_id, workspace_id, version_id, agent_id, 1, "1.0", '{"name":"agent"}' , sha256),
+                (
+                    tenant_id,
+                    workspace_id,
+                    version_id,
+                    agent_id,
+                    1,
+                    "1.0",
+                    '{"name":"agent"}',
+                    sha256,
+                ),
             )
 
-    try:
-        with psycopg.connect(app_url) as app:
-            with app.cursor() as cur:
-                cur.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant_id),))
-                cur.execute("SELECT set_config('app.workspace_id', %s, true)", (str(workspace_id),))
+            cur.execute(
+                "UPDATE catalog.agent_versions SET bindings_sealed_at = now() WHERE id = %s",
+                (version_id,),
+            )
 
-                with pytest.raises(psycopg.errors.RaiseException) as exc_info:
-                    cur.execute(
-                        "UPDATE catalog.agent_versions SET schema_version = '2.0' WHERE id = %s",
-                        (version_id,),
-                    )
-                assert "Immutable table catalog.agent_versions cannot be changed via UPDATE" in str(exc_info.value)
-            app.rollback()
+    with psycopg.connect(app_url) as app:
+        with app.cursor() as cur:
+            cur.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant_id),))
+            cur.execute("SELECT set_config('app.workspace_id', %s, true)", (str(workspace_id),))
 
-            with app.cursor() as cur:
-                cur.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant_id),))
-                cur.execute("SELECT set_config('app.workspace_id', %s, true)", (str(workspace_id),))
+            with pytest.raises(psycopg.errors.RaiseException) as exc_info:
+                cur.execute(
+                    "UPDATE catalog.agent_versions SET schema_version = '2.0' WHERE id = %s",
+                    (version_id,),
+                )
+            assert "already sealed and cannot be modified" in str(exc_info.value)
+        app.rollback()
 
-                with pytest.raises(psycopg.errors.RaiseException) as exc_info:
-                    cur.execute(
-                        "DELETE FROM catalog.agent_versions WHERE id = %s",
-                        (version_id,),
-                    )
-                assert "Immutable table catalog.agent_versions cannot be changed via DELETE" in str(exc_info.value)
-            app.rollback()
+        with app.cursor() as cur:
+            cur.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant_id),))
+            cur.execute("SELECT set_config('app.workspace_id', %s, true)", (str(workspace_id),))
 
-    finally:
-        with psycopg.connect(owner_url) as owner:
-            with owner.cursor() as cur:
-                cur.execute("ALTER TABLE catalog.agent_versions DISABLE TRIGGER immutable_row")
-                cur.execute("DELETE FROM catalog.agent_versions WHERE id = %s", (version_id,))
-                cur.execute("ALTER TABLE catalog.agent_versions ENABLE TRIGGER immutable_row")
-                cur.execute("DELETE FROM catalog.agents WHERE id = %s", (agent_id,))
-                cur.execute("DELETE FROM iam.workspaces WHERE id = %s", (workspace_id,))
-                cur.execute("DELETE FROM iam.tenants WHERE id = %s", (tenant_id,))
+            # Migration 0007 revokes DELETE from platform_app altogether.
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cur.execute(
+                    "DELETE FROM catalog.agent_versions WHERE id = %s",
+                    (version_id,),
+                )
+        app.rollback()
+
+    # The trigger also protects against deletion by the migration identity.
+    with psycopg.connect(owner_url) as owner:
+        with pytest.raises(psycopg.errors.RaiseException, match="cannot be deleted"):
+            owner.execute("DELETE FROM catalog.agent_versions WHERE id = %s", (version_id,))
+        owner.rollback()
+        assert owner.execute(
+            "SELECT schema_version FROM catalog.agent_versions WHERE id = %s", (version_id,)
+        ).fetchone() == ("1.0",)
 
 
 @pytest.mark.integration

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ControlApiClientV2,
   ApiClientError,
+  MAX_REVISION_INT32,
   canActorAssignTargetRole,
   canActorManageTargetRole,
   canActorRevokeTargetRole,
@@ -679,6 +680,260 @@ describe("ControlApiClientV2 Unit Tests", () => {
       assert.equal(updated.revision, 2);
       assert.equal(recordedCalls[2]?.method, "PATCH");
       assert.equal(recordedCalls[2]?.headers?.["if-match"], '"1"');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("agent validation endpoint (validateAgentDraft) sends POST and parses diagnostics/readiness", async () => {
+    const recordedCalls: Array<{ url: string; method?: string; body?: string }> = [];
+    const originalFetch = globalThis.fetch;
+
+    const sampleValidationResult = {
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      revision: 1,
+      ready: false,
+      diagnostics: [
+        {
+          field: "modelRef",
+          code: "dependency_unavailable",
+          message: "Model configuration not found in workspace",
+        },
+      ],
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "POST" && urlStr.endsWith("/validate")) {
+        return new Response(JSON.stringify(sampleValidationResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const result = await client.validateAgentDraft(
+        "11111111-1111-1111-1111-111111111111",
+        "00000000-0000-0000-0000-000000000001"
+      );
+      assert.equal(result.agent_id, "00000000-0000-0000-0000-000000000001");
+      assert.equal(result.revision, 1);
+      assert.equal(result.ready, false);
+      assert.equal(result.diagnostics.length, 1);
+      assert.equal(result.diagnostics[0]?.code, "dependency_unavailable");
+      assert.equal(recordedCalls[0]?.method, "POST");
+      assert.ok(recordedCalls[0]?.url.endsWith("/agents/00000000-0000-0000-0000-000000000001/validate"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("publishAgent sends Idempotency-Key header and expected_revision body, returning durable receipt", async () => {
+    const recordedCalls: { url: string; method?: string; headers?: Record<string, string>; body?: string }[] = [];
+    const originalFetch = globalThis.fetch;
+
+    const samplePublishResult = {
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      agent_version_id: "00000000-0000-0000-0000-000000000002",
+      version: 1,
+      bundle_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      is_immutable: true,
+      created_at: "2026-11-16T12:00:00Z",
+      spec_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const headersRecord: Record<string, string> = {};
+      if (init?.headers) {
+        if (typeof (init.headers as Headers).forEach === "function") {
+          (init.headers as Headers).forEach((v, k) => {
+            headersRecord[k] = v;
+          });
+        } else if (Array.isArray(init.headers)) {
+          for (const [k, v] of init.headers) {
+            headersRecord[k] = v;
+          }
+        } else {
+          Object.assign(headersRecord, init.headers);
+        }
+      }
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        headers: headersRecord,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "POST" && urlStr.endsWith("/publish")) {
+        return new Response(JSON.stringify(samplePublishResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const result = await client.publishAgent(
+        "11111111-1111-1111-1111-111111111111",
+        "00000000-0000-0000-0000-000000000001",
+        {
+          expectedRevision: 1,
+          idempotencyKey: "test-idempotency-key-123",
+        }
+      );
+      assert.equal(result.agent_id, "00000000-0000-0000-0000-000000000001");
+      assert.equal(result.agent_version_id, "00000000-0000-0000-0000-000000000002");
+      assert.equal(result.version, 1);
+      assert.equal(result.bundle_sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+      assert.equal(result.is_immutable, true);
+      assert.equal(recordedCalls[0]?.method, "POST");
+      assert.ok(recordedCalls[0]?.url.endsWith("/agents/00000000-0000-0000-0000-000000000001/publish"));
+      const idempKey = recordedCalls[0]?.headers?.["idempotency-key"] || recordedCalls[0]?.headers?.["Idempotency-Key"];
+      assert.equal(idempKey, "test-idempotency-key-123");
+      assert.equal(recordedCalls[0]?.body, JSON.stringify({ expected_revision: 1 }));
+      assert.equal(MAX_REVISION_INT32, 2_147_483_647);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Step 04-D: listAgentVersions, listAgentPublications, and promoteAgentVersion methods", async () => {
+    const originalFetch = globalThis.fetch;
+    const recordedCalls: Array<{
+      url: string;
+      method: string | undefined;
+      headers: Record<string, string>;
+      body: string | undefined;
+    }> = [];
+
+    const mockVersions = {
+      items: [
+        {
+          agent_id: "00000000-0000-0000-0000-000000000001",
+          agent_version_id: "00000000-0000-0000-0000-000000000002",
+          version: 1,
+          bundle_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          is_immutable: true,
+          created_at: "2026-11-17T12:00:00Z",
+          published_by: "11111111-1111-1111-1111-111111111111",
+          model_name: "Claude 3.5 Sonnet",
+        },
+      ],
+      next_cursor: null,
+    };
+
+    const mockPublications = {
+      items: [
+        {
+          publication_id: "pub-00000000-0000-0000-0000-000000000001",
+          agent_id: "00000000-0000-0000-0000-000000000001",
+          agent_version_id: "00000000-0000-0000-0000-000000000002",
+          version: 1,
+          environment: "production",
+          revision: 1,
+          bundle_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          published_at: "2026-11-17T12:05:00Z",
+        },
+      ],
+    };
+
+    const mockPromotionResult = {
+      publication_id: "pub-00000000-0000-0000-0000-000000000001",
+      agent_id: "00000000-0000-0000-0000-000000000001",
+      agent_version_id: "00000000-0000-0000-0000-000000000002",
+      version: 1,
+      environment: "production",
+      revision: 2,
+      bundle_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      published_at: "2026-11-17T12:10:00Z",
+      is_noop: false,
+    };
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const headersRecord: Record<string, string> = {};
+      if (init?.headers) {
+        if (typeof (init.headers as Headers).forEach === "function") {
+          (init.headers as Headers).forEach((v, k) => {
+            headersRecord[k] = v;
+          });
+        } else if (Array.isArray(init.headers)) {
+          for (const [k, v] of init.headers) {
+            headersRecord[k] = v;
+          }
+        } else {
+          Object.assign(headersRecord, init.headers);
+        }
+      }
+      recordedCalls.push({
+        url: urlStr,
+        method: init?.method,
+        headers: headersRecord,
+        body: init?.body ? String(init.body) : undefined,
+      });
+
+      if (init?.method === "GET" && urlStr.includes("/versions")) {
+        return new Response(JSON.stringify(mockVersions), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      if (init?.method === "GET" && urlStr.includes("/publications")) {
+        return new Response(JSON.stringify(mockPublications), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      if (init?.method === "POST" && urlStr.includes("/promotions")) {
+        return new Response(JSON.stringify(mockPromotionResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const client = new ControlApiClientV2({ baseUrl: "http://localhost:8000" });
+      const wsId = "11111111-1111-1111-1111-111111111111";
+      const agId = "00000000-0000-0000-0000-000000000001";
+
+      const versionsPage = await client.listAgentVersions(wsId, agId, { limit: 10 });
+      assert.equal(versionsPage.items.length, 1);
+      assert.equal(versionsPage.items[0]?.version, 1);
+      assert.ok(recordedCalls[0]?.url.includes("/agents/00000000-0000-0000-0000-000000000001/versions?limit=10"));
+
+      const publicationsList = await client.listAgentPublications(wsId, agId);
+      assert.equal(publicationsList.items.length, 1);
+      assert.equal(publicationsList.items[0]?.environment, "production");
+      assert.ok(recordedCalls[1]?.url.includes("/agents/00000000-0000-0000-0000-000000000001/publications"));
+
+      const promoResult = await client.promoteAgentVersion(wsId, agId, {
+        agent_version_id: "00000000-0000-0000-0000-000000000002",
+        environment: "production",
+        expected_publication_revision: 1,
+      });
+      assert.equal(promoResult.revision, 2);
+      assert.equal(promoResult.is_noop, false);
+      assert.equal(recordedCalls[2]?.method, "POST");
+      assert.ok(recordedCalls[2]?.url.includes("/agents/00000000-0000-0000-0000-000000000001/promotions"));
+      assert.deepEqual(JSON.parse(recordedCalls[2]?.body || "{}"), {
+        agent_version_id: "00000000-0000-0000-0000-000000000002",
+        environment: "production",
+        expected_publication_revision: 1,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

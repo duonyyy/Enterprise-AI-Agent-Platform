@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useId } from "react";
 import { Button } from "./Button";
 
 export interface ModalProps {
@@ -20,17 +20,97 @@ export const Modal: React.FC<ModalProps> = ({
   footer,
   maxWidth = "480px",
 }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
+  const baseId = useId();
+  const titleId = `modal-title-${baseId}`;
+  const descId = `modal-description-${baseId}`;
+
   useEffect(() => {
     if (!isOpen) return;
 
+    // Capture active element before modal takes focus
+    previousActiveElementRef.current = document.activeElement as HTMLElement | null;
+
+    // Prevent background scrolling
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    // Set initial focus inside dialog
+    const focusTimer = setTimeout(() => {
+      if (!dialogRef.current) return;
+      const autoFocusTarget = dialogRef.current.querySelector<HTMLElement>(
+        "[autofocus], [data-autofocus]"
+      );
+      if (autoFocusTarget && typeof autoFocusTarget.focus === "function") {
+        autoFocusTarget.focus();
+      } else {
+        const firstFocusable = dialogRef.current.querySelector<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        firstFocusable?.focus();
+      }
+    }, 50);
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         onClose();
+        return;
+      }
+
+      if (e.key === "Tab") {
+        if (!dialogRef.current) return;
+        const focusableNodes = Array.from(
+          dialogRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter(
+          (el) =>
+            el.offsetParent !== null ||
+            (el.getClientRects && el.getClientRects().length > 0)
+        );
+
+        if (focusableNodes.length === 0) {
+          e.preventDefault();
+          return;
+        }
+
+        const firstElement = focusableNodes[0];
+        const lastElement = focusableNodes[focusableNodes.length - 1];
+
+        if (e.shiftKey) {
+          if (
+            document.activeElement === firstElement ||
+            !dialogRef.current.contains(document.activeElement)
+          ) {
+            e.preventDefault();
+            lastElement.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = originalOverflow;
+      // Restore focus to previous active element
+      if (
+        previousActiveElementRef.current &&
+        typeof previousActiveElementRef.current.focus === "function"
+      ) {
+        previousActiveElementRef.current.focus();
+        previousActiveElementRef.current = null;
+      }
+    };
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
@@ -39,8 +119,8 @@ export const Modal: React.FC<ModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      aria-labelledby="modal-title"
-      aria-describedby={description ? "modal-description" : undefined}
+      aria-labelledby={titleId}
+      aria-describedby={description ? descId : undefined}
       style={{
         position: "fixed",
         top: 0,
@@ -61,6 +141,7 @@ export const Modal: React.FC<ModalProps> = ({
       }}
     >
       <div
+        ref={dialogRef}
         style={{
           width: "100%",
           maxWidth,
@@ -86,7 +167,7 @@ export const Modal: React.FC<ModalProps> = ({
         >
           <div>
             <h2
-              id="modal-title"
+              id={titleId}
               style={{
                 fontSize: "16px",
                 fontWeight: 600,
@@ -98,7 +179,7 @@ export const Modal: React.FC<ModalProps> = ({
             </h2>
             {description && (
               <p
-                id="modal-description"
+                id={descId}
                 style={{
                   fontSize: "12px",
                   color: "var(--text-secondary)",
@@ -114,16 +195,18 @@ export const Modal: React.FC<ModalProps> = ({
             onClick={onClose}
             aria-label="Đóng hộp thoại"
             style={{
-              padding: "4px",
+              padding: "6px",
               color: "var(--text-muted)",
               cursor: "pointer",
               borderRadius: "var(--radius-xs)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              background: "transparent",
+              border: "none",
             }}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>

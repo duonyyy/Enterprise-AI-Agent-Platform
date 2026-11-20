@@ -1,34 +1,64 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from "react";
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useRef,
+  useLayoutEffect,
+} from "react";
 import { useRouter } from "next/navigation";
+import { useWorkspaceSession } from "../workspace-context";
 import {
   PageHeader,
-  DataTable,
   StatusBadge,
   Button,
-  FilterBar,
-  LoadingSkeleton,
-  EmptyState,
-  ErrorState,
-  ForbiddenState,
   StaleBanner,
-  Modal,
-  Pagination,
-  Input,
-  Column,
-  BrandIcon,
 } from "@enterprise/ui";
 import {
   defaultApiClient,
   AgentDraftMetadata,
   AgentDraft,
+  PublishResponse,
   ApiClientError,
+  AgentVersionMetadata,
+  AgentPublication,
+  AgentEnvironment,
+  CreateAgentDraftDTO,
 } from "@enterprise/api-client";
 
-import { AgentRequestScope, mergeAgentDraftEdits } from "../../../../../lib/agent-draft-state";
+import {
+  AgentPromotionScope,
+  AgentPublishScope,
+  AgentRequestScope,
+  clearPendingPublishIntent,
+  getPendingPublishIntent,
+  savePendingPublishIntent,
+  generateSecureIdempotencyKey,
+} from "../../../../../lib/agent-draft-state";
 
-type ViewState = "ready" | "loading" | "empty" | "error" | "forbidden" | "stale";
+import styles from "./agents.module.css";
+import {
+  AgentList,
+  ViewState,
+  ViewMode,
+  StarterTemplate,
+} from "./agent-list";
+import { AgentCreateModal } from "./agent-create-modal";
+import { AgentWorkshop } from "./agent-workshop";
+import {
+  AgentPublishModal,
+  AgentPromoteModal,
+} from "./agent-release-modal";
+
+type ToastType = "success" | "error" | "info";
+
+interface ToastNotification {
+  id: number;
+  message: string;
+  type: ToastType;
+}
 
 export default function AgentsPage({
   params,
@@ -37,20 +67,30 @@ export default function AgentsPage({
 }) {
   const workspaceId = params.workspaceId || "default";
   const router = useRouter();
-  const requestScope = useRef(new AgentRequestScope());
-  useLayoutEffect(() => {
-    requestScope.current.reset();
-    return () => requestScope.current.invalidate();
-  }, [workspaceId]);
+  const { currentUser } = useWorkspaceSession();
+  const actorId = currentUser.user_id;
 
-  // Data & State
+  // Scopes (R04C-04, R04C-05, Concurrency Isolation, 04-D)
+  const requestScope = useRef(new AgentRequestScope());
+  const listScope = useRef(new AgentRequestScope());
+  const editorScope = useRef(new AgentRequestScope());
+  const publishScope = useRef(new AgentPublishScope());
+  const promoteScope = useRef(new AgentPromotionScope());
+  const promoteDialogScope = useRef(new AgentRequestScope());
+  const historyScope = useRef(new AgentRequestScope());
+  const editorAgentId = useRef<string | null>(null);
+
+  // Data & View State
   const [agents, setAgents] = useState<AgentDraftMetadata[]>([]);
   const [viewState, setViewState] = useState<ViewState>("loading");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [errorStatus, setErrorStatus] = useState<number | undefined>(undefined);
   const [requestId, setRequestId] = useState<string | undefined>(undefined);
 
-  // Filters & Search
+  // View Mode: Table vs Grid Cards
+  const [viewMode, setViewMode] = useState<ViewMode>("table");
+
+  // Search & Filter
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -61,58 +101,154 @@ export default function AgentsPage({
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const itemsPerPage = 8;
 
-  // Create Modal
+  // Create Modal State
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newAgentName, setNewAgentName] = useState("");
-  const [newAgentSlug, setNewAgentSlug] = useState("");
-  const [newInstructions, setNewInstructions] = useState("");
-  const [newModelRef, setNewModelRef] = useState("");
-  const [newMode, setNewMode] = useState<"fixed_plan" | "planner_based" | "react">("fixed_plan");
-  const [newMaxSteps, setNewMaxSteps] = useState(10);
-  const [newMaxWallTime, setNewMaxWallTime] = useState(180);
-  const [newMaxTokens, setNewMaxTokens] = useState(16000);
+  const [selectedTemplate, setSelectedTemplate] = useState<StarterTemplate | null>(null);
   const [createError, setCreateError] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
 
-  // Editor Drawer / Modal
+  // Editor Drawer / Workshop State
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [activeDraft, setActiveDraft] = useState<AgentDraft | null>(null);
-  const [editorInstructions, setEditorInstructions] = useState("");
-  const [editorModelRef, setEditorModelRef] = useState("");
-  const [editorMode, setEditorMode] = useState<"fixed_plan" | "planner_based" | "react">("fixed_plan");
-  const [editorMaxSteps, setEditorMaxSteps] = useState(10);
-  const [editorMaxWallTime, setEditorMaxWallTime] = useState(180);
-  const [editorMaxTokens, setEditorMaxTokens] = useState(16000);
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [conflictState, setConflictState] = useState<{
-    message: string;
-    serverRevision?: number;
-  } | null>(null);
 
-  // Publish Dialog
+  // Publish Dialog State (04-C, R04C-04, R04C-05)
   const [publishTargetAgent, setPublishTargetAgent] = useState<AgentDraftMetadata | null>(null);
+  const [publishIdempotencyKey, setPublishIdempotencyKey] = useState<string>("");
+  const [publishRevision, setPublishRevision] = useState<number>(1);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [publishReceipt, setPublishReceipt] = useState<PublishResponse | null>(null);
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
+  const [isRecoveredIntent, setIsRecoveredIntent] = useState(false);
+  const [pendingCreatedAt, setPendingCreatedAt] = useState<number | null>(null);
 
-  // Notification Toast
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // Version History & Promotion State (04-D)
+  const [historyVersions, setHistoryVersions] = useState<AgentVersionMetadata[]>([]);
+  const [historyPublications, setHistoryPublications] = useState<AgentPublication[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyAgentId, setHistoryAgentId] = useState<string | null>(null);
+  const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
+  const [isLoadingHistoryMore, setIsLoadingHistoryMore] = useState(false);
 
-  const showToast = useCallback((msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
+  // Promote / Rollback Modal State
+  const [isPromoteModalOpen, setIsPromoteModalOpen] = useState(false);
+  const [promoteTargetVersion, setPromoteTargetVersion] = useState<AgentVersionMetadata | null>(null);
+  const [promoteEnvironment, setPromoteEnvironment] = useState<AgentEnvironment>("development");
+  const [isPromoting, setIsPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [promoteConflict, setPromoteConflict] = useState(false);
+
+  // UI Toast & Clipboard Feedback
+  const [toast, setToast] = useState<ToastNotification | null>(null);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Focus and trigger references for accessibility
+  const searchFieldRef = useRef<HTMLInputElement>(null);
+  const createButtonRef = useRef<HTMLButtonElement>(null);
+
+  const showToast = useCallback(
+    (message: string, type: ToastType = "success") => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast({ id: Date.now(), message, type });
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+      }, 4000);
+    },
+    []
+  );
+
+  const dismissToast = useCallback(() => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast(null);
   }, []);
 
-  // Request cancellation on workspace switch
-  const abortControllerRef = useRef<AbortController | null>(null);
-
-  // Fetch agents from API (no seed/mock fallback)
-  const fetchAgents = useCallback(async () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+  const handleCopyText = useCallback((text: string, label: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(text);
+      setCopiedKey(label);
+      setTimeout(() => setCopiedKey(null), 2500);
+      showToast(`Đã sao chép ${label} vào clipboard.`, "info");
     }
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+  }, [showToast]);
+
+  // Reset all scoped state and abort in-flight requests on workspace or actor switch (RF04-08)
+  useLayoutEffect(() => {
+    const scope = requestScope.current;
+    const list = listScope.current;
+    const editor = editorScope.current;
+    const publish = publishScope.current;
+    const promote = promoteScope.current;
+    const history = historyScope.current;
+    const promoteDialog = promoteDialogScope.current;
+
+    scope.reset();
+    list.reset();
+    editor.invalidate();
+    editorAgentId.current = null;
+    publish.invalidate();
+    promote.invalidate();
+    history.invalidate();
+    promoteDialog.invalidate();
+
+    setAgents([]);
+    setViewState("loading");
+    setIsRefreshing(false);
+    setErrorMessage("");
+    setErrorStatus(undefined);
+    setRequestId(undefined);
+    setSearchQuery("");
+    setStatusFilter("ALL");
+    setCurrentPage(1);
+    setNextCursor(null);
+    setIsLoadingMore(false);
+
+    setIsCreateModalOpen(false);
+    setSelectedTemplate(null);
+    setCreateError("");
+    setIsSubmittingCreate(false);
+
+    setHistoryVersions([]);
+    setHistoryPublications([]);
+    setHistoryNextCursor(null);
+    setHistoryAgentId(null);
+    setHistoryError(null);
+    setIsLoadingHistory(false);
+    setIsLoadingHistoryMore(false);
+    setIsPromoteModalOpen(false);
+    setPromoteTargetVersion(null);
+    setIsPromoting(false);
+    setPromoteError(null);
+    setPromoteConflict(false);
+    setActiveDraft(null);
+    setIsEditorOpen(false);
+    setPublishTargetAgent(null);
+    setPublishIdempotencyKey("");
+    setPublishRevision(1);
+    setIsPublishing(false);
+    setPublishReceipt(null);
+    setPublishMessage(null);
+    setIsRecoveredIntent(false);
+    setPendingCreatedAt(null);
+    dismissToast();
+
+    return () => {
+      scope.invalidate();
+      list.invalidate();
+      editor.invalidate();
+      publish.invalidate();
+      promote.invalidate();
+      history.invalidate();
+      promoteDialog.invalidate();
+    };
+  }, [workspaceId, actorId, dismissToast]);
+
+  // Fetch agents from API (RF04-08: bound to both workspaceId and actorId)
+  const fetchAgents = useCallback(async () => {
+    if (!workspaceId || !actorId) return;
+    listScope.current.reset();
+    const request = listScope.current.capture();
+    const workspace = requestScope.current.capture();
 
     setIsRefreshing(true);
     setViewState("loading");
@@ -120,14 +256,11 @@ export default function AgentsPage({
     setErrorStatus(undefined);
     setRequestId(undefined);
 
-    const scope = requestScope.current.capture();
     try {
       const page = await defaultApiClient.listAgents(workspaceId, {
-        signal: controller.signal,
+        signal: request.signal,
       });
-      if (!scope.isCurrent()) return;
-
-      if (controller.signal.aborted) return;
+      if (!workspace.isCurrent() || !request.isCurrent()) return;
 
       const items = page.items || [];
       setAgents(items);
@@ -135,13 +268,14 @@ export default function AgentsPage({
       setCurrentPage(1);
       setViewState(items.length === 0 ? "empty" : "ready");
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
-      if (controller.signal.aborted) return;
+      if (!workspace.isCurrent() || !request.isCurrent()) return;
 
       if (err instanceof ApiClientError) {
         if (err.isUnauthorized) {
           router.replace(
-            `/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`
+            `/login?error=session_expired&return_to=${encodeURIComponent(
+              window.location.pathname
+            )}`
           );
           return;
         }
@@ -157,133 +291,129 @@ export default function AgentsPage({
             : err.message
         );
       } else {
-        setErrorMessage(err instanceof Error ? err.message : "Không thể kết nối tới máy chủ.");
+        setErrorMessage(
+          err instanceof Error
+            ? err.message
+            : "Không thể kết nối tới máy chủ Control Plane."
+        );
       }
       setAgents([]);
       setViewState("error");
     } finally {
-      if (scope.isCurrent() && !controller.signal.aborted) setIsRefreshing(false);
+      if (workspace.isCurrent() && request.isCurrent()) {
+        setIsRefreshing(false);
+      }
     }
-  }, [workspaceId, router]);
+  }, [workspaceId, actorId, router]);
 
-  // Handle workspace change: reset state and fetch fresh
+  // Initial load on workspace or actor change (RF04-08)
   useEffect(() => {
-    setAgents([]);
-    setIsCreateModalOpen(false);
-    setIsSubmitting(false);
-    setIsSaving(false);
-    setPublishTargetAgent(null);
-    setIsPublishing(false);
-    setPublishMessage(null);
-    setToastMessage(null);
-    setCurrentPage(1);
-    setNextCursor(null);
-    setIsLoadingMore(false);
-    setActiveDraft(null);
-    setIsEditorOpen(false);
-    setConflictState(null);
-    setSaveError(null);
-    setCreateError("");
+    if (!workspaceId || !actorId) return;
     fetchAgents();
 
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
       }
     };
-  }, [fetchAgents, workspaceId]);
+  }, [fetchAgents, workspaceId, actorId]);
 
-  const loadMoreAgents = async () => {
+  // Load more agents (Cursor pagination)
+  const handleLoadMoreAgents = async () => {
     if (!nextCursor || isLoadingMore) return;
-    const scope = requestScope.current.capture();
+    const request = listScope.current.capture();
+    const workspace = requestScope.current.capture();
     setIsLoadingMore(true);
+
     try {
       const page = await defaultApiClient.listAgents(workspaceId, {
-        cursor: nextCursor, signal: scope.signal,
+        cursor: nextCursor,
+        signal: request.signal,
       });
-      if (!scope.isCurrent()) return;
+      if (!workspace.isCurrent() || !request.isCurrent()) return;
+
       setAgents((previous) => {
-        const known = new Set(previous.map((agent) => agent.agent_id));
-        return [...previous, ...page.items.filter((agent) => !known.has(agent.agent_id))];
+        const known = new Set(previous.map((a) => a.agent_id));
+        return [...previous, ...page.items.filter((a) => !known.has(a.agent_id))];
       });
       setNextCursor(page.next_cursor);
     } catch {
-      if (scope.isCurrent()) showToast("Không thể tải thêm tác tử. Hãy thử lại.");
+      if (workspace.isCurrent() && request.isCurrent()) {
+        showToast("Không thể tải thêm tác tử. Hãy thử lại.", "error");
+      }
     } finally {
-      if (scope.isCurrent()) setIsLoadingMore(false);
+      if (workspace.isCurrent() && request.isCurrent()) {
+        setIsLoadingMore(false);
+      }
     }
   };
 
-  // Slug generator
-  const handleNameChange = (val: string) => {
-    setNewAgentName(val);
-    const slugified = val
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    setNewAgentSlug(slugified);
+  // Filtered & Paginated items (P1-02: reset and clamp currentPage)
+  const filteredAgents = useMemo(() => {
+    return agents.filter((item) => {
+      const query = searchQuery.trim().toLowerCase();
+      const matchQuery =
+        !query ||
+        item.display_name.toLowerCase().includes(query) ||
+        item.slug.toLowerCase().includes(query);
+
+      const matchStatus =
+        statusFilter === "ALL" ||
+        (statusFilter === "DRAFT" && !item.archived_at) ||
+        (statusFilter === "ARCHIVED" && Boolean(item.archived_at));
+
+      return matchQuery && matchStatus;
+    });
+  }, [agents, searchQuery, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredAgents.length / itemsPerPage));
+
+  // Reset page to 1 when search or status filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, statusFilter]);
+
+  // Clamp current page when filtered elements shrink
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const handleResetFilters = () => {
+    setSearchQuery("");
+    setStatusFilter("ALL");
   };
 
-  // Submit Create Agent Draft
-  const handleCreateAgent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmedName = newAgentName.trim();
-    const trimmedSlug = newAgentSlug.trim();
-    const trimmedInstructions = newInstructions.trim();
-    const trimmedModelRef = newModelRef.trim();
+  // Create Draft Action (P1-03)
+  const handleOpenCreateModal = useCallback(() => {
+    setSelectedTemplate(null);
+    setCreateError("");
+    setIsCreateModalOpen(true);
+  }, []);
 
-    if (!trimmedName) {
-      setCreateError("Vui lòng nhập tên hiển thị của Tác tử AI.");
-      return;
-    }
-    if (!trimmedSlug || !/^[a-z0-9_-]+$/.test(trimmedSlug)) {
-      setCreateError("Định danh Slug chỉ được chứa chữ thường, số, gạch ngang và gạch dưới.");
-      return;
-    }
-    if (!trimmedInstructions) {
-      setCreateError("Vui lòng nhập chỉ lệnh Persona (Persona Instructions) cho Agent.");
-      return;
-    }
-    if (!trimmedModelRef) {
-      setCreateError("Vui lòng nhập tham chiếu Mô hình (Model Reference).");
-      return;
-    }
+  const handleApplyTemplate = useCallback((template: StarterTemplate) => {
+    setSelectedTemplate(template);
+    setCreateError("");
+    setIsCreateModalOpen(true);
+    showToast(
+      `Đã áp dụng mẫu "${template.name}". Hãy kiểm tra và nhấn Tạo bản nháp.`,
+      "info"
+    );
+  }, [showToast]);
 
-    setIsSubmitting(true);
+  const handleSubmitCreateAgent = async (dto: CreateAgentDraftDTO): Promise<boolean> => {
+    setIsSubmittingCreate(true);
     setCreateError("");
 
-    const fullSpec = {
-      schemaVersion: "1.0",
-      kind: "Agent",
-      metadata: {
-        name: trimmedSlug,
-        displayName: trimmedName,
-      },
-      mode: newMode,
-      modelRef: trimmedModelRef,
-      persona: {
-        instructions: trimmedInstructions,
-      },
-      toolRefs: [],
-      skillRefs: [],
-      knowledgeRefs: [],
-      limits: {
-        maxSteps: Number(newMaxSteps),
-        maxWallTimeSeconds: Number(newMaxWallTime),
-        maxTotalTokens: Number(newMaxTokens),
-      },
-    };
-
-    const scope = requestScope.current.capture();
+    const workspace = requestScope.current.capture();
     try {
-      const created = await defaultApiClient.createAgentDraft(workspaceId, {
-        display_name: trimmedName,
-        slug: trimmedSlug,
-        spec: fullSpec,
-      }, scope.signal);
-      if (!scope.isCurrent()) return;
+      const created = await defaultApiClient.createAgentDraft(
+        workspaceId,
+        dto,
+        workspace.signal
+      );
+      if (!workspace.isCurrent()) return false;
 
       const meta: AgentDraftMetadata = {
         agent_id: created.agent_id,
@@ -296,400 +426,621 @@ export default function AgentsPage({
 
       setAgents((prev) => [meta, ...prev]);
       setIsCreateModalOpen(false);
-      setNewAgentName("");
-      setNewAgentSlug("");
-      setNewInstructions("");
-      showToast(`Đã tạo bản nháp Tác tử "${meta.display_name}" thành công (revision ${meta.revision}).`);
+      showToast(
+        `Đã tạo bản nháp Tác tử "${meta.display_name}" thành công (revision ${meta.revision}).`,
+        "success"
+      );
       if (viewState === "empty") setViewState("ready");
+      return true;
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
+      if (!workspace.isCurrent()) return false;
+
       if (err instanceof ApiClientError) {
         if (err.isUnauthorized) {
           router.replace(
-            `/login?error=session_expired&return_to=${encodeURIComponent(window.location.pathname)}`
+            `/login?error=session_expired&return_to=${encodeURIComponent(
+              window.location.pathname
+            )}`
           );
-          return;
+          return false;
         }
         if (err.status === 409) {
-          setCreateError(`Định danh slug "${trimmedSlug}" đã tồn tại trong Workspace này.`);
-          return;
+          setCreateError(`Định danh slug "${dto.slug}" đã tồn tại trong Workspace này.`);
+          return false;
         }
         if (err.status === 403) {
-          setCreateError("Từ chối truy cập: Bạn không có quyền khởi tạo Tác tử (cần vai trò Developer, Admin, hoặc Owner).");
-          return;
+          setCreateError(
+            "Từ chối truy cập: Bạn không có quyền khởi tạo Tác tử (cần vai trò Developer, Admin, hoặc Owner)."
+          );
+          return false;
         }
         if (err.status === 422) {
-          const detail = typeof err.body === "object" && err.body !== null && "detail" in err.body
-            ? (err.body as { detail: { message?: string } }).detail?.message
-            : undefined;
+          const detail =
+            typeof err.body === "object" && err.body !== null && "detail" in err.body
+              ? (err.body as { detail: { message?: string } }).detail?.message
+              : undefined;
           setCreateError(`Dữ liệu không hợp lệ: ${detail || "AgentSpec không đúng định dạng chuẩn."}`);
-          return;
+          return false;
         }
         setCreateError(err.message || "Lỗi máy chủ khi tạo bản nháp Agent.");
       } else {
         setCreateError(err instanceof Error ? err.message : "Đã xảy ra lỗi không xác định.");
       }
+      return false;
     } finally {
-      if (scope.isCurrent()) setIsSubmitting(false);
+      if (workspace.isCurrent()) {
+        setIsSubmittingCreate(false);
+      }
     }
   };
 
   // Open Editor
   const handleOpenEditor = async (agent: AgentDraftMetadata) => {
-    setSaveError(null);
-    setConflictState(null);
-    setIsSaving(false);
+    editorScope.current.reset();
+    historyScope.current.invalidate();
+    promoteScope.current.invalidate();
+    promoteDialogScope.current.invalidate();
+    editorAgentId.current = agent.agent_id;
 
-    const scope = requestScope.current.capture();
+    setActiveDraft(null);
+    setHistoryVersions([]);
+    setHistoryPublications([]);
+    setHistoryAgentId(null);
+    setHistoryNextCursor(null);
+    setHistoryError(null);
+    setIsLoadingHistoryMore(false);
+    setIsPromoting(false);
+    setIsPromoteModalOpen(false);
+    setPromoteTargetVersion(null);
+
+    const workspace = requestScope.current.capture();
+    const editor = editorScope.current.capture();
+
     try {
-      const draft = await defaultApiClient.getAgentDraft(workspaceId, agent.agent_id, scope.signal);
-      if (!scope.isCurrent()) return;
-      setActiveDraft(draft);
-      const spec = draft.spec || {};
-      const persona = (spec.persona as { instructions?: string }) || {};
-      const limits = (spec.limits as { maxSteps?: number; maxWallTimeSeconds?: number; maxTotalTokens?: number }) || {};
-
-      setEditorInstructions(persona.instructions || "");
-      setEditorModelRef(String(spec.modelRef || ""));
-      setEditorMode(
-        (spec.mode as "fixed_plan" | "planner_based" | "react") || "fixed_plan"
+      const draft = await defaultApiClient.getAgentDraft(
+        workspaceId,
+        agent.agent_id,
+        editor.signal
       );
-      setEditorMaxSteps(Number(limits.maxSteps || 10));
-      setEditorMaxWallTime(Number(limits.maxWallTimeSeconds || 180));
-      setEditorMaxTokens(Number(limits.maxTotalTokens || 16000));
+      if (!workspace.isCurrent() || !editor.isCurrent()) return;
+
+      setActiveDraft(draft);
       setIsEditorOpen(true);
+      fetchAgentHistory(agent.agent_id);
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
+      if (!workspace.isCurrent() || !editor.isCurrent()) return;
       if (err instanceof ApiClientError && err.status === 404) {
-        showToast("Tác tử không tồn tại trong Workspace này.");
+        showToast("Tác tử không tồn tại trong Workspace này.", "error");
         fetchAgents();
         return;
       }
-      showToast("Không thể tải chi tiết bản nháp Agent.");
+      showToast("Không thể tải chi tiết bản nháp Agent.", "error");
     }
   };
 
-  // Reload latest draft from server after 412 conflict
-  const handleReloadLatestDraft = async () => {
-    if (!activeDraft) return;
-    const scope = requestScope.current.capture();
+  const handleCloseEditor = () => {
+    editorScope.current.invalidate();
+    historyScope.current.invalidate();
+    promoteScope.current.invalidate();
+    promoteDialogScope.current.invalidate();
+    editorAgentId.current = null;
+    setIsEditorOpen(false);
+    setActiveDraft(null);
+    setHistoryVersions([]);
+    setHistoryPublications([]);
+    setHistoryAgentId(null);
+    setHistoryNextCursor(null);
+    setHistoryError(null);
+    setIsLoadingHistory(false);
+    setIsLoadingHistoryMore(false);
+    setIsPromoting(false);
+    setIsPromoteModalOpen(false);
+    setPromoteTargetVersion(null);
+  };
+
+  const handleDraftSaved = (updatedDraft: AgentDraft) => {
+    setActiveDraft(updatedDraft);
+    setAgents((prev) =>
+      prev.map((ag) =>
+        ag.agent_id === updatedDraft.agent_id
+          ? { ...ag, revision: updatedDraft.revision }
+          : ag
+      )
+    );
+  };
+
+  // ========================================================
+  // PUBLISH STATE & DIALOG (04-C, R04C-04, R04C-05, P0-03)
+  // ========================================================
+  const createPublishKey = (): string | null => {
     try {
-      const freshDraft = await defaultApiClient.getAgentDraft(workspaceId, activeDraft.agent_id, scope.signal);
-      if (!scope.isCurrent()) return;
-      setActiveDraft(freshDraft);
-      const spec = freshDraft.spec || {};
-      const persona = (spec.persona as { instructions?: string }) || {};
-      const limits = (spec.limits as { maxSteps?: number; maxWallTimeSeconds?: number; maxTotalTokens?: number }) || {};
-
-      setEditorInstructions(persona.instructions || "");
-      setEditorModelRef(String(spec.modelRef || ""));
-      setEditorMode(
-        (spec.mode as "fixed_plan" | "planner_based" | "react") || "fixed_plan"
-      );
-      setEditorMaxSteps(Number(limits.maxSteps || 10));
-      setEditorMaxWallTime(Number(limits.maxWallTimeSeconds || 180));
-      setEditorMaxTokens(Number(limits.maxTotalTokens || 16000));
-
-      setConflictState(null);
-      setSaveError(null);
-      showToast(`Đã đồng bộ bản nháp mới nhất (revision ${freshDraft.revision}) từ máy chủ.`);
+      return generateSecureIdempotencyKey();
     } catch {
-      if (!scope.isCurrent()) return;
-      showToast("Không thể tải lại bản nháp từ máy chủ.");
+      showToast("Trình duyệt không hỗ trợ tạo khóa an toàn. Không gửi yêu cầu xuất bản.", "error");
+      return null;
     }
   };
 
-  // Submit Save Agent Draft Spec (PATCH with If-Match)
-  const handleSaveDraftSpec = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeDraft) return;
+  const handleOpenPublishModal = (agent: AgentDraftMetadata) => {
+    const pending = getPendingPublishIntent(actorId, workspaceId, agent.agent_id);
+    const recovered = pending && (pending.status === "pending" || pending.status === "unknown");
+    const key = recovered ? pending.operationKey : createPublishKey();
+    if (!key) return;
+    setPublishMessage(null);
+    setPublishReceipt(null);
+    setPublishTargetAgent(agent);
 
-    const trimmedInstructions = editorInstructions.trim();
-    if (!trimmedInstructions) {
-      setSaveError("Chỉ lệnh Persona không được để trống.");
-      return;
+    if (recovered) {
+      setPublishIdempotencyKey(pending.operationKey);
+      setPublishRevision(pending.expectedRevision);
+      setPendingCreatedAt(pending.createdAt || Date.now());
+      setIsRecoveredIntent(true);
+      setPublishMessage(null);
+    } else {
+      setPublishIdempotencyKey(key);
+      setPublishRevision(agent.revision);
+      setPendingCreatedAt(null);
+      setIsRecoveredIntent(false);
     }
+  };
 
-    setIsSaving(true);
-    setSaveError(null);
+  const handleClosePublishModal = () => {
+    publishScope.current.invalidate();
+    setPublishTargetAgent(null);
+    setPublishMessage(null);
+    setIsPublishing(false);
+    setPublishReceipt(null);
+    setIsRecoveredIntent(false);
+    setPendingCreatedAt(null);
+  };
 
-    const updatedSpec = mergeAgentDraftEdits(activeDraft.spec, {
-      mode: editorMode, modelRef: editorModelRef.trim(), instructions: trimmedInstructions,
-      maxSteps: Number(editorMaxSteps), maxWallTimeSeconds: Number(editorMaxWallTime),
-      maxTotalTokens: Number(editorMaxTokens),
+  const handleCreateFreshIntent = () => {
+    if (!publishTargetAgent) return;
+    const freshKey = createPublishKey();
+    if (!freshKey) return;
+    clearPendingPublishIntent(actorId, workspaceId, publishTargetAgent.agent_id);
+    setPublishIdempotencyKey(freshKey);
+    setPublishRevision(publishTargetAgent.revision);
+    setPendingCreatedAt(null);
+    setIsRecoveredIntent(false);
+    setPublishMessage(null);
+    showToast("Đã hủy ý định cũ và tạo khóa xuất bản mới.", "info");
+  };
+
+  const handleConfirmPublish = async () => {
+    if (!publishTargetAgent) return;
+
+    const targetActorId = actorId;
+    const targetAgent = publishTargetAgent;
+    const targetAgentId = targetAgent.agent_id;
+    const targetRevision = publishRevision;
+    const targetKey = publishIdempotencyKey;
+
+    const publishOp = publishScope.current.begin(
+      workspaceId,
+      targetAgentId,
+      targetKey,
+      targetRevision
+    );
+
+    savePendingPublishIntent({
+      actorId: targetActorId,
+      workspaceId,
+      agentId: targetAgentId,
+      operationKey: targetKey,
+      expectedRevision: targetRevision,
+      status: "pending",
+      createdAt: Date.now(),
     });
 
-    const scope = requestScope.current.capture();
+    setIsPublishing(true);
+    setPublishMessage(null);
+    setPublishReceipt(null);
+
+    const workspaceSignal = requestScope.current.capture();
     try {
-      const saved = await defaultApiClient.replaceAgentDraftSpec(
+      const res = await defaultApiClient.publishAgent(
         workspaceId,
-        activeDraft.agent_id,
-        { spec: updatedSpec },
-        activeDraft.revision, // If-Match: "<revision>"
-        scope.signal
-      );
-      if (!scope.isCurrent()) return;
-
-      setActiveDraft(saved);
-      setConflictState(null);
-      setSaveError(null);
-
-      // Update list
-      setAgents((prev) =>
-        prev.map((ag) =>
-          ag.agent_id === saved.agent_id
-            ? { ...ag, revision: saved.revision }
-            : ag
-        )
+        targetAgentId,
+        {
+          expectedRevision: targetRevision,
+          idempotencyKey: targetKey,
+        },
+        publishOp.signal
       );
 
-      showToast(`Đã lưu thay đổi thành công (revision ${saved.revision}).`);
+      if (!workspaceSignal.isCurrent() || !publishOp.isCurrent()) return;
+      if (!publishOp.matchesResponse(res)) return;
+
+      // Confirmed success: clear pending intent
+      clearPendingPublishIntent(targetActorId, workspaceId, targetAgentId);
+
+      setPublishReceipt(res);
+      setIsPublishing(false);
+      showToast(
+        `Đã xuất bản Tác tử "${targetAgent.display_name}" thành phiên bản ${res.version}.`,
+        "success"
+      );
+      await fetchAgents();
     } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
+      if (!workspaceSignal.isCurrent() || !publishOp.isCurrent()) return;
+
       if (err instanceof ApiClientError) {
         if (err.status === 412) {
-          // Stale Revision Conflict
-          setConflictState({
-            message:
-              "Xung đột sửa đổi (HTTP 412 Stale Revision): Bản nháp đã được cập nhật bởi một phiên làm việc khác. Thay đổi chưa lưu của bạn được giữ lại nguyên vẹn.",
-            serverRevision: (activeDraft.revision || 1) + 1,
-          });
-          return;
-        }
-        if (err.status === 409) {
-          setSaveError("Bản nháp này đã bị lưu trữ (archived) hoặc xảy ra xung đột tài nguyên.");
-          return;
-        }
-        if (err.status === 403) {
-          setSaveError("Từ chối truy cập: Bạn không có quyền chỉnh sửa Tác tử này.");
+          clearPendingPublishIntent(targetActorId, workspaceId, targetAgentId);
+          setPublishMessage(
+            "Bản nháp đã bị thay đổi trước khi xuất bản. Vui lòng đóng hộp thoại và tải lại trang."
+          );
           return;
         }
         if (err.status === 422) {
-          const detail = typeof err.body === "object" && err.body !== null && "detail" in err.body
-            ? (err.body as { detail: { message?: string } }).detail?.message
-            : undefined;
-          setSaveError(`Cấu trúc spec không hợp lệ: ${detail || "Lỗi kiểm tra tính hợp lệ của schema."}`);
+          clearPendingPublishIntent(targetActorId, workspaceId, targetAgentId);
+          setPublishMessage(
+            "Tác tử chưa sẵn sàng xuất bản: phụ thuộc hoặc cấu hình không hợp lệ. Vui lòng kiểm tra lại chẩn đoán."
+          );
           return;
         }
-        setSaveError(err.message || "Lỗi máy chủ khi cập nhật bản nháp.");
+        if (err.status === 403) {
+          clearPendingPublishIntent(targetActorId, workspaceId, targetAgentId);
+          setPublishMessage("Từ chối truy cập: Bạn không có quyền xuất bản Tác tử.");
+          return;
+        }
+        if (err.status === 409) {
+          setPublishMessage(
+            "Xung đột xuất bản: Khóa idempotency đã được dùng với yêu cầu khác hoặc đang được xử lý đồng thời."
+          );
+          return;
+        }
+        // Other API errors: keep intent in storage as unknown for recovery
+        savePendingPublishIntent({
+          actorId: targetActorId,
+          workspaceId,
+          agentId: targetAgentId,
+          operationKey: targetKey,
+          expectedRevision: targetRevision,
+          status: "unknown",
+          createdAt: Date.now(),
+        });
+        setPublishMessage(err.message || "Dịch vụ xuất bản tạm thời không khả dụng.");
       } else {
-        setSaveError(err instanceof Error ? err.message : "Đã xảy ra lỗi không xác định.");
-      }
-    } finally {
-      if (scope.isCurrent()) setIsSaving(false);
-    }
-  };
-
-  // Submit Publish Agent (Fail-closed in 04-A per ADR-022)
-  const handleConfirmPublish = async () => {
-    if (!publishTargetAgent) return;
-    setIsPublishing(true);
-    setPublishMessage(null);
-
-    const scope = requestScope.current.capture();
-    try {
-      await defaultApiClient.publishAgent(workspaceId, publishTargetAgent.agent_id, scope.signal);
-      if (!scope.isCurrent()) return;
-      showToast(`Đã xuất bản Tác tử "${publishTargetAgent.display_name}".`);
-      setPublishTargetAgent(null);
-    } catch (err: unknown) {
-      if (!scope.isCurrent()) return;
-      if (err instanceof ApiClientError && err.status === 503) {
+        // Network timeout / lost connection: PRESERVE intent (P0-03)
+        savePendingPublishIntent({
+          actorId: targetActorId,
+          workspaceId,
+          agentId: targetAgentId,
+          operationKey: targetKey,
+          expectedRevision: targetRevision,
+          status: "unknown",
+          createdAt: Date.now(),
+        });
         setPublishMessage(
-          "Tính năng xuất bản phiên bản bất biến (Publish) bị vô hiệu hóa an toàn trong Bước 04-A và sẽ được kích hoạt tại Bước 04-C theo thiết kế ADR-022. Bản nháp không bị thay đổi."
+          "Không thể xác nhận phản hồi từ máy chủ. Yêu cầu xuất bản đã được lưu để bạn có thể tiếp tục kiểm tra và khôi phục (Verify & Recover)."
         );
-        return;
       }
-      if (err instanceof ApiClientError && err.status === 403) {
-        setPublishMessage("Từ chối truy cập: Bạn không có quyền xuất bản Tác tử.");
-        return;
-      }
-      setPublishMessage(err instanceof Error ? err.message : "Dịch vụ xuất bản tạm thời không khả dụng.");
     } finally {
-      if (scope.isCurrent()) setIsPublishing(false);
+      if (workspaceSignal.isCurrent() && publishOp.isCurrent()) {
+        setIsPublishing(false);
+      }
     }
   };
 
-  // Filtered & Paginated items
-  const filteredAgents = useMemo(() => {
-    return agents.filter((item) => {
-      const matchQuery =
-        item.display_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        item.slug.toLowerCase().includes(searchQuery.toLowerCase());
+  // ========================================================
+  // VERSION HISTORY & PROMOTION HANDLERS (04-D, P1-01)
+  // Required by agent-lifecycle-handlers.test.ts
+  // ========================================================
+  const fetchAgentHistory = useCallback(
+    async (agentId: string, cursor?: string): Promise<boolean> => {
+      if (editorAgentId.current !== agentId) return false;
+      historyScope.current.reset();
+      const request = historyScope.current.capture();
+      const editor = editorScope.current.capture();
+      const scope = requestScope.current.capture();
+      const isCurrent = () =>
+        scope.isCurrent() &&
+        editor.isCurrent() &&
+        request.isCurrent() &&
+        editorAgentId.current === agentId;
 
-      const matchStatus =
-        statusFilter === "ALL" ||
-        (statusFilter === "DRAFT" && !item.archived_at) ||
-        (statusFilter === "ARCHIVED" && Boolean(item.archived_at));
+      if (cursor) {
+        setIsLoadingHistoryMore(true);
+      } else {
+        setIsLoadingHistory(true);
+        setIsLoadingHistoryMore(false);
+        setHistoryAgentId(null);
+        setHistoryVersions([]);
+        setHistoryPublications([]);
+        setHistoryNextCursor(null);
+      }
+      setHistoryError(null);
 
-      return matchQuery && matchStatus;
-    });
-  }, [agents, searchQuery, statusFilter]);
+      try {
+        const [versionsRes, publicationsRes] = await Promise.all([
+          defaultApiClient.listAgentVersions(workspaceId, agentId, {
+            cursor,
+            signal: request.signal,
+          }),
+          defaultApiClient.listAgentPublications(workspaceId, agentId, request.signal),
+        ]);
+        if (!isCurrent()) return false;
+        if (
+          versionsRes.items.some((item) => item.agent_id !== agentId) ||
+          publicationsRes.items.some((item) => item.agent_id !== agentId)
+        ) {
+          throw new Error("History response does not match the selected Agent");
+        }
 
-  const totalPages = Math.max(1, Math.ceil(filteredAgents.length / itemsPerPage));
-  const paginatedAgents = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filteredAgents.slice(start, start + itemsPerPage);
-  }, [filteredAgents, currentPage, itemsPerPage]);
+        setHistoryVersions((previous) => {
+          const versions = cursor ? [...previous, ...versionsRes.items] : versionsRes.items;
+          return Array.from(new Map(versions.map((item) => [item.agent_version_id, item])).values());
+        });
+        setHistoryPublications(publicationsRes.items);
+        setHistoryNextCursor(versionsRes.next_cursor);
+        setHistoryAgentId(agentId);
+        return true;
+      } catch (err: unknown) {
+        if (!isCurrent()) return false;
+        if (err instanceof ApiClientError) {
+          setHistoryError(err.message || "Không thể tải lịch sử phiên bản của tác tử.");
+        } else {
+          setHistoryError("Đã xảy ra lỗi không xác định khi tải lịch sử phiên bản.");
+        }
+        return false;
+      } finally {
+        if (isCurrent()) {
+          setIsLoadingHistory(false);
+          setIsLoadingHistoryMore(false);
+        }
+      }
+    },
+    [workspaceId]
+  );
 
-  // Format date helper
-  const formatDate = (isoString?: string | null) => {
-    if (!isoString) return "—";
+  const handleOpenPromoteModal = (version: AgentVersionMetadata) => {
+    if (
+      !activeDraft ||
+      version.agent_id !== activeDraft.agent_id ||
+      historyAgentId !== activeDraft.agent_id
+    )
+      return;
+    promoteScope.current.invalidate();
+    promoteDialogScope.current.reset();
+    setIsPromoting(false);
+    setPromoteTargetVersion(version);
+    setPromoteEnvironment("development");
+    setPromoteError(null);
+    setPromoteConflict(false);
+    setIsPromoteModalOpen(true);
+    void fetchAgentHistory(activeDraft.agent_id);
+  };
+
+  const handleClosePromoteModal = () => {
+    promoteScope.current.invalidate();
+    promoteDialogScope.current.invalidate();
+    setIsPromoting(false);
+    setIsPromoteModalOpen(false);
+    setPromoteTargetVersion(null);
+    setPromoteError(null);
+    setPromoteConflict(false);
+    if (isPromoting) {
+      showToast(
+        "Kết quả điều chuyển chưa được xác nhận. Khi mở lại, hệ thống sẽ tải trạng thái môi trường từ máy chủ.",
+        "info"
+      );
+    }
+  };
+
+  const handleReloadPromotionState = async () => {
+    if (!activeDraft) return;
+    const dialog = promoteDialogScope.current.capture();
+    const editor = editorScope.current.capture();
+    const scope = requestScope.current.capture();
+    const loaded = await fetchAgentHistory(activeDraft.agent_id);
+    if (loaded && scope.isCurrent() && editor.isCurrent() && dialog.isCurrent()) {
+      setPromoteError(null);
+      setPromoteConflict(false);
+    }
+  };
+
+  const handleConfirmPromote = async () => {
+    if (
+      !promoteTargetVersion ||
+      !activeDraft ||
+      isPromoting ||
+      promoteConflict ||
+      isLoadingHistory ||
+      isLoadingHistoryMore ||
+      historyError ||
+      historyAgentId !== activeDraft.agent_id ||
+      promoteTargetVersion.agent_id !== activeDraft.agent_id
+    )
+      return;
+
+    const targetVersion = promoteTargetVersion;
+    const agentId = activeDraft.agent_id;
+    const environment = promoteEnvironment;
+
+    const currentPub = historyPublications.find((p) => p.environment === environment);
+    const expectedRevision = currentPub ? currentPub.revision : 0;
+
+    const promoOp = promoteScope.current.begin(
+      workspaceId,
+      agentId,
+      environment,
+      expectedRevision
+    );
+
+    setIsPromoting(true);
+    setPromoteError(null);
+    setPromoteConflict(false);
+
+    const workspaceSignal = requestScope.current.capture();
+    const editor = editorScope.current.capture();
+
     try {
-      const d = new Date(isoString);
-      return d.toLocaleDateString("vi-VN", {
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    } catch {
-      return isoString;
+      const res = await defaultApiClient.promoteAgentVersion(
+        workspaceId,
+        agentId,
+        {
+          agent_version_id: targetVersion.agent_version_id,
+          environment,
+          expected_publication_revision: expectedRevision,
+        },
+        promoOp.signal
+      );
+
+      if (!workspaceSignal.isCurrent() || !editor.isCurrent() || !promoOp.isCurrent()) return;
+      if (!promoOp.matchesResponse(res)) return;
+
+      setIsPromoting(false);
+      setIsPromoteModalOpen(false);
+
+      if (res.is_noop) {
+        showToast(
+          `Phiên bản v${res.version} đã được điều chuyển sẵn tới môi trường ${environment} (No-op).`,
+          "info"
+        );
+      } else if (currentPub && res.version < currentPub.version) {
+        showToast(
+          `Đã quay lui môi trường ${environment} về phiên bản v${res.version}.`,
+          "success"
+        );
+      } else {
+        showToast(
+          `Đã điều chuyển phiên bản v${res.version} lên môi trường ${environment}.`,
+          "success"
+        );
+      }
+
+      await fetchAgentHistory(agentId);
+      await fetchAgents();
+    } catch (err: unknown) {
+      if (!workspaceSignal.isCurrent() || !editor.isCurrent() || !promoOp.isCurrent()) return;
+      setIsPromoting(false);
+
+      if (err instanceof ApiClientError) {
+        if (err.status === 412) {
+          setPromoteConflict(true);
+          setPromoteError(
+            "Xung đột phiên bản: Môi trường này vừa được cập nhật bởi một phiên làm việc khác (Revision mismatch). Vui lòng nhấn 'Tải lại' để xem con trỏ mới nhất."
+          );
+          return;
+        }
+        if (err.status === 403) {
+          setPromoteError(
+            "Từ chối truy cập: Chỉ Owner hoặc Admin của Không gian làm việc mới có quyền điều chuyển phiên bản (agent:promote)."
+          );
+          return;
+        }
+        if (err.status === 422) {
+          setPromoteError(
+            `Không thể điều chuyển: ${err.message || "Phiên bản chưa được niêm phong hoặc phụ thuộc không hợp lệ."}`
+          );
+          return;
+        }
+        setPromoteConflict(true);
+        setPromoteError(
+          "Chưa xác nhận được kết quả điều chuyển. Hãy tải lại trạng thái môi trường trước khi xác nhận một thao tác mới."
+        );
+      } else {
+        setPromoteConflict(true);
+        setPromoteError(
+          "Chưa xác nhận được kết quả điều chuyển. Hãy tải lại trạng thái môi trường trước khi xác nhận một thao tác mới."
+        );
+      }
+    } finally {
+      if (workspaceSignal.isCurrent() && editor.isCurrent() && promoOp.isCurrent()) {
+        setIsPromoting(false);
+      }
     }
   };
 
-  // Table Columns Definition
-  const columns: Column<AgentDraftMetadata>[] = [
-    {
-      key: "display_name",
-      header: "AI Agent & Slug",
-      width: "40%",
-      render: (item) => (
-        <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "13px" }}>
-              {item.display_name}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: "11px",
-                color: "var(--text-muted)",
-                backgroundColor: "var(--bg-subtle)",
-                padding: "1px 5px",
-                borderRadius: "var(--radius-xs)",
-              }}
-            >
-              {item.slug}
-            </span>
-          </div>
-        </div>
-      ),
-    },
-    {
-      key: "revision",
-      header: "Revision",
-      width: "16%",
-      render: (item) => (
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "12px",
-              fontWeight: 600,
-              color: "var(--color-primary)",
-              backgroundColor: "var(--color-primary-subtle)",
-              padding: "2px 6px",
-              borderRadius: "var(--radius-xs)",
-              border: "1px solid var(--color-primary-border)",
-            }}
-          >
-            rev {item.revision}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      width: "16%",
-      render: (item) => (
-        <StatusBadge status={item.archived_at ? "ARCHIVED" : "DRAFT"} />
-      ),
-    },
-    {
-      key: "created_at",
-      header: "Created At",
-      width: "16%",
-      render: (item) => (
-        <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-          {formatDate(item.created_at)}
-        </span>
-      ),
-    },
-    {
-      key: "actions",
-      header: "Actions",
-      width: "12%",
-      align: "right",
-      render: (item) => (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "6px" }}>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleOpenEditor(item);
-            }}
-            title="Edit Agent Draft"
-          >
-            Chỉnh sửa
-          </Button>
-          <Button
-            variant="copper"
-            size="sm"
-            onClick={(e) => {
-              e.stopPropagation();
-              setPublishMessage(null);
-              setPublishTargetAgent(item);
-            }}
-            title="Publish (Disabled in 04-A)"
-            style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}
-          >
-            <BrandIcon name="action-publish" size={13} color="currentColor" />
-            Publish
-          </Button>
-        </div>
-      ),
-    },
-  ];
+  const handleSetPromoteEnvironment = (environment: AgentEnvironment) => {
+    setPromoteEnvironment(environment);
+    // An unresolved command stays unresolved until authoritative reconciliation.
+    if (!promoteConflict) setPromoteError(null);
+  };
 
-  const filterOptions = [
-    { value: "ALL", label: "Tất cả trạng thái" },
-    { value: "DRAFT", label: "Bản nháp (Draft)" },
-    { value: "ARCHIVED", label: "Đã lưu trữ (Archived)" },
-  ];
+  // Keyboard shortcut listener (Accessibility)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isInputFocused =
+        activeEl &&
+        (activeEl.tagName === "INPUT" ||
+          activeEl.tagName === "TEXTAREA" ||
+          activeEl.tagName === "SELECT" ||
+          activeEl.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchFieldRef.current?.focus();
+        searchFieldRef.current?.select();
+        return;
+      }
+
+      if (
+        e.key === "/" &&
+        !isInputFocused &&
+        !isCreateModalOpen &&
+        !isEditorOpen &&
+        !publishTargetAgent &&
+        !isPromoteModalOpen
+      ) {
+        e.preventDefault();
+        searchFieldRef.current?.focus();
+        searchFieldRef.current?.select();
+        return;
+      }
+
+      if (
+        !isCreateModalOpen &&
+        !isEditorOpen &&
+        !publishTargetAgent &&
+        !isPromoteModalOpen &&
+        (((e.key === "c" || e.key === "C") &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !isInputFocused) ||
+          (e.altKey && e.key.toLowerCase() === "n"))
+      ) {
+        e.preventDefault();
+        handleOpenCreateModal();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [
+    isCreateModalOpen,
+    isEditorOpen,
+    publishTargetAgent,
+    isPromoteModalOpen,
+    handleOpenCreateModal,
+  ]);
 
   return (
-    <div>
+    <div className={styles.agentsPageRoot}>
       {/* Toast Notification */}
-      {toastMessage && (
+      {toast && (
         <div
-          role="status"
-          style={{
-            position: "fixed",
-            bottom: "24px",
-            right: "24px",
-            backgroundColor: "var(--bg-surface-elevated)",
-            color: "var(--text-primary)",
-            padding: "12px 18px",
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--border-strong)",
-            boxShadow: "var(--shadow-lg)",
-            fontSize: "13px",
-            display: "flex",
-            alignItems: "center",
-            gap: "10px",
-            zIndex: 1000,
-          }}
+          role={toast.type === "error" ? "alert" : "status"}
+          aria-live={toast.type === "error" ? "assertive" : "polite"}
+          aria-atomic="true"
+          className={`agent-toast-card toast-${toast.type}`}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success)" strokeWidth="2.5">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          <span>{toastMessage}</span>
+          <div className="toast-content-wrapper">
+            <span className="toast-text">{toast.message}</span>
+            <button
+              type="button"
+              className="toast-dismiss-button"
+              onClick={dismissToast}
+              aria-label="Đóng thông báo"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="toast-progress-bar" />
         </div>
       )}
 
@@ -710,14 +1061,22 @@ export default function AgentsPage({
         }
         actions={
           <Button
+            ref={createButtonRef}
             variant="primary"
             size="md"
-            onClick={() => {
-              setCreateError("");
-              setIsCreateModalOpen(true);
-            }}
+            onClick={handleOpenCreateModal}
+            aria-label="Khởi tạo bản nháp Tác tử AI mới (Nhấn C hoặc Alt+N)"
+            title="Khởi tạo bản nháp Tác tử AI mới (Phím tắt: C hoặc Alt+N)"
             leftIcon={
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <svg
+                aria-hidden="true"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+              >
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
@@ -728,7 +1087,7 @@ export default function AgentsPage({
         }
       />
 
-      {/* Stale Banner when state is stale */}
+      {/* Stale Banner */}
       {viewState === "stale" && (
         <StaleBanner
           message="Dữ liệu hiển thị có thể chưa đồng bộ do có sửa đổi phiên bản mới hơn trên máy chủ khác."
@@ -737,513 +1096,119 @@ export default function AgentsPage({
         />
       )}
 
-      {/* Filter and Search Bar */}
-      {viewState !== "error" && viewState !== "forbidden" && (
-        <FilterBar
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          selectedFilter={statusFilter}
-          onFilterChange={setStatusFilter}
-          filterOptions={filterOptions}
-          onRefresh={fetchAgents}
-          isRefreshing={isRefreshing}
-          totalCount={agents.length}
-          filteredCount={filteredAgents.length}
-        />
-      )}
+      {/* Agent List Component */}
+      <AgentList
+        agents={agents}
+        filteredAgents={filteredAgents}
+        viewState={viewState}
+        viewMode={viewMode}
+        onSetViewMode={setViewMode}
+        searchQuery={searchQuery}
+        onSetSearchQuery={setSearchQuery}
+        statusFilter={statusFilter}
+        onSetStatusFilter={setStatusFilter}
+        onResetFilters={handleResetFilters}
+        onRefresh={fetchAgents}
+        isRefreshing={isRefreshing}
+        currentPage={currentPage}
+        onPageChange={setCurrentPage}
+        totalPages={totalPages}
+        itemsPerPage={itemsPerPage}
+        nextCursor={nextCursor}
+        isLoadingMore={isLoadingMore}
+        onLoadMore={handleLoadMoreAgents}
+        onOpenEditor={handleOpenEditor}
+        onOpenPublish={handleOpenPublishModal}
+        onOpenCreate={handleOpenCreateModal}
+        onApplyTemplate={handleApplyTemplate}
+        searchFieldRef={searchFieldRef}
+        errorMessage={errorMessage}
+        errorStatus={errorStatus}
+        requestId={requestId}
+        onContactAdmin={() =>
+          showToast(
+            "Vui lòng liên hệ với Quản trị viên (Admin hoặc Owner) của Workspace để được cấp vai trò 'agent:read'.",
+            "info"
+          )
+        }
+      />
 
-      {/* 6 UI States Rendering */}
-      {viewState === "loading" && <LoadingSkeleton rows={5} columns={5} />}
-
-      {viewState === "error" && (
-        <ErrorState
-          title="Không thể tải danh sách Tác tử AI"
-          message={errorMessage || "Đã xảy ra lỗi khi kết nối tới máy chủ Control Plane."}
-          statusCode={errorStatus}
-          requestId={requestId}
-          onRetry={fetchAgents}
-          isRetrying={isRefreshing}
-        />
-      )}
-
-      {viewState === "forbidden" && (
-        <ForbiddenState
-          title="Truy cập bị từ chối"
-          message="Tài khoản của bạn không có vai trò 'agent:read' trong Không gian làm việc này."
-          onGoBack={() => setViewState("ready")}
-          onContactAdmin={() => showToast("Đã gửi thông báo yêu cầu cấp quyền đến Quản trị viên.")}
-        />
-      )}
-
-      {viewState === "empty" && (
-        <EmptyState
-          title="Chưa có Tác tử AI nào trong không gian này"
-          description="Bắt đầu bằng cách tạo bản nháp tác tử đầu tiên với chỉ lệnh persona và cấu hình tài nguyên."
-          actionLabel="+ Tạo Agent đầu tiên"
-          onAction={() => {
-            setCreateError("");
-            setIsCreateModalOpen(true);
-          }}
-        />
-      )}
-
-      {(viewState === "ready" || viewState === "stale") && (
-        <>
-          <div className="agent-desktop-table">
-            <DataTable
-              columns={columns}
-              data={paginatedAgents}
-              keyExtractor={(item) => item.agent_id}
-              caption="Danh sách Tác tử AI trong không gian làm việc"
-              emptyState={
-                <EmptyState
-                  title="Không tìm thấy tác tử phù hợp"
-                  description={`Không có tác tử nào khớp với từ khóa "${searchQuery}". Xóa bộ lọc tìm kiếm để xem tất cả.`}
-                  actionLabel="Xóa bộ lọc"
-                  onAction={() => {
-                    setSearchQuery("");
-                    setStatusFilter("ALL");
-                  }}
-                />
-              }
-            />
-          </div>
-
-          <Pagination
-            currentPage={currentPage}
-            totalPages={totalPages}
-            onPageChange={setCurrentPage}
-            totalItems={filteredAgents.length}
-            itemsPerPage={itemsPerPage}
-          />
-          {nextCursor && (
-            <Button disabled={isLoadingMore} onClick={loadMoreAgents}>
-              {isLoadingMore ? "Đang tải…" : "Tải thêm tác tử"}
-            </Button>
-          )}
-        </>
-      )}
-
-      {/* Modal: Create Agent Draft */}
-      <Modal
+      {/* Create Agent Modal */}
+      <AgentCreateModal
+        key={`create-${workspaceId}:${actorId}`}
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
-        title="Tạo Bản nháp Tác tử AI (Create Agent Draft)"
-        description="Khởi tạo bản nháp với cấu hình AgentSpec đầy đủ. Ràng buộc mô hình và công cụ sẽ được xác thực tại Bước 04-B."
-        maxWidth="540px"
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              size="md"
-              type="button"
-              onClick={() => setIsCreateModalOpen(false)}
-              disabled={isSubmitting}
-            >
-              Hủy
-            </Button>
-            <Button
-              variant="primary"
-              size="md"
-              type="submit"
-              form="create-agent-form"
-              isLoading={isSubmitting}
-            >
-              Tạo bản nháp
-            </Button>
-          </>
-        }
-      >
-        <form
-          id="create-agent-form"
-          onSubmit={handleCreateAgent}
-          style={{ display: "flex", flexDirection: "column", gap: "14px" }}
-        >
-          <Input
-            label="Tên hiển thị Agent (Display Name)"
-            placeholder="Ví dụ: Trợ lý Soạn thảo Báo giá"
-            value={newAgentName}
-            onChange={(e) => handleNameChange(e.target.value)}
-            required
-            autoFocus
-          />
+        onSubmit={handleSubmitCreateAgent}
+        isSubmitting={isSubmittingCreate}
+        errorMessage={createError}
+        onClearError={() => setCreateError("")}
+        initialTemplate={selectedTemplate}
+      />
 
-          <Input
-            label="Định danh Kỹ thuật (Technical Slug)"
-            placeholder="tro-ly-soan-thao-bao-gia"
-            value={newAgentSlug}
-            onChange={(e) => setNewAgentSlug(e.target.value)}
-            helperText="Chữ thường không dấu, số và gạch ngang (bất biến sau khi tạo)."
-            required
-          />
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label
-              htmlFor="agent-instructions"
-              style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}
-            >
-              Chỉ lệnh Persona (Instructions) *
-            </label>
-            <textarea
-              id="agent-instructions"
-              rows={4}
-              placeholder="Nhập chỉ lệnh hoạt động, mục tiêu và ranh giới an toàn cho tác tử..."
-              value={newInstructions}
-              onChange={(e) => setNewInstructions(e.target.value)}
-              required
-              style={{
-                width: "100%",
-                padding: "8px 12px",
-                fontSize: "13px",
-                backgroundColor: "var(--bg-surface)",
-                color: "var(--text-primary)",
-                border: "1px solid var(--border-strong)",
-                borderRadius: "var(--radius-sm)",
-                outline: "none",
-                fontFamily: "inherit",
-                resize: "vertical",
-              }}
-            />
-          </div>
-
-          <Input
-            label="Tham chiếu Mô hình (Model Reference)"
-            placeholder="approved-general@2"
-            value={newModelRef}
-            onChange={(e) => setNewModelRef(e.target.value)}
-            helperText="Tham chiếu định danh cấu hình Model (sẽ được đối soát ở Bước 04-B)."
-            required
-          />
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <label htmlFor="agent-mode" style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}>
-                Chế độ thực thi (Mode)
-              </label>
-              <select
-                id="agent-mode"
-                value={newMode}
-                onChange={(e) => setNewMode(e.target.value as "fixed_plan" | "planner_based" | "react")}
-                style={{
-                  padding: "8px 12px",
-                  fontSize: "13px",
-                  backgroundColor: "var(--bg-surface)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-strong)",
-                  borderRadius: "var(--radius-sm)",
-                  outline: "none",
-                }}
-              >
-                <option value="fixed_plan">fixed_plan</option>
-                <option value="planner_based">planner_based</option>
-                <option value="react">react</option>
-              </select>
-            </div>
-
-            <Input
-              label="Số bước tối đa (Max Steps)"
-              type="number"
-              min={1}
-              max={50}
-              value={newMaxSteps}
-              onChange={(e) => setNewMaxSteps(Number(e.target.value))}
-              required
-            />
-          </div>
-
-          {createError && (
-            <div
-              style={{
-                padding: "8px 12px",
-                borderRadius: "var(--radius-xs)",
-                backgroundColor: "var(--color-danger-bg)",
-                border: "1px solid var(--color-danger-border)",
-                color: "var(--color-danger)",
-                fontSize: "12px",
-              }}
-            >
-              {createError}
-            </div>
-          )}
-        </form>
-      </Modal>
-
-      {/* Modal: Edit Agent Draft (Optimistic Concurrency Control) */}
-      <Modal
+      {/* Agent Studio Workshop Modal */}
+      <AgentWorkshop
+        key={`workshop-${workspaceId}:${actorId}`}
         isOpen={isEditorOpen}
-        onClose={() => {
-          setIsEditorOpen(false);
-          setConflictState(null);
-          setSaveError(null);
-        }}
-        title={`Chỉnh sửa Bản nháp: ${activeDraft?.display_name || ""}`}
-        description={`Định danh: ${activeDraft?.slug} | Phiên bản sửa đổi hiện tại: revision ${activeDraft?.revision}`}
-        maxWidth="600px"
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              size="md"
-              type="button"
-              onClick={() => {
-                setIsEditorOpen(false);
-                setConflictState(null);
-                setSaveError(null);
-              }}
-              disabled={isSaving}
-            >
-              Đóng
-            </Button>
-            <Button
-              variant="primary"
-              size="md"
-              type="submit"
-              form="edit-agent-form"
-              isLoading={isSaving}
-            >
-              Lưu thay đổi (Save Spec)
-            </Button>
-          </>
+        onClose={handleCloseEditor}
+        activeDraft={activeDraft}
+        workspaceId={workspaceId}
+        onDraftSaved={handleDraftSaved}
+        historyVersions={historyVersions}
+        historyPublications={historyPublications}
+        isLoadingHistory={isLoadingHistory}
+        isLoadingHistoryMore={isLoadingHistoryMore}
+        historyError={historyError}
+        historyNextCursor={historyNextCursor}
+        onRefreshHistory={() => activeDraft && fetchAgentHistory(activeDraft.agent_id)}
+        onLoadMoreHistory={() =>
+          activeDraft && fetchAgentHistory(activeDraft.agent_id, historyNextCursor || undefined)
         }
-      >
-        <form
-          id="edit-agent-form"
-          onSubmit={handleSaveDraftSpec}
-          style={{ display: "flex", flexDirection: "column", gap: "14px" }}
-        >
-          {/* Conflict 412 Banner */}
-          {conflictState && (
-            <div
-              style={{
-                padding: "12px 14px",
-                borderRadius: "var(--radius-sm)",
-                backgroundColor: "var(--color-warning-bg)",
-                border: "1px solid var(--color-warning-border)",
-                color: "var(--text-primary)",
-                fontSize: "12px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-              }}
-            >
-              <div style={{ fontWeight: 600, color: "var(--color-warning)" }}>
-                ⚠️ {conflictState.message}
-              </div>
-              <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  onClick={handleReloadLatestDraft}
-                >
-                  Tải lại bản mới nhất từ máy chủ
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  type="button"
-                  onClick={() => setConflictState(null)}
-                >
-                  Giữ lại thay đổi hiện tại để sao chép
-                </Button>
-              </div>
-            </div>
-          )}
+        onOpenPromoteModal={handleOpenPromoteModal}
+        onShowToast={showToast}
+        onCopyText={handleCopyText}
+        copiedKey={copiedKey}
+      />
 
-          {saveError && (
-            <div
-              style={{
-                padding: "8px 12px",
-                borderRadius: "var(--radius-xs)",
-                backgroundColor: "var(--color-danger-bg)",
-                border: "1px solid var(--color-danger-border)",
-                color: "var(--color-danger)",
-                fontSize: "12px",
-              }}
-            >
-              {saveError}
-            </div>
-          )}
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-            <Input
-              label="Technical Slug (Bất biến)"
-              value={activeDraft?.slug || ""}
-              disabled
-              helperText="Slug không thể thay đổi sau khi tạo."
-            />
-            <Input
-              label="Phiên bản sửa đổi (Revision)"
-              value={`rev ${activeDraft?.revision || 1}`}
-              disabled
-              helperText="Được quản lý tự động bởi CAS."
-            />
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label
-              htmlFor="edit-instructions"
-              style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}
-            >
-              Chỉ lệnh Persona (Persona Instructions) *
-            </label>
-            <textarea
-              id="edit-instructions"
-              rows={5}
-              value={editorInstructions}
-              onChange={(e) => setEditorInstructions(e.target.value)}
-              required
-              style={{
-                width: "100%",
-                padding: "8px 12px",
-                fontSize: "13px",
-                backgroundColor: "var(--bg-surface)",
-                color: "var(--text-primary)",
-                border: "1px solid var(--border-strong)",
-                borderRadius: "var(--radius-sm)",
-                outline: "none",
-                fontFamily: "inherit",
-                resize: "vertical",
-              }}
-            />
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-            <Input
-              label="Tham chiếu Mô hình (Model Reference)"
-              value={editorModelRef}
-              onChange={(e) => setEditorModelRef(e.target.value)}
-              required
-            />
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <label htmlFor="edit-mode" style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}>
-                Chế độ thực thi (Mode)
-              </label>
-              <select
-                id="edit-mode"
-                value={editorMode}
-                onChange={(e) => setEditorMode(e.target.value as "fixed_plan" | "planner_based" | "react")}
-                style={{
-                  padding: "8px 12px",
-                  fontSize: "13px",
-                  backgroundColor: "var(--bg-surface)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-strong)",
-                  borderRadius: "var(--radius-sm)",
-                  outline: "none",
-                }}
-              >
-                <option value="fixed_plan">fixed_plan</option>
-                <option value="planner_based">planner_based</option>
-                <option value="react">react</option>
-              </select>
-            </div>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
-            <Input
-              label="Max Steps"
-              type="number"
-              min={1}
-              max={50}
-              value={editorMaxSteps}
-              onChange={(e) => setEditorMaxSteps(Number(e.target.value))}
-              required
-            />
-            <Input
-              label="Max Wall Time (s)"
-              type="number"
-              min={1}
-              value={editorMaxWallTime}
-              onChange={(e) => setEditorMaxWallTime(Number(e.target.value))}
-              required
-            />
-            <Input
-              label="Max Tokens"
-              type="number"
-              min={1}
-              value={editorMaxTokens}
-              onChange={(e) => setEditorMaxTokens(Number(e.target.value))}
-              required
-            />
-          </div>
-        </form>
-      </Modal>
-
-      {/* Modal: Publish Notice (Fail-closed in 04-A) */}
-      <Modal
+      {/* Publish Release Modal */}
+      <AgentPublishModal
+        targetAgent={publishTargetAgent}
         isOpen={Boolean(publishTargetAgent)}
-        onClose={() => {
-          setPublishTargetAgent(null);
-          setPublishMessage(null);
+        onClose={handleClosePublishModal}
+        idempotencyKey={publishIdempotencyKey}
+        expectedRevision={publishRevision}
+        isPublishing={isPublishing}
+        publishReceipt={publishReceipt}
+        publishMessage={publishMessage}
+        isRecoveredIntent={isRecoveredIntent}
+        pendingCreatedAt={pendingCreatedAt}
+        onConfirmPublish={handleConfirmPublish}
+        onCreateFreshIntent={handleCreateFreshIntent}
+        onCopyText={handleCopyText}
+        copiedKey={copiedKey}
+        onGoToOverview={() => {
+          handleClosePublishModal();
+          router.push(`/w/${workspaceId}/overview`);
         }}
-        title="Xuất bản Phiên bản Bất biến (Publish)"
-        description={`Tác tử: ${publishTargetAgent?.display_name} (${publishTargetAgent?.slug})`}
-        maxWidth="500px"
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              size="md"
-              type="button"
-              onClick={() => {
-                setPublishTargetAgent(null);
-                setPublishMessage(null);
-              }}
-            >
-              Đóng
-            </Button>
-            <Button
-              variant="copper"
-              size="md"
-              type="button"
-              onClick={handleConfirmPublish}
-              isLoading={isPublishing}
-            >
-              Thực hiện xuất bản
-            </Button>
-          </>
-        }
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: "12px", fontSize: "13px", color: "var(--text-secondary)" }}>
-          <p style={{ margin: 0 }}>
-            Theo quyết định kiến trúc <strong>ADR-022</strong> và <strong>D04-02</strong>, việc công bố phiên bản bất biến yêu cầu cơ chế khóa liên kết và sổ cái biên nhận giao dịch (sẽ được triển khai tại <strong>Bước 04-C</strong>).
-          </p>
-          <div
-            style={{
-              padding: "10px 12px",
-              backgroundColor: "var(--bg-subtle)",
-              borderRadius: "var(--radius-xs)",
-              border: "1px solid var(--border-subtle)",
-              fontFamily: "var(--font-mono)",
-              fontSize: "12px",
-              color: "var(--text-muted)",
-            }}
-          >
-            Trạng thái hiện tại: STEP-04A Draft CRUD ONLY. Publish bị vô hiệu hóa an toàn (fail-closed, HTTP 503 capability_unavailable).
-          </div>
-          {publishMessage && (
-            <div
-              style={{
-                padding: "8px 12px",
-                borderRadius: "var(--radius-xs)",
-                backgroundColor: "var(--color-warning-bg)",
-                border: "1px solid var(--color-warning-border)",
-                color: "var(--color-warning)",
-                fontSize: "12px",
-              }}
-            >
-              {publishMessage}
-            </div>
-          )}
-        </div>
-      </Modal>
+      />
 
-      <style>{`
-        .agent-desktop-table {
-          display: block;
-        }
-      `}</style>
+      {/* Promote / Rollback Modal */}
+      <AgentPromoteModal
+        isOpen={isPromoteModalOpen && Boolean(promoteTargetVersion)}
+        onClose={handleClosePromoteModal}
+        targetVersion={promoteTargetVersion}
+        agentDisplayName={activeDraft?.display_name || ""}
+        publications={historyPublications}
+        promoteEnvironment={promoteEnvironment}
+        onSetEnvironment={handleSetPromoteEnvironment}
+        isPromoting={isPromoting}
+        promoteError={promoteError}
+        promoteConflict={promoteConflict}
+        onConfirmPromote={handleConfirmPromote}
+        onReloadPromotionState={handleReloadPromotionState}
+        isLoadingHistory={isLoadingHistory}
+        isLoadingHistoryMore={isLoadingHistoryMore}
+        historyError={historyError}
+      />
     </div>
   );
 }

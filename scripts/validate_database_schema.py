@@ -21,9 +21,11 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0004_identity_discovery_projection.sql",
     "0005_workspace_invitations.sql",
     "0006_invitation_acceptance_projection.sql",
+    "0007_agent_publish_receipts_and_binding_seals.sql",
 )
 
 APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
+APPROVED_STEP04C_DELTA_TABLES: Final[frozenset[str]] = frozenset({"catalog.agent_publish_receipts"})
 
 # Pin the reviewed authored program, not its database effects. Whitespace and
 # comments outside quoted bodies are ignored; PL/pgSQL bodies remain opaque.
@@ -38,6 +40,9 @@ REVIEWED_IDENTITY_PROJECTION_FINGERPRINT: Final[str] = (
 )
 REVIEWED_INVITATION_ACCEPT_PROJECTION_FINGERPRINT: Final[str] = (
     "e494e79970e1ad5f889de5ad6106707892ee80285c844eb9db9aaaddb529a8b8"
+)
+REVIEWED_AGENT_PUBLISH_RECEIPTS_FINGERPRINT: Final[str] = (
+    "19ebc65f674b09b2a9fde5d160f1fd4543a85905e4544a8f78e55e947aaaf434"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -94,7 +99,9 @@ def _sql_structure(sql: str) -> tuple[str, str]:
         if sql[pos] in "\"'":
             quote = sql[pos]
             escaped = (
-                quote == "'" and pos > 0 and sql[pos - 1] in "eE"
+                quote == "'"
+                and pos > 0
+                and sql[pos - 1] in "eE"
                 and (pos < 2 or not (sql[pos - 2].isalnum() or sql[pos - 2] == "_"))
             )
             pos += 1
@@ -129,6 +136,7 @@ def _sql_structure(sql: str) -> tuple[str, str]:
         tokens.append(sql[start:pos])
     fingerprint = hashlib.sha256("\x00".join(tokens).encode("utf-8")).hexdigest()
     return "".join(masked), fingerprint
+
 
 EXPECTED_SCHEMAS: Final[tuple[str, ...]] = (
     "iam",
@@ -323,9 +331,7 @@ def _validate_migration_chain(migrations_dir: Path) -> list[str]:
     for filename in sql_files:
         match = MIGRATION_FILENAME_RE.match(filename)
         if match is None:
-            errors.append(
-                f"Invalid migration filename '{filename}' (expected NNNN_snake_case.sql)"
-            )
+            errors.append(f"Invalid migration filename '{filename}' (expected NNNN_snake_case.sql)")
             continue
         seq = int(match.group(1))
         if seq in seen_numbers:
@@ -350,9 +356,7 @@ def _validate_migration_chain(migrations_dir: Path) -> list[str]:
 
     extra_files = sorted(set(sql_files) - set(EXPECTED_MIGRATIONS))
     if extra_files:
-        errors.append(
-            f"Unexpected unapproved migration files in baseline chain: {extra_files}"
-        )
+        errors.append(f"Unexpected unapproved migration files in baseline chain: {extra_files}")
 
     for filename in sql_files:
         file_path = migrations_dir / filename
@@ -367,9 +371,7 @@ def _validate_migration_chain(migrations_dir: Path) -> list[str]:
         except SqlLexingError as exc:
             errors.append(f"Migration file '{filename}': {exc}")
             continue
-        if not re.search(r"\bBEGIN\s*;", executable) or not re.search(
-            r"\bCOMMIT\s*;", executable
-        ):
+        if not re.search(r"\bBEGIN\s*;", executable) or not re.search(r"\bCOMMIT\s*;", executable):
             errors.append(
                 f"Migration file '{filename}' must wrap DDL inside explicit BEGIN; / COMMIT;"
             )
@@ -532,9 +534,7 @@ def _validate_baseline_sql(sql: str) -> list[str]:
                     )
 
             if target_cols not in target_table.unique_tuples:
-                errors.append(
-                    f"{name}: target {target_name} missing UNIQUE/PK {list(target_cols)}"
-                )
+                errors.append(f"{name}: target {target_name} missing UNIQUE/PK {list(target_cols)}")
 
     # Validate RLS declarations across all 55 non-global tables.
     expected_rls_tables = CANONICAL_TABLES - GLOBAL_TABLES
@@ -640,7 +640,9 @@ def _validate_identity_projection_sql(sql: str) -> list[str]:
         )
 
     for func_name in ("iam.get_user_workspaces", "iam.resolve_user_workspace_membership"):
-        if not re.search(rf"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)}\b", executable):
+        if not re.search(
+            rf"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)}\b", executable
+        ):
             errors.append(
                 f"0004_identity_discovery_projection.sql must declare function {func_name}"
             )
@@ -664,7 +666,10 @@ def _validate_identity_projection_sql(sql: str) -> list[str]:
             "0004_identity_discovery_projection.sql must declare SECURITY DEFINER on both projection functions"
         )
 
-    if len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable)) != 2:
+    if (
+        len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable))
+        != 2
+    ):
         errors.append(
             "0004_identity_discovery_projection.sql must pin SET search_path = pg_catalog, iam, pg_temp on both functions"
         )
@@ -685,7 +690,11 @@ def _validate_workspace_invitations_sql(sql: str) -> list[str]:
             re.IGNORECASE,
         )
     }
-    if re.search(r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?![a-z_][a-z0-9_]*\.)[a-z_][a-z0-9_]*", executable, re.IGNORECASE):
+    if re.search(
+        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?![a-z_][a-z0-9_]*\.)[a-z_][a-z0-9_]*",
+        executable,
+        re.IGNORECASE,
+    ):
         errors.append("0005_workspace_invitations.sql must not create unqualified tables")
     if created_tables != APPROVED_DELTA_TABLES:
         errors.append(
@@ -694,9 +703,7 @@ def _validate_workspace_invitations_sql(sql: str) -> list[str]:
         )
 
     if len(CANONICAL_TABLES) + len(created_tables) != 57:
-        errors.append(
-            "Total domain tables (baseline 56 + 0005 delta) must equal 57"
-        )
+        errors.append("Total domain tables (baseline 56 + 0005 delta) must equal 57")
 
     if "DROP TABLE" in executable.upper():
         errors.append("0005_workspace_invitations.sql must not contain DROP TABLE")
@@ -721,10 +728,14 @@ def _validate_workspace_invitations_sql(sql: str) -> list[str]:
         )
 
     if "iam.workspace_invitations" not in set(ENABLE_RLS_RE.findall(executable)):
-        errors.append("0005_workspace_invitations.sql must ENABLE ROW LEVEL SECURITY on iam.workspace_invitations")
+        errors.append(
+            "0005_workspace_invitations.sql must ENABLE ROW LEVEL SECURITY on iam.workspace_invitations"
+        )
 
     if "iam.workspace_invitations" not in set(FORCE_RLS_RE.findall(executable)):
-        errors.append("0005_workspace_invitations.sql must FORCE ROW LEVEL SECURITY on iam.workspace_invitations")
+        errors.append(
+            "0005_workspace_invitations.sql must FORCE ROW LEVEL SECURITY on iam.workspace_invitations"
+        )
 
     policy_match = re.search(
         r"CREATE\s+POLICY\s+tenant_isolation\s+ON\s+iam\.workspace_invitations\b(.*?);",
@@ -741,7 +752,9 @@ def _validate_workspace_invitations_sql(sql: str) -> list[str]:
             errors.append(
                 "0005_workspace_invitations.sql tenant_isolation policy must be fail-closed without IS NULL"
             )
-        if not re.search(r"tenant_id\s*=.*workspace_id\s*=", policy_stmt, re.IGNORECASE | re.DOTALL):
+        if not re.search(
+            r"tenant_id\s*=.*workspace_id\s*=", policy_stmt, re.IGNORECASE | re.DOTALL
+        ):
             errors.append(
                 "0005_workspace_invitations.sql tenant_isolation policy must bind both tenant_id and workspace_id"
             )
@@ -834,7 +847,10 @@ def _validate_invitation_acceptance_projection_sql(sql: str) -> list[str]:
             "0006_invitation_acceptance_projection.sql must declare SECURITY DEFINER on the scope projection function"
         )
 
-    if len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable)) != 1:
+    if (
+        len(re.findall(r"SET\s+search_path\s*=\s*pg_catalog\s*,\s*iam\s*,\s*pg_temp\b", executable))
+        != 1
+    ):
         errors.append(
             "0006_invitation_acceptance_projection.sql must pin SET search_path = pg_catalog, iam, pg_temp"
         )
@@ -845,7 +861,9 @@ def _validate_invitation_acceptance_projection_sql(sql: str) -> list[str]:
 def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     """Validate the canonical SQL migration directory and return a list of errors."""
     repo_root = Path(__file__).resolve().parents[1]
-    target_dir = migrations_dir if migrations_dir is not None else repo_root / "database" / "migrations"
+    target_dir = (
+        migrations_dir if migrations_dir is not None else repo_root / "database" / "migrations"
+    )
 
     errors = _validate_migration_chain(target_dir)
     if errors:
@@ -870,10 +888,127 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     )
     errors.extend(_validate_workspace_invitations_sql(invitations_sql))
 
-    accept_projection_sql = (
-        target_dir / "0006_invitation_acceptance_projection.sql"
-    ).read_text(encoding="utf-8-sig")
+    accept_projection_sql = (target_dir / "0006_invitation_acceptance_projection.sql").read_text(
+        encoding="utf-8-sig"
+    )
     errors.extend(_validate_invitation_acceptance_projection_sql(accept_projection_sql))
+
+    agent_publish_sql = (
+        target_dir / "0007_agent_publish_receipts_and_binding_seals.sql"
+    ).read_text(encoding="utf-8-sig")
+    errors.extend(_validate_agent_publish_receipts_and_binding_seals_sql(agent_publish_sql))
+
+    return errors
+
+
+def _validate_agent_publish_receipts_and_binding_seals_sql(sql: str) -> list[str]:
+    """Validate ADR-022 / 04-C forward migration 0007_agent_publish_receipts_and_binding_seals.sql."""
+    errors: list[str] = []
+    executable, fingerprint = _sql_structure(sql)
+
+    if fingerprint != REVIEWED_AGENT_PUBLISH_RECEIPTS_FINGERPRINT:
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql differs from the reviewed authored SQL fingerprint; "
+            "schema/sealing changes require review"
+        )
+
+    created_tables = {
+        name.lower()
+        for name in re.findall(
+            r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)",
+            executable,
+            re.IGNORECASE,
+        )
+    }
+    if re.search(
+        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?![a-z_][a-z0-9_]*\.)[a-z_][a-z0-9_]*",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must not create unqualified tables"
+        )
+    if created_tables != APPROVED_STEP04C_DELTA_TABLES:
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must create only the approved ADR-022 table "
+            f"{sorted(APPROVED_STEP04C_DELTA_TABLES)}, got {sorted(created_tables)}"
+        )
+
+    if len(CANONICAL_TABLES) + len(APPROVED_DELTA_TABLES) + len(created_tables) != 58:
+        errors.append("Total domain tables (baseline 56 + 0005 delta + 0007 delta) must equal 58")
+
+    if "DROP TABLE" in executable.upper():
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must not contain DROP TABLE"
+        )
+
+    if not re.search(
+        r"ALTER\s+TABLE\s+catalog\.agent_versions\s+ADD\s+COLUMN\s+bundle_manifest\s+jsonb\s+NOT\s+NULL",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must add bundle_manifest jsonb NOT NULL to catalog.agent_versions"
+        )
+
+    if not re.search(
+        r"ADD\s+COLUMN\s+bindings_sealed_at\s+timestamptz",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must add bindings_sealed_at timestamptz to catalog.agent_versions"
+        )
+
+    if "catalog.agent_publish_receipts" not in set(ENABLE_RLS_RE.findall(executable)):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must ENABLE ROW LEVEL SECURITY on catalog.agent_publish_receipts"
+        )
+
+    if "catalog.agent_publish_receipts" not in set(FORCE_RLS_RE.findall(executable)):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must FORCE ROW LEVEL SECURITY on catalog.agent_publish_receipts"
+        )
+
+    policy_match = re.search(
+        r"CREATE\s+POLICY\s+tenant_isolation\s+ON\s+catalog\.agent_publish_receipts\b(.*?);",
+        executable,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if policy_match is None:
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must declare CREATE POLICY tenant_isolation ON catalog.agent_publish_receipts"
+        )
+    else:
+        policy_stmt = policy_match.group(1)
+        if "IS NULL" in policy_stmt.upper():
+            errors.append(
+                "0007_agent_publish_receipts_and_binding_seals.sql tenant_isolation policy must be fail-closed without IS NULL"
+            )
+        if not re.search(
+            r"tenant_id\s*=.*workspace_id\s*=", policy_stmt, re.IGNORECASE | re.DOTALL
+        ):
+            errors.append(
+                "0007_agent_publish_receipts_and_binding_seals.sql tenant_isolation policy must bind both tenant_id and workspace_id"
+            )
+
+    if not re.search(
+        r"REVOKE\s+ALL\s+ON\s+TABLE\s+catalog\.agent_publish_receipts\s+FROM\s+PUBLIC\s*;",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must REVOKE ALL ON TABLE catalog.agent_publish_receipts FROM PUBLIC"
+        )
+
+    if not re.search(
+        r"GRANT\s+SELECT\s*,\s*INSERT\s+ON\s+TABLE\s+catalog\.agent_publish_receipts\s+TO\s+platform_app\s*;",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            "0007_agent_publish_receipts_and_binding_seals.sql must GRANT SELECT, INSERT ON TABLE catalog.agent_publish_receipts TO platform_app"
+        )
 
     return errors
 
@@ -881,7 +1016,7 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for static database schema validation."""
     parser = argparse.ArgumentParser(
-        description="Validate static DB-56 baseline + approved ADR-019/ADR-020 delta PostgreSQL schema invariants."
+        description="Validate static DB-56 baseline + approved ADR-019/ADR-020/ADR-022 delta PostgreSQL schema invariants."
     )
     parser.add_argument(
         "--migrations-dir",
@@ -898,11 +1033,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 6 ordered migrations, 7 schemas, 56 baseline + 1 delta = 57 canonical tables, "
-        "recognized FK/UNIQUE declarations, 55 baseline + 1 delta = 56 RLS declarations, "
-        "10 immutable trigger declarations + 1 document guard, "
+        "PASS static checks: 7 ordered migrations, 7 schemas, 56 baseline + 2 deltas = 58 canonical tables, "
+        "recognized FK/UNIQUE declarations, 55 baseline + 2 deltas = 57 RLS declarations, "
+        "10 immutable trigger declarations + 1 document guard + 1 version sealing guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
-        "reviewed 0004 content fingerprint, reviewed 0006 content fingerprint."
+        "reviewed 0004 content fingerprint, reviewed 0006 content fingerprint, "
+        "reviewed 0007 content fingerprint."
     )
     print(
         "0003_restore_workspaces_rls.sql restores iam.workspaces tenant_isolation policy (DEC-DB-01)."
@@ -915,6 +1051,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0006_invitation_acceptance_projection.sql defines narrow SECURITY DEFINER invitation acceptance scope projection (ADR-020 / 03-C)."
+    )
+    print(
+        "0007_agent_publish_receipts_and_binding_seals.sql adds catalog.agent_publish_receipts and immutable sealing triggers (ADR-022 / 04-C)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

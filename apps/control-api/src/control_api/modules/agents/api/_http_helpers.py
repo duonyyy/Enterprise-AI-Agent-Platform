@@ -12,6 +12,7 @@ from control_api.modules.agents.models.errors import (
     AgentCapabilityUnavailableError,
     AgentDatabaseUnavailableError,
     AgentDomainError,
+    AgentIdempotencyConflictError,
     AgentNotFoundError,
     AgentSlugConflictError,
     AgentStaleRevisionError,
@@ -52,7 +53,7 @@ def translate_agent_error(exc: Exception) -> HTTPException:
             detail={"code": exc.code, "message": exc.message},
         )
 
-    if isinstance(exc, (AgentSlugConflictError, AgentArchivedError)):
+    if isinstance(exc, (AgentSlugConflictError, AgentArchivedError, AgentIdempotencyConflictError)):
         return HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": exc.code, "message": exc.message},
@@ -67,7 +68,13 @@ def translate_agent_error(exc: Exception) -> HTTPException:
     if isinstance(exc, AgentValidationError):
         status_code = (
             status.HTTP_400_BAD_REQUEST
-            if exc.code in ("invalid_cursor", "invalid_if_match")
+            if exc.code
+            in (
+                "invalid_cursor",
+                "invalid_if_match",
+                "missing_idempotency_key",
+                "invalid_idempotency_key",
+            )
             else status.HTTP_422_UNPROCESSABLE_CONTENT
         )
         return HTTPException(
@@ -82,9 +89,14 @@ def translate_agent_error(exc: Exception) -> HTTPException:
         )
 
     if isinstance(exc, AgentCapabilityUnavailableError):
-        return HTTPException(status_code=503, detail={"code": exc.code, "message": "Agent publishing is not available"})
+        return HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "message": "Agent publishing is not available"},
+        )
 
-    if isinstance(exc, (AgentDatabaseUnavailableError, RepositoryUnavailableError, SQLAlchemyError)):
+    if isinstance(
+        exc, (AgentDatabaseUnavailableError, RepositoryUnavailableError, SQLAlchemyError)
+    ):
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "service_unavailable", "message": "Service temporarily unavailable"},

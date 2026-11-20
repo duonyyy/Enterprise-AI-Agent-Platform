@@ -30,7 +30,7 @@ from test_postgres_fixture import docker
 def test_fresh_migration_bootstrap_and_technical_table(
     migrated_database: dict[str, Any],
 ) -> None:
-    """Verifies that 56 domain tables and 1 technical migration history table exist."""
+    """Verify the reviewed migration chain, domain inventory, and role boundary."""
     owner_url = migrated_database["owner_url"]
     app_url = migrated_database["app_url"]
 
@@ -40,7 +40,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "SELECT version, name, checksum, applied_by FROM public.schema_migrations ORDER BY version"
         )
         rows = cur.fetchall()
-        assert len(rows) == 6
+        assert len(rows) == 7
         assert rows[0][0] == "0001"
         assert rows[0][1] == "0001_baseline.sql"
         assert rows[1][0] == "0002"
@@ -53,8 +53,10 @@ def test_fresh_migration_bootstrap_and_technical_table(
         assert rows[4][1] == "0005_workspace_invitations.sql"
         assert rows[5][0] == "0006"
         assert rows[5][1] == "0006_invitation_acceptance_projection.sql"
+        assert rows[6][0] == "0007"
+        assert rows[6][1] == "0007_agent_publish_receipts_and_binding_seals.sql"
 
-        # 2. Verify exactly 57 domain tables (56 baseline + iam.workspace_invitations delta) across 7 schemas
+        # Baseline plus workspace invitations and Agent publish receipts.
         cur.execute(
             """
             SELECT table_schema, count(*)
@@ -66,10 +68,10 @@ def test_fresh_migration_bootstrap_and_technical_table(
             """
         )
         schema_counts = dict(cur.fetchall())
-        assert sum(schema_counts.values()) == 57
+        assert sum(schema_counts.values()) == 58
         assert schema_counts == {
             "iam": 6,
-            "catalog": 16,
+            "catalog": 17,
             "knowledge": 7,
             "runtime": 12,
             "integration": 6,
@@ -122,7 +124,7 @@ def test_migration_upgrade_preserves_data(isolated_database, tmp_path):
             "INSERT INTO iam.workspaces (tenant_id,id,slug,name) VALUES (%s,%s,%s,%s)",
             (tenant, workspace, "upgrade-ws", "Upgrade Workspace"),
         )
-    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006"]
+    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006", "0007"]
     with psycopg.connect(db_url) as conn:
         assert conn.execute(
             "SELECT name FROM iam.workspaces WHERE id=%s", (workspace,)
@@ -191,7 +193,7 @@ def test_migration_advisory_locking(isolated_database):
         ).fetchone() == (True,)
         with pytest.raises(MigrationLockError):
             run_migrations(db_url)
-    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
 
 
 @pytest.mark.integration
@@ -220,6 +222,7 @@ def test_check_and_dry_run_do_not_create_history(isolated_database):
         "0004",
         "0005",
         "0006",
+        "0007",
     ]
     from run_migrations import MigrationError
 
