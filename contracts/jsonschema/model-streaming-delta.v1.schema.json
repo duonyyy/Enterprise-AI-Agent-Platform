@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/model-streaming-delta.v1.schema.json",
+  "title": "ModelStreamingDelta",
+  "type": "object",
+  "required": ["requestId", "sequence", "deltaType"],
+  "properties": {
+    "requestId": { "type": "string", "format": "uuid" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "deltaType": { "type": "string", "enum": ["content", "tool_call", "finish", "error"] },
+    "content": { "type": ["string", "null"] },
+    "toolCallDelta": {
+      "type": ["object", "null"],
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "id": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "argumentsChunk": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "finishReason": {
+      "type": ["string", "null"],
+      "enum": ["stop", "length", "tool_calls", "refusal", "error", null]
+    },
+    "usage": {
+      "type": ["object", "null"],
+      "required": ["usageSource"],
+      "properties": {
+        "inputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "outputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "usageSource": { "type": "string", "enum": ["provider", "estimated", "unknown"] }
+      },
+      "additionalProperties": false
+    },
+    "errorMessage": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/model-generation-response.v1.schema.json",
+  "title": "ModelGenerationResponse",
+  "type": "object",
+  "required": [
+    "requestId",
+    "requestedModel",
+    "finishReason",
+    "message",
+    "usage"
+  ],
+  "properties": {
+    "requestId": { "type": "string", "format": "uuid" },
+    "requestedModel": { "type": "string", "minLength": 1 },
+    "returnedModel": { "type": ["string", "null"] },
+    "finishReason": {
+      "type": "string",
+      "enum": ["stop", "length", "tool_calls", "refusal", "error"]
+    },
+    "message": {
+      "type": "object",
+      "required": ["role"],
+      "properties": {
+        "role": { "type": "string", "enum": ["assistant"] },
+        "content": { "type": ["string", "null"] },
+        "toolCalls": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "required": ["id", "type", "function"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "type": { "type": "string", "enum": ["function"] },
+              "function": {
+                "type": "object",
+                "required": ["name", "arguments"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "arguments": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "refusal": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "type": "object",
+      "required": ["usageSource"],
+      "properties": {
+        "inputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "outputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "usageSource": { "type": "string", "enum": ["provider", "estimated", "unknown"] }
+      },
+      "additionalProperties": false
+    },
+    "providerRequestId": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

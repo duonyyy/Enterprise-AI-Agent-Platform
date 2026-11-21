@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/model-generation-request.v1.schema.json",
+  "title": "ModelGenerationRequest",
+  "type": "object",
+  "required": [
+    "requestId",
+    "tenantId",
+    "workspaceId",
+    "modelConfigId",
+    "requestedProvider",
+    "requestedModel",
+    "messages"
+  ],
+  "properties": {
+    "requestId": { "type": "string", "format": "uuid" },
+    "tenantId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "modelConfigId": { "type": "string", "format": "uuid" },
+    "requestedProvider": { "type": "string", "minLength": 1 },
+    "requestedModel": { "type": "string", "minLength": 1 },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+          "content": { "type": ["string", "null"] },
+          "name": { "type": ["string", "null"] },
+          "toolCallId": { "type": ["string", "null"] },
+          "toolCalls": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "required": ["id", "type", "function"],
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "type": { "type": "string", "enum": ["function"] },
+                "function": {
+                  "type": "object",
+                  "required": ["name", "arguments"],
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "arguments": { "type": "string" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "tools": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["type", "function"],
+        "properties": {
+          "type": { "type": "string", "enum": ["function"] },
+          "function": {
+            "type": "object",
+            "required": ["name", "parameters"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "description": { "type": ["string", "null"] },
+              "parameters": { "type": "object" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "responseFormat": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": { "type": "string", "enum": ["text", "json_object", "json_schema"] },
+        "jsonSchema": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": ["object", "null"],
+      "properties": {
+        "temperature": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "top_p": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "top_k": { "type": "integer", "minimum": 1 },
+        "max_output_tokens": { "type": "integer", "minimum": 1 },
+        "frequency_penalty": { "type": "number", "minimum": -2.0, "maximum": 2.0 },
+        "presence_penalty": { "type": "number", "minimum": -2.0, "maximum": 2.0 },
+        "stop_sequences": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "seed": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "deadline": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

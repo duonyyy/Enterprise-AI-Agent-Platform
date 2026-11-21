@@ -28,6 +28,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "owner": [
         "workspace:*",
         "agent:*",
+        "model:*",
         "workflow:*",
         "approval:*",
         "tool:*",
@@ -41,6 +42,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "admin": [
         "workspace:*",
         "agent:*",
+        "model:*",
         "workflow:*",
         "approval:*",
         "tool:*",
@@ -54,6 +56,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "maintainer": [
         "workspace:read",
         "agent:*",
+        "model:*",
         "workflow:*",
         "approval:read",
         "tool:*",
@@ -70,6 +73,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "agent:create",
         "agent:edit",
         "agent:publish",
+        "model:read",
         "skill:read",
         "skill:create",
         "skill:publish",
@@ -84,6 +88,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "operator": [
         "workspace:read",
         "agent:read",
+        "model:read",
         "skill:read",
         "mcp:read",
         "approval:read",
@@ -97,6 +102,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "viewer": [
         "workspace:read",
         "agent:read",
+        "model:read",
         "skill:read",
         "mcp:read",
         "run:read",

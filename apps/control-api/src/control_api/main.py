@@ -16,6 +16,7 @@ from control_api.modules.approvals.router import router as approvals_router
 from control_api.modules.identity.api.router import router as identity_router
 from control_api.modules.identity.models.errors import SessionExpiredError
 from control_api.modules.mcp.api.router import router as mcp_router
+from control_api.modules.models.api.router import router as models_router
 from control_api.modules.skills.api.router import router as skills_router
 from control_api.modules.workspaces.api.invitation_accept_router import (
     router as invitation_accept_router,
@@ -151,3 +152,4 @@ app.include_router(agents_router)
 app.include_router(approvals_router)
 app.include_router(skills_router)
 app.include_router(mcp_router)
+app.include_router(models_router)

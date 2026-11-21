@@ -39,6 +39,7 @@
 
 Use the versions pinned in the manifests and lockfile; this guide does not authorize a framework upgrade.
 
+- **Design System & UI Library (TS-009):** Approved and mandated: Use **Tailwind CSS**, **shadcn/ui**, and **Radix UI primitives**. The legacy constraint restricting development strictly to hand-rolled `@enterprise/ui` without 3rd-party UI libraries is revoked. Map the "Mineral & Copper" design tokens to the Tailwind theme and use accessible Radix/shadcn components.
 - **Strictness:** `strict: true`, `noUncheckedIndexedAccess: true`. Never use `any` or `as any`.
 - **Discriminated Unions:** Model UI states and run lifecycle with tagged unions (e.g., `{ status: "idle" | "saving" | "error" }`). Handle all cases exhaustively with `assertNever(x: never)`.
 - **Server Components First:** Default to React Server Components. Add `"use client"` only for interactive leaves (buttons, forms).
