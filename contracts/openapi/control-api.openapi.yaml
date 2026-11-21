@@ -1397,6 +1397,125 @@ paths:
         '401': { description: Missing, invalid, expired, or revoked credentials }
         '403': { description: Workspace access denied or insufficient permissions }
         '503': { description: Authorization or session store temporarily unavailable }
+  /v1/workspaces/{workspace_id}/models:
+    get:
+      summary: List model configurations in workspace
+      operationId: listModelConfigs
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+        - name: cursor
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 2048}
+        - name: status
+          in: query
+          schema: {type: string, enum: [active, disabled]}
+      responses:
+        '200':
+          description: Scoped model configurations page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfigPage'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+    post:
+      summary: Create model configuration
+      operationId: createModelConfig
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateModelConfig'}
+      responses:
+        '201':
+          description: Created model configuration
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+        '400': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '409': {description: Model name conflict within workspace}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+  /v1/workspaces/{workspace_id}/models/{model_id}:
+    get:
+      summary: Get model configuration by ID
+      operationId: getModelConfig
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ModelId'
+      responses:
+        '200':
+          description: Model configuration details
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {description: Model configuration not found in workspace}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+    patch:
+      summary: Update model configuration
+      operationId: updateModelConfig
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ModelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateModelConfig'}
+      responses:
+        '200':
+          description: Updated model configuration
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+        '400': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {description: Model configuration not found}
+        '409': {description: Model name conflict}
+        '422': {$ref: '#/components/responses/AgentInvalidRequest'}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
+  /v1/workspaces/{workspace_id}/models/{model_id}/disable:
+    post:
+      summary: Disable model configuration
+      operationId: disableModelConfig
+      security:
+        - SessionCookie: []
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/ModelId'
+      responses:
+        '200':
+          description: Disabled model configuration
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelConfig'}
+        '401': {description: Missing, invalid, expired, or revoked credentials}
+        '403': {description: Workspace access denied or insufficient permissions}
+        '404': {description: Model configuration not found}
+        '503': {$ref: '#/components/responses/AgentUnavailable'}
 components:
   securitySchemes:
     SessionCookie:
@@ -1422,12 +1541,59 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
+    ModelId:
+      name: model_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
   headers:
     DraftETag:
       description: Strong ETag of draft revision; not published version
       required: true
       schema: {type: string, pattern: '^"[1-9][0-9]*"$'}
   schemas:
+    ModelConfig:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, workspaceId, name, provider, providerModelId, status, settings, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        workspaceId: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 128}
+        provider: {type: string, minLength: 1, maxLength: 64}
+        providerModelId: {type: string, minLength: 1, maxLength: 128}
+        status: {type: string, enum: [active, disabled]}
+        settings: {type: object}
+        secretRef: {type: [string, "null"], maxLength: 128}
+        createdAt: {type: string, format: date-time}
+    CreateModelConfig:
+      type: object
+      additionalProperties: false
+      required: [name, provider, providerModelId]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        provider: {type: string, minLength: 1, maxLength: 64}
+        providerModelId: {type: string, minLength: 1, maxLength: 128}
+        secretRef: {type: [string, "null"], maxLength: 128}
+        settings: {type: object}
+    UpdateModelConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {type: [string, "null"], minLength: 1, maxLength: 128}
+        settings: {type: [object, "null"]}
+        secretRef: {type: [string, "null"], maxLength: 128}
+    ModelConfigPage:
+      type: object
+      additionalProperties: false
+      required: [items, totalCount]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ModelConfig'}
+        nextCursor: {type: [string, "null"]}
+        totalCount: {type: integer, minimum: 0}
     AgentSpec:
       $ref: ../jsonschema/agent-spec.v1.schema.json
     CreateAgentDraft:

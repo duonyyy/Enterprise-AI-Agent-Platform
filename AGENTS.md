@@ -25,6 +25,7 @@
 10. **No speculative expansion:** No new domain table beyond DB-56, enum/status, privileged service, microservice or duplicate Tool executor without approved ADR/migration.
 11. **Evidence:** Every PR reports actual tests as `PASS` / `FAIL` / `NOT_RUN` / `BLOCKED` with commands and output. A document or mock is not production evidence.
 12. **Human authority:** Do not deploy production, perform destructive migration, rotate secrets, grant access, approve business actions or execute unreviewed code without explicit authorized approval.
+13. **Frontend Modernization & shadcn/ui Approved (TS-009):** The frontend (`apps/studio-web`, `packages/ui`) is explicitly authorized and mandated to use **Tailwind CSS, shadcn/ui, and Radix UI primitives**. The legacy constraint restricting development to hand-rolled `@enterprise/ui` without external UI libraries is revoked. Agents implementing or updating UI components may configure Tailwind CSS, install required Radix primitives/utilities, and use shadcn/ui patterns while maintaining the "Mineral & Copper" design tokens.
 
 ## 3. Required workflow per PR
 
