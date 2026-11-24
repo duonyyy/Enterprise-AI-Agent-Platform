@@ -91,7 +91,7 @@ def test_persistence_across_server_restart(
             assert res is not None
             assert res[0] == "Agent Persisted Across Restart"
 
-        # Baseline plus invitation and publish receipt tables remain intact.
+        # Baseline plus invitation, publish receipt, and budget ledger tables remain intact.
         with psycopg.connect(owner_url) as owner, owner.cursor() as cur:
             cur.execute(
                 """
@@ -100,7 +100,7 @@ def test_persistence_across_server_restart(
                   AND table_type = 'BASE TABLE'
                 """
             )
-            assert cur.fetchone()[0] == 58
+            assert cur.fetchone()[0] == 61
 
     finally:
         with psycopg.connect(owner_url) as owner, owner.cursor() as cur:
@@ -164,7 +164,7 @@ def test_backup_and_restore_recovery(
             # Step 3: Verify restored database as owner
             with psycopg.connect(restore_owner_url) as conn, conn.cursor() as cur:
                 assert conn.execute(CONSTRAINTS_SQL).fetchall() == expected_constraints
-                # Baseline plus invitation and publish receipt tables.
+                # Baseline plus invitation, publish receipt, and budget ledger tables.
                 cur.execute(
                     """
                     SELECT count(*) FROM information_schema.tables
@@ -172,13 +172,13 @@ def test_backup_and_restore_recovery(
                       AND table_type = 'BASE TABLE'
                     """
                 )
-                assert cur.fetchone()[0] == 58
+                assert cur.fetchone()[0] == 61
 
                 # 1 technical migration history table with the reviewed canonical migration inventory
                 cur.execute("SELECT count(*) FROM public.schema_migrations")
                 assert cur.fetchone()[0] == len(EXPECTED_MIGRATIONS)
 
-                # Verify RLS is enabled and forced on all 57 non-global tables.
+                # Verify RLS is enabled and forced on all 60 non-global tables.
                 cur.execute(
                     """
                     SELECT count(*)
@@ -191,7 +191,7 @@ def test_backup_and_restore_recovery(
                     """
                 )
                 tables_with_forced_rls = cur.fetchone()[0]
-                assert tables_with_forced_rls == 57
+                assert tables_with_forced_rls == 60
 
                 # Verify iam.users is the single global domain table without RLS
                 cur.execute(
@@ -233,8 +233,8 @@ def test_backup_and_restore_recovery(
             f"Backup size: {backup_size} bytes\n"
             f"Restore duration: {restore_duration:.3f}s\n"
             f"Target database: {restore_db}\n"
-            f"Tables verified: 58 domain tables + 1 technical migration history table\n"
-            f"Forced RLS verified: 57 tables\n",
+            f"Tables verified: 61 domain tables + 1 technical migration history table\n"
+            f"Forced RLS verified: 60 tables\n",
             encoding="utf-8",
         )
 

@@ -40,7 +40,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "SELECT version, name, checksum, applied_by FROM public.schema_migrations ORDER BY version"
         )
         rows = cur.fetchall()
-        assert len(rows) == 7
+        assert len(rows) == 8
         assert rows[0][0] == "0001"
         assert rows[0][1] == "0001_baseline.sql"
         assert rows[1][0] == "0002"
@@ -55,8 +55,10 @@ def test_fresh_migration_bootstrap_and_technical_table(
         assert rows[5][1] == "0006_invitation_acceptance_projection.sql"
         assert rows[6][0] == "0007"
         assert rows[6][1] == "0007_agent_publish_receipts_and_binding_seals.sql"
+        assert rows[7][0] == "0008"
+        assert rows[7][1] == "0008_model_budget_ledger.sql"
 
-        # Baseline plus workspace invitations and Agent publish receipts.
+        # Baseline plus the reviewed forward deltas.
         cur.execute(
             """
             SELECT table_schema, count(*)
@@ -68,7 +70,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             """
         )
         schema_counts = dict(cur.fetchall())
-        assert sum(schema_counts.values()) == 58
+        assert sum(schema_counts.values()) == 61
         assert schema_counts == {
             "iam": 6,
             "catalog": 17,
@@ -76,7 +78,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "runtime": 12,
             "integration": 6,
             "governance": 4,
-            "ops": 6,
+            "ops": 9,
         }
 
         # 3. Verify platform_app role properties (NOSUPERUSER, NOBYPASSRLS)
@@ -124,7 +126,7 @@ def test_migration_upgrade_preserves_data(isolated_database, tmp_path):
             "INSERT INTO iam.workspaces (tenant_id,id,slug,name) VALUES (%s,%s,%s,%s)",
             (tenant, workspace, "upgrade-ws", "Upgrade Workspace"),
         )
-    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006", "0007"]
+    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006", "0007", "0008"]
     with psycopg.connect(db_url) as conn:
         assert conn.execute(
             "SELECT name FROM iam.workspaces WHERE id=%s", (workspace,)
@@ -193,7 +195,7 @@ def test_migration_advisory_locking(isolated_database):
         ).fetchone() == (True,)
         with pytest.raises(MigrationLockError):
             run_migrations(db_url)
-    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
 
 
 @pytest.mark.integration
@@ -223,6 +225,7 @@ def test_check_and_dry_run_do_not_create_history(isolated_database):
         "0005",
         "0006",
         "0007",
+        "0008",
     ]
     from run_migrations import MigrationError
 

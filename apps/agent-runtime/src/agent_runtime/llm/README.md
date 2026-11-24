@@ -1,7 +1,7 @@
 # `llm/` — Adapter Cổng kết nối mô hình & Nhà cung cấp (Model Gateway)
 
-> **Trạng thái:** `PARTIALLY_IMPLEMENTED` (Hoàn thành phần **05-A** — Contracts, Ports, Profiles, Secrets & Offline E5 Adapter)  
-> **Mã nguồn đã rà soát:** [`llm/__init__.py`](__init__.py), [`ports.py`](ports.py), [`errors.py`](errors.py), [`profile.py`](profile.py), [`secrets.py`](secrets.py), [`embedding_adapter.py`](embedding_adapter.py)  
+> **Trạng thái:** `PARTIALLY_IMPLEMENTED` (Hoàn thành **05-A** và lớp ledger của **05-B**; chưa có generation provider thật của 05-C.)
+> **Mã nguồn đã rà soát:** [`llm/__init__.py`](__init__.py), [`ports.py`](ports.py), [`errors.py`](errors.py), [`profile.py`](profile.py), [`secrets.py`](secrets.py), [`embedding_adapter.py`](embedding_adapter.py), [`budget.py`](budget.py), [`budget_ledger.py`](budget_ledger.py)
 > **Tài liệu SPEC liên quan:** [`SPEC-LLM-001.md`](../../../../../docs/04-module-specs/model-gateway/SPEC-LLM-001.md), [`MODEL_GATEWAY_DESIGN_DECISIONS.md`](../../../../../docs/04-module-specs/model-gateway/MODEL_GATEWAY_DESIGN_DECISIONS.md), [`TP-05-MODEL-GATEWAY`](../../../../../docs/09-implementation/task-packets/STEP-05-MODEL-GATEWAY/README.md)
 
 ---
@@ -27,8 +27,12 @@ Module này tách biệt hoàn toàn tầng nghiệp vụ lõi (Agent loop, RAG 
 - Phân giải bí mật scoped (`ScopedSecretResolver`) với cơ chế che dấu (`RedactedSecret`), xác thực quyền service/workspace và fail-closed.
 - Adapter tạo vector nhúng offline [`E5EmbeddingAdapter`](embedding_adapter.py) kết nối mô hình `intfloat/multilingual-e5-small` với các chốt chặn toàn vẹn (384 dimensions, số thực hữu hạn, semantic prefix routing).
 
-**Trách nhiệm kế tiếp (Step 05-B & 05-C):**
-- Sổ cái giữ chỗ ngân sách bền vững (Durable Budget Ledger & Reservation) và hạch toán vào `ops.model_usage` (05-B).
+**Trách nhiệm đã triển khai (Step 05-B):**
+- Tính envelope token/chi phí bằng `Decimal`, từ chối profile chưa có pricing và không đổi usage/cost không biết thành `0`.
+- Giữ chỗ ngân sách và attempt trong PostgreSQL trước provider boundary, có idempotency theo workspace và actor/request binding.
+- Hạch toán usage một lần, giữ lại outcome mơ hồ để đối soát bằng lease + fencing; không tự giải phóng khoản đã dispatch.
+
+**Trách nhiệm kế tiếp (Step 05-C):**
 - Các Adapter gọi nhà cung cấp Generation thực tế (OpenAI, Anthropic, Gemini, vLLM) có guard và retry (05-C).
 
 **Phạm vi không thuộc về module:**
@@ -48,7 +52,7 @@ Module này tách biệt hoàn toàn tầng nghiệp vụ lõi (Agent loop, RAG 
 | Quản lý hồ sơ Token & Admission Control | `IMPLEMENTED` | [`profile.py`](profile.py) (`TokenProfiler`, công thức $A = \min(W - O - S, L)$) |
 | Bộ phân giải bí mật phân vùng (Scoped Secret Resolver) | `IMPLEMENTED` | [`secrets.py`](secrets.py) (`ScopedSecretResolver`, `RedactedSecret`) |
 | Adapter nhúng Offline Multilingual-E5 | `IMPLEMENTED` | [`embedding_adapter.py`](embedding_adapter.py) (`E5EmbeddingAdapter`, 384-dim) |
-| Sổ cái ngân sách & Đối soát mức dùng (Ledger/Usage) | `PENDING_05B` | Chờ triển khai tại Step 05-B |
+| Sổ cái ngân sách & Đối soát mức dùng (Ledger/Usage) | `IMPLEMENTED_05B` | [`budget.py`](budget.py), [`budget_ledger.py`](budget_ledger.py), migration `0008_model_budget_ledger.sql` |
 | Live Generation Provider Adapters (OpenAI/Anthropic/...) | `PENDING_05C` | Chờ triển khai tại Step 05-C |
 
 ---
@@ -63,6 +67,8 @@ Module này tách biệt hoàn toàn tầng nghiệp vụ lõi (Agent loop, RAG 
 | [`profile.py`](profile.py) | `TokenProfiler`<br>`estimate_tokens_heuristic` | Đo lường token và xác thực điều kiện tiếp nhận ngữ cảnh (Context Admission Guard). |
 | [`secrets.py`](secrets.py) | `ScopedSecretResolver`<br>`RedactedSecret` | Phân giải bí mật từ server-side state, che dấu log/trace (`***`), kiểm tra tenant/workspace. |
 | [`embedding_adapter.py`](embedding_adapter.py) | `E5EmbeddingAdapter`<br>`EMBEDDING_DIMENSIONS` | Hiện thực hoá `EmbeddingPort` cho mô hình E5 offline, kiểm tra số thực hữu hạn và 384 dimensions. |
+| [`budget.py`](budget.py) | `calculate_admission_envelope`<br>`compute_settlement_cost` | Envelope chi phí/token, rounding Decimal, pricing snapshot và request digest RFC 8785. |
+| [`budget_ledger.py`](budget_ledger.py) | `PostgresModelBudgetLedger` | Reservation/dispatch/settlement/reconciliation trong PostgreSQL, không dùng counter RAM hoặc Redis. |
 
 ---
 
@@ -150,5 +156,5 @@ Các ca kiểm thử đã triển khai và đạt `PASS` trong phần 05-A:
 
 ## 9. Khoảng trống kỹ thuật & Bước tiếp theo (Next Steps)
 
-- **Step 05-B:** Xây dựng cơ chế giữ chỗ ngân sách trước khi gọi mô hình (Atomic Reservation Ledger), xử lý tranh chấp đa replica và hạch toán bền vững vào bảng `ops.model_usage`.
 - **Step 05-C:** Triển khai các Generation Provider Adapters thực tế với streaming, retry backoff và fallback policy.
+- **Điều cần lưu ý:** 05-B cung cấp owner cho admission/dispatch/settlement/reconcile. Nó chưa tự gọi provider và không phải bằng chứng generation/streaming đã hoạt động; 05-C phải gọi các interface này đúng transaction boundary.

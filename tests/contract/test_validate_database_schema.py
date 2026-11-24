@@ -68,6 +68,7 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
         "0007_agent_publish_receipts_and_binding_seals.sql adds catalog.agent_publish_receipts"
         in result.stdout
     )
+    assert "0008_model_budget_ledger.sql adds durable workspace budget" in result.stdout
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -86,7 +87,7 @@ def test_missing_migration_file_fails(tmp_path: Path) -> None:
 def test_non_sequential_or_duplicate_migration_filename_fails(tmp_path: Path) -> None:
     validator = _load_validator_module()
     migrations_dir = _copy_migrations(tmp_path)
-    (migrations_dir / "0009_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
+    (migrations_dir / "0010_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Non-sequential migration numbering" in e for e in errors)
@@ -355,6 +356,31 @@ def test_workspace_invitations_migration_rejects_unapproved_table_or_missing_for
     assert any(
         "FORCE ROW LEVEL SECURITY" in e for e in validator.validate_database_schema(migrations)
     )
+
+
+def test_model_budget_migration_rejects_permissive_rls_or_missing_attempt_invariant(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator_module()
+    migrations = _copy_migrations(tmp_path)
+    path = migrations / "0008_model_budget_ledger.sql"
+    original = path.read_text(encoding="utf-8")
+
+    path.write_text(
+        original.replace(
+            "workspace_id = NULLIF(current_setting('app.workspace_id', true), '')::uuid",
+            "workspace_id = NULLIF(current_setting('app.workspace_id', true), '')::uuid OR NULLIF(current_setting('app.workspace_id', true), '') IS NULL",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert any("must fail closed" in error for error in validator.validate_database_schema(migrations))
+
+    path.write_text(
+        original.replace("UNIQUE (tenant_id, workspace_id, reservation_id, attempt_number)", ""),
+        encoding="utf-8",
+    )
+    assert any("required accounting invariant" in error for error in validator.validate_database_schema(migrations))
 
 
 def test_invitation_acceptance_projection_rejects_table_creation_or_fingerprint_drift(

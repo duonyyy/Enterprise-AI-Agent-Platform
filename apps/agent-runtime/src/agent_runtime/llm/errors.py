@@ -68,6 +68,48 @@ class ModelBudgetExceededError(ModelGatewayError):
         super().__init__("MODEL_BUDGET_EXCEEDED", message)
 
 
+class ModelPricingUnavailableError(ModelGatewayError):
+    """A monetary budget cannot be admitted without an approved price snapshot."""
+
+    def __init__(self, message: str = "Model pricing is unavailable") -> None:
+        super().__init__("MODEL_PRICING_UNAVAILABLE", message)
+
+
+class ModelBudgetNotConfiguredError(ModelGatewayError):
+    """No active workspace budget balance exists for the trusted scope."""
+
+    def __init__(self, message: str = "Workspace model budget is not configured") -> None:
+        super().__init__("MODEL_BUDGET_NOT_CONFIGURED", message)
+
+
+class ModelReservationNotFoundError(ModelGatewayError):
+    """The requested reservation or attempt is absent in the trusted scope."""
+
+    def __init__(self, message: str = "Model budget reservation was not found") -> None:
+        super().__init__("MODEL_RESERVATION_NOT_FOUND", message)
+
+
+class IdempotencyConflictError(ModelGatewayError):
+    """Operation key reused with conflicting request payload, actor, or scope."""
+
+    def __init__(self, message: str = "Idempotency key collision with conflicting payload") -> None:
+        super().__init__("IDEMPOTENCY_CONFLICT", message)
+
+
+class ReservationExpiredError(ModelGatewayError):
+    """Reservation has expired and can no longer be settled."""
+
+    def __init__(self, message: str = "Model budget reservation expired") -> None:
+        super().__init__("RESERVATION_EXPIRED", message)
+
+
+class SettlementConflictError(ModelGatewayError):
+    """Invalid state transition or duplicate settlement on reservation."""
+
+    def __init__(self, message: str = "Invalid settlement state transition") -> None:
+        super().__init__("SETTLEMENT_CONFLICT", message)
+
+
 class SecretNotFoundError(ModelGatewayError):
     """Secret reference could not be resolved in the target scope."""
 

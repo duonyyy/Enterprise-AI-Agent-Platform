@@ -22,10 +22,14 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0005_workspace_invitations.sql",
     "0006_invitation_acceptance_projection.sql",
     "0007_agent_publish_receipts_and_binding_seals.sql",
+    "0008_model_budget_ledger.sql",
 )
 
 APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
 APPROVED_STEP04C_DELTA_TABLES: Final[frozenset[str]] = frozenset({"catalog.agent_publish_receipts"})
+APPROVED_STEP05B_DELTA_TABLES: Final[frozenset[str]] = frozenset(
+    {"ops.workspace_budgets", "ops.model_reservations", "ops.model_attempts"}
+)
 
 # Pin the reviewed authored program, not its database effects. Whitespace and
 # comments outside quoted bodies are ignored; PL/pgSQL bodies remain opaque.
@@ -898,6 +902,11 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     ).read_text(encoding="utf-8-sig")
     errors.extend(_validate_agent_publish_receipts_and_binding_seals_sql(agent_publish_sql))
 
+    model_budget_sql = (target_dir / "0008_model_budget_ledger.sql").read_text(
+        encoding="utf-8-sig"
+    )
+    errors.extend(_validate_model_budget_ledger_sql(model_budget_sql))
+
     return errors
 
 
@@ -1013,10 +1022,85 @@ def _validate_agent_publish_receipts_and_binding_seals_sql(sql: str) -> list[str
     return errors
 
 
+def _validate_model_budget_ledger_sql(sql: str) -> list[str]:
+    """Validate ADR-023 / 05-B durable accounting delta migration."""
+    errors: list[str] = []
+    executable, _ = _sql_structure(sql)
+    created_tables = {
+        name.lower()
+        for name in re.findall(
+            r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)",
+            executable,
+            re.IGNORECASE,
+        )
+    }
+    if created_tables != APPROVED_STEP05B_DELTA_TABLES:
+        errors.append(
+            "0008_model_budget_ledger.sql must create only the approved ADR-023 tables "
+            f"{sorted(APPROVED_STEP05B_DELTA_TABLES)}, got {sorted(created_tables)}"
+        )
+    if "DROP TABLE" in executable.upper():
+        errors.append("0008_model_budget_ledger.sql must not contain DROP TABLE")
+
+    expected_total = (
+        len(CANONICAL_TABLES)
+        + len(APPROVED_DELTA_TABLES)
+        + len(APPROVED_STEP04C_DELTA_TABLES)
+        + len(APPROVED_STEP05B_DELTA_TABLES)
+    )
+    if expected_total != 61:
+        errors.append("Total domain tables after ADR-023 must equal 61")
+
+    for table in APPROVED_STEP05B_DELTA_TABLES:
+        if table not in set(ENABLE_RLS_RE.findall(executable)):
+            errors.append(f"0008_model_budget_ledger.sql must ENABLE ROW LEVEL SECURITY on {table}")
+        if table not in set(FORCE_RLS_RE.findall(executable)):
+            errors.append(f"0008_model_budget_ledger.sql must FORCE ROW LEVEL SECURITY on {table}")
+        policy_match = re.search(
+            rf"CREATE\s+POLICY\s+tenant_isolation\s+ON\s+{re.escape(table)}\b(.*?);",
+            executable,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if policy_match is None:
+            errors.append(f"0008_model_budget_ledger.sql must declare tenant_isolation on {table}")
+            continue
+        policy = policy_match.group(1)
+        if "IS NULL" in policy.upper() or not re.search(
+            r"tenant_id\s*=.*workspace_id\s*=", policy, re.IGNORECASE | re.DOTALL
+        ):
+            errors.append(
+                f"0008_model_budget_ledger.sql policy for {table} must fail closed on tenant and workspace"
+            )
+
+    required_fragments = (
+        r"ALTER\s+TABLE\s+ops\.model_usage\s+ALTER\s+COLUMN\s+run_id\s+DROP\s+NOT\s+NULL",
+        r"CHECK\s*\(\s*run_id\s+IS\s+NOT\s+NULL\s+OR\s+job_id\s+IS\s+NOT\s+NULL\s+OR\s+reservation_id\s+IS\s+NOT\s+NULL\s*\)",
+        r"reservation_id\s+IS\s+NULL\s+AND\s+attempt_id\s+IS\s+NULL",
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*operation_key\s*\)",
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*reservation_id\s*,\s*attempt_number\s*\)",
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*reservation_id\s*,\s*id\s*\)",
+        r"FOREIGN\s+KEY\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*reservation_id\s*,\s*attempt_id\s*\)",
+        r"FOREIGN\s+KEY\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*budget_id\s*\)",
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*period_start\s*\)",
+        r"UNIQUE\s*\(\s*tenant_id\s*,\s*workspace_id\s*,\s*reservation_id\s*\)",
+    )
+    for fragment in required_fragments:
+        if not re.search(fragment, executable, re.IGNORECASE | re.DOTALL):
+            errors.append("0008_model_budget_ledger.sql is missing a required accounting invariant")
+            break
+    if not re.search(
+        r"REVOKE\s+ALL\s+ON\s+TABLE\s+ops\.workspace_budgets\s*,\s*ops\.model_reservations\s*,\s*ops\.model_attempts\s+FROM\s+PUBLIC",
+        executable,
+        re.IGNORECASE,
+    ):
+        errors.append("0008_model_budget_ledger.sql must revoke PUBLIC access to ledger tables")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for static database schema validation."""
     parser = argparse.ArgumentParser(
-        description="Validate static DB-56 baseline + approved ADR-019/ADR-020/ADR-022 delta PostgreSQL schema invariants."
+        description="Validate static DB-56 baseline and approved forward PostgreSQL schema invariants."
     )
     parser.add_argument(
         "--migrations-dir",
@@ -1033,8 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 7 ordered migrations, 7 schemas, 56 baseline + 2 deltas = 58 canonical tables, "
-        "recognized FK/UNIQUE declarations, 55 baseline + 2 deltas = 57 RLS declarations, "
+        "PASS static checks: 8 ordered migrations, 7 schemas, 56 baseline + 5 deltas = 61 canonical tables, "
+        "recognized FK/UNIQUE declarations, 55 baseline + 5 deltas = 60 RLS declarations, "
         "10 immutable trigger declarations + 1 document guard + 1 version sealing guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
         "reviewed 0004 content fingerprint, reviewed 0006 content fingerprint, "
@@ -1054,6 +1138,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0007_agent_publish_receipts_and_binding_seals.sql adds catalog.agent_publish_receipts and immutable sealing triggers (ADR-022 / 04-C)."
+    )
+    print(
+        "0008_model_budget_ledger.sql adds durable workspace budget, reservation and attempt ledgers (ADR-023 / 05-B)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "
