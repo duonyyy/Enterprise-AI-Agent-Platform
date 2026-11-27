@@ -1,0 +1,18 @@
+# Optional overlay. Route file contains configuration only; scoped keys stay in
+# the ignored secrets env file. Empty routes deliberately disable model dispatch.
+services:
+  agent-runtime:
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-${ENV:-development}}
+      MODEL_GATEWAY_CONFIG_PATH: /opt/model-gateway/routes.json
+      MODEL_GATEWAY_TIMEOUT_SECONDS: ${MODEL_GATEWAY_TIMEOUT_SECONDS:-60}
+      MODEL_GATEWAY_ALLOW_LOCAL_ENDPOINTS: ${MODEL_GATEWAY_ALLOW_LOCAL_ENDPOINTS:-false}
+    env_file:
+      - ${MODEL_GATEWAY_SECRETS_FILE:?Set an ignored model gateway secrets env file}
+    volumes:
+      - type: bind
+        source: ${MODEL_GATEWAY_CONFIG_FILE:?Set a maintainer-provisioned model route file}
+        target: /opt/model-gateway/routes.json
+        read_only: true
+        bind:
+          create_host_path: false

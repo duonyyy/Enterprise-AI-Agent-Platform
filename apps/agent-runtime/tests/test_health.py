@@ -1,5 +1,5 @@
-from fastapi.testclient import TestClient
 from agent_runtime.main import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

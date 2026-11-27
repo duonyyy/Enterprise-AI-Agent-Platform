@@ -1,5 +1,6 @@
 """Model Gateway ports, error taxonomy, token profiling, and scoped secrets."""
 
+from agent_runtime.llm.adapters.http_provider import HttpModelAdapter
 from agent_runtime.llm.budget import (
     AdmissionEnvelope,
     calculate_admission_envelope,
@@ -37,6 +38,7 @@ from agent_runtime.llm.errors import (
     SecretNotFoundError,
     SettlementConflictError,
 )
+from agent_runtime.llm.gateway import ModelGateway
 from agent_runtime.llm.ports import (
     EmbeddingPort,
     GenerationPort,
@@ -54,11 +56,13 @@ __all__ = [
     "E5EmbeddingAdapter",
     "EmbeddingPort",
     "GenerationPort",
+    "HttpModelAdapter",
     "IdempotencyConflictError",
     "ModelAuthError",
     "ModelBudgetExceededError",
     "ModelBudgetNotConfiguredError",
     "ModelContextTooLargeError",
+    "ModelGateway",
     "ModelGatewayError",
     "ModelInvalidResponseError",
     "ModelPolicyDeniedError",

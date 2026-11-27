@@ -6,7 +6,6 @@ import os
 from uuid import uuid4
 
 import pytest
-
 from agent_runtime.llm.errors import SecretAccessDeniedError, SecretNotFoundError
 from agent_runtime.llm.secrets import RedactedSecret, ScopedSecretResolver
 
@@ -60,7 +59,7 @@ class TestScopedSecretResolver:
         tenant = uuid4()
         workspace = uuid4()
         ws_str = str(workspace).replace("-", "_").upper()
-        env_key = f"MODEL_GATEWAY_SECRET_{ws_str}_MY_SECRET"
+        env_key = f"MODEL_GATEWAY_SECRET_AGENT_RUNTIME_{str(tenant).replace(chr(45), chr(95)).upper()}_{ws_str}_MY_SECRET"
         os.environ[env_key] = "secret-from-env"
         try:
             resolver = ScopedSecretResolver()
@@ -75,3 +74,10 @@ class TestScopedSecretResolver:
         with pytest.raises(SecretNotFoundError) as exc_info:
             resolver.resolve("control-api", uuid4(), uuid4(), "some-key")
         assert "closed" in str(exc_info.value)
+
+    def test_global_or_other_service_environment_key_cannot_be_resolved(self, monkeypatch) -> None:
+        tenant, workspace = uuid4(), uuid4()
+        monkeypatch.setenv("MODEL_GATEWAY_SECRET_MY_SECRET", "must-not-cross-scope")
+        resolver = ScopedSecretResolver()
+        with pytest.raises(SecretNotFoundError):
+            resolver.resolve("agent-runtime", tenant, workspace, "my-secret")

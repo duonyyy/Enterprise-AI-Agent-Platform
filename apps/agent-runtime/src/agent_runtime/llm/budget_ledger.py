@@ -8,15 +8,14 @@ transaction and must never hold it while talking to a model provider.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from platform_common.rls import set_rls_context
-from sqlalchemy import text
+from sqlalchemy import CursorResult, RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_runtime.llm.budget import AdmissionEnvelope
@@ -117,9 +116,10 @@ class PostgresModelBudgetLedger:
         )
 
         existing = (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, status, request_hash, caller_kind, caller_id, model_config_id,
                            reserved_cost_usd
                     FROM ops.model_reservations
@@ -127,14 +127,17 @@ class PostgresModelBudgetLedger:
                       AND operation_key = :operation_key
                     FOR UPDATE
                     """
-                ),
-                {
-                    "tenant_id": request.tenant_id,
-                    "workspace_id": request.workspace_id,
-                    "operation_key": request.operation_key,
-                },
+                    ),
+                    {
+                        "tenant_id": request.tenant_id,
+                        "workspace_id": request.workspace_id,
+                        "operation_key": request.operation_key,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if existing is not None:
             if (
                 existing["request_hash"] != request.request_hash
@@ -262,7 +265,9 @@ class PostgresModelBudgetLedger:
             session, tenant_id=tenant_id, workspace_id=workspace_id, reservation_id=reservation_id
         )
         if reservation["status"] != "reserved" or reservation["expires_at"] <= datetime.now(UTC):
-            raise ReservationExpiredError("Reservation is missing, expired, or no longer dispatchable")
+            raise ReservationExpiredError(
+                "Reservation is missing, expired, or no longer dispatchable"
+            )
         result = await session.execute(
             text(
                 """
@@ -288,7 +293,9 @@ class PostgresModelBudgetLedger:
         )
         dispatch_token = result.scalar_one_or_none()
         if dispatch_token is None:
-            raise ReservationExpiredError("Reservation is missing, expired, or no longer dispatchable")
+            raise ReservationExpiredError(
+                "Reservation is missing, expired, or no longer dispatchable"
+            )
         updated = await session.execute(
             text(
                 """
@@ -304,7 +311,7 @@ class PostgresModelBudgetLedger:
                 "reservation_id": reservation_id,
             },
         )
-        if updated.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], updated).rowcount != 1:
             raise SettlementConflictError("Reservation dispatch state was lost")
         return dispatch_token
 
@@ -343,7 +350,10 @@ class PostgresModelBudgetLedger:
         )
         if reservation["status"] == "settled":
             usage = await self._usage_for_reservation(
-                session, tenant_id=tenant_id, workspace_id=workspace_id, reservation_id=reservation_id
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                reservation_id=reservation_id,
             )
             if usage is None or usage["attempt_id"] != attempt_id:
                 raise SettlementConflictError("Reservation was settled by a different attempt")
@@ -393,7 +403,7 @@ class PostgresModelBudgetLedger:
                 "cost_usd": cost_usd,
             },
         )
-        if balance.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], balance).rowcount != 1:
             raise SettlementConflictError("Budget balance cannot settle reservation")
         await session.execute(
             text(
@@ -434,7 +444,11 @@ class PostgresModelBudgetLedger:
                 WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :reservation_id
                 """
             ),
-            {"tenant_id": tenant_id, "workspace_id": workspace_id, "reservation_id": reservation_id},
+            {
+                "tenant_id": tenant_id,
+                "workspace_id": workspace_id,
+                "reservation_id": reservation_id,
+            },
         )
         await session.execute(
             text(
@@ -487,7 +501,7 @@ class PostgresModelBudgetLedger:
                 "dispatch_token": dispatch_token,
             },
         )
-        if changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], changed).rowcount != 1:
             raise SettlementConflictError("Attempt cannot become unknown")
         reservation_changed = await session.execute(
             text(
@@ -498,9 +512,13 @@ class PostgresModelBudgetLedger:
                   AND id = :reservation_id AND status = 'dispatched'
                 """
             ),
-            {"tenant_id": tenant_id, "workspace_id": workspace_id, "reservation_id": reservation_id},
+            {
+                "tenant_id": tenant_id,
+                "workspace_id": workspace_id,
+                "reservation_id": reservation_id,
+            },
         )
-        if reservation_changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], reservation_changed).rowcount != 1:
             raise SettlementConflictError("Reservation cannot become unknown")
 
     async def release_before_dispatch(
@@ -540,7 +558,7 @@ class PostgresModelBudgetLedger:
                 "reserved_cost_usd": reservation["reserved_cost_usd"],
             },
         )
-        if changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], changed).rowcount != 1:
             raise SettlementConflictError("Budget balance cannot release reservation")
         await session.execute(
             text(
@@ -549,7 +567,11 @@ class PostgresModelBudgetLedger:
                 WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :reservation_id
                 """
             ),
-            {"tenant_id": tenant_id, "workspace_id": workspace_id, "reservation_id": reservation_id},
+            {
+                "tenant_id": tenant_id,
+                "workspace_id": workspace_id,
+                "reservation_id": reservation_id,
+            },
         )
 
     async def claim_unknown_attempts(
@@ -566,6 +588,35 @@ class PostgresModelBudgetLedger:
         if limit < 1 or limit > 100 or not worker_id or lease_for <= timedelta(0):
             raise ValueError("Invalid reconciliation lease request")
         await self._scope(session, tenant_id, workspace_id)
+        # A process/DB failure may prevent the Gateway from recording unknown.
+        # Recover only expired dispatched attempts; keep the full reservation,
+        # never infer that the provider did not bill from an absent response.
+        abandoned = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT r.id, a.id AS attempt_id, a.dispatch_token "
+                        "FROM ops.model_reservations r JOIN ops.model_attempts a "
+                        "ON (a.tenant_id,a.workspace_id,a.reservation_id)=(r.tenant_id,r.workspace_id,r.id) "
+                        "WHERE r.tenant_id=:tenant_id AND r.workspace_id=:workspace_id "
+                        "AND r.status='dispatched' AND a.status='dispatched' AND r.expires_at <= now() "
+                        "ORDER BY r.id LIMIT :limit FOR UPDATE OF r SKIP LOCKED"
+                    ),
+                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "limit": limit},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for attempt in abandoned:
+            await self.mark_unknown(
+                session,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                reservation_id=attempt["id"],
+                attempt_id=attempt["attempt_id"],
+                dispatch_token=attempt["dispatch_token"],
+            )
         lease_id = uuid4()
         result = await session.execute(
             text(
@@ -686,7 +737,7 @@ class PostgresModelBudgetLedger:
                 "reserved_cost_usd": reservation["reserved_cost_usd"],
             },
         )
-        if balance.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], balance).rowcount != 1:
             raise SettlementConflictError("Budget balance cannot release reconciled reservation")
         attempt_changed = await session.execute(
             text(
@@ -708,7 +759,7 @@ class PostgresModelBudgetLedger:
                 "evidence_ref": evidence_ref,
             },
         )
-        if attempt_changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], attempt_changed).rowcount != 1:
             raise SettlementConflictError("Reconciliation lease changed during release")
         reservation_changed = await session.execute(
             text(
@@ -725,7 +776,7 @@ class PostgresModelBudgetLedger:
                 "reservation_id": lease.reservation_id,
             },
         )
-        if reservation_changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], reservation_changed).rowcount != 1:
             raise SettlementConflictError("Reservation changed during reconciliation")
 
     async def settle_unknown_after_reconciliation(
@@ -798,7 +849,7 @@ class PostgresModelBudgetLedger:
                 "evidence_ref": evidence_ref,
             },
         )
-        if activated.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], activated).rowcount != 1:
             raise SettlementConflictError("Reconciliation lease is stale, expired, or not owned")
         reservation_changed = await session.execute(
             text(
@@ -815,7 +866,7 @@ class PostgresModelBudgetLedger:
                 "reservation_id": lease.reservation_id,
             },
         )
-        if reservation_changed.rowcount != 1:
+        if cast(CursorResult[tuple[object, ...]], reservation_changed).rowcount != 1:
             raise SettlementConflictError("Reservation changed during reconciliation")
         return await self.settle(
             session,
@@ -831,7 +882,11 @@ class PostgresModelBudgetLedger:
                         WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :attempt_id
                         """
                     ),
-                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "attempt_id": lease.attempt_id},
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "attempt_id": lease.attempt_id,
+                    },
                 )
             ).scalar_one(),
             provider=provider,
@@ -855,19 +910,23 @@ class PostgresModelBudgetLedger:
             raise ValueError("limit must be between 1 and 100")
         await self._scope(session, tenant_id, workspace_id)
         rows = (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, reservation_id, attempt_id, usage_source, cost_usd, observed_at
                     FROM ops.model_usage
                     WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id
                     ORDER BY observed_at DESC, id DESC
                     LIMIT :limit
                     """
-                ),
-                {"tenant_id": tenant_id, "workspace_id": workspace_id, "limit": limit},
+                    ),
+                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "limit": limit},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         return [self._usage_record(row) for row in rows]
 
     @staticmethod
@@ -883,31 +942,37 @@ class PostgresModelBudgetLedger:
             raise ValueError(f"Invalid caller_kind: {request.caller_kind}")
         if not request.operation_key or len(request.operation_key) > 128:
             raise ValueError("operation_key must be between 1 and 128 characters")
-        if len(request.request_hash) != 64 or any(c not in "0123456789abcdef" for c in request.request_hash):
+        if len(request.request_hash) != 64 or any(
+            c not in "0123456789abcdef" for c in request.request_hash
+        ):
             raise ValueError("request_hash must be a lowercase SHA-256 hex digest")
         if request.run_id is None and request.job_id is None:
             raise ValueError("A model reservation must be anchored to a real run or job")
 
     async def _locked_reservation(
         self, session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, reservation_id: UUID
-    ) -> Mapping[str, object]:
+    ) -> RowMapping:
         row = (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, budget_id, status, reserved_cost_usd, pricing_version, run_id, job_id, expires_at
                     FROM ops.model_reservations
                     WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :reservation_id
                     FOR UPDATE
                     """
-                ),
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "reservation_id": reservation_id,
-                },
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "reservation_id": reservation_id,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             raise ModelReservationNotFoundError()
         return row
@@ -915,20 +980,24 @@ class PostgresModelBudgetLedger:
     @staticmethod
     async def _locked_budget(
         session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, budget_id: UUID
-    ) -> Mapping[str, object]:
+    ) -> RowMapping:
         budget = (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, budget_limit_usd, spent_usd, reserved_usd, period_start, period_end
                     FROM ops.workspace_budgets
                     WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id AND id = :budget_id
                     FOR UPDATE
                     """
-                ),
-                {"tenant_id": tenant_id, "workspace_id": workspace_id, "budget_id": budget_id},
+                    ),
+                    {"tenant_id": tenant_id, "workspace_id": workspace_id, "budget_id": budget_id},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if budget is None:
             raise ModelBudgetNotConfiguredError("Reservation budget period was not found")
         return budget
@@ -936,21 +1005,25 @@ class PostgresModelBudgetLedger:
     @staticmethod
     async def _locked_active_budget(
         session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID
-    ) -> Mapping[str, object]:
+    ) -> RowMapping:
         budget = (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, budget_limit_usd, spent_usd, reserved_usd, period_start, period_end
                     FROM ops.workspace_budgets
                     WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id
                       AND period_start <= now() AND period_end > now()
                     FOR UPDATE
                     """
-                ),
-                {"tenant_id": tenant_id, "workspace_id": workspace_id},
+                    ),
+                    {"tenant_id": tenant_id, "workspace_id": workspace_id},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if budget is None:
             raise ModelBudgetNotConfiguredError()
         return budget
@@ -1001,27 +1074,31 @@ class PostgresModelBudgetLedger:
 
     async def _usage_for_reservation(
         self, session: AsyncSession, *, tenant_id: UUID, workspace_id: UUID, reservation_id: UUID
-    ) -> Mapping[str, object] | None:
+    ) -> RowMapping | None:
         return (
-            await session.execute(
-                text(
-                    """
+            (
+                await session.execute(
+                    text(
+                        """
                     SELECT id, reservation_id, attempt_id, usage_source, cost_usd, observed_at
                     FROM ops.model_usage
                     WHERE tenant_id = :tenant_id AND workspace_id = :workspace_id
                       AND reservation_id = :reservation_id
                     """
-                ),
-                {
-                    "tenant_id": tenant_id,
-                    "workspace_id": workspace_id,
-                    "reservation_id": reservation_id,
-                },
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace_id": workspace_id,
+                        "reservation_id": reservation_id,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
-    def _usage_record(row: Mapping[str, object]) -> UsageRecord:
+    def _usage_record(row: RowMapping) -> UsageRecord:
         return UsageRecord(
             id=row["id"],
             reservation_id=row["reservation_id"],
