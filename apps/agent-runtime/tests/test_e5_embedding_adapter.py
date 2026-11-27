@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-
 from agent_contracts.model_contracts import ModelEmbeddingRequest
 from agent_runtime.llm.embedding_adapter import E5EmbeddingAdapter
 from agent_runtime.llm.errors import ModelInvalidResponseError
@@ -15,6 +14,7 @@ from agent_runtime.llm.errors import ModelInvalidResponseError
 class TestE5EmbeddingAdapter:
     def test_query_embedding_returns_384_dimensions(self) -> None:
         mock_e5 = MagicMock()
+        mock_e5.count_tokens.return_value = 4
         mock_e5.embed_query.return_value = tuple([0.05] * 384)
 
         adapter = E5EmbeddingAdapter(mock_e5)
@@ -38,6 +38,7 @@ class TestE5EmbeddingAdapter:
 
     def test_passage_embedding_batch(self) -> None:
         mock_e5 = MagicMock()
+        mock_e5.count_tokens.return_value = 4
         mock_e5.embed_passages.return_value = (
             tuple([0.01] * 384),
             tuple([0.02] * 384),
@@ -65,6 +66,7 @@ class TestE5EmbeddingAdapter:
 
     def test_mismatched_dimensions_raises_error(self) -> None:
         mock_e5 = MagicMock()
+        mock_e5.count_tokens.return_value = 4
         # Returns 512 dimensions instead of 384
         mock_e5.embed_query.return_value = tuple([0.1] * 512)
 
@@ -73,7 +75,7 @@ class TestE5EmbeddingAdapter:
             request_id=uuid4(),
             tenant_id=uuid4(),
             workspace_id=uuid4(),
-            model_id="e5",
+            model_id="intfloat/multilingual-e5-small",
             inputs=["Test"],
             purpose="query",
         )

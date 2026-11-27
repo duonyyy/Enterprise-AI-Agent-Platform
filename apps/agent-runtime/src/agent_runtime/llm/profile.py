@@ -6,15 +6,12 @@ import re
 from typing import Any
 
 from agent_contracts.model_contracts import ModelProfile, TokenMeasurement
+
 from agent_runtime.llm.errors import ModelContextTooLargeError
 
 
 def estimate_tokens_heuristic(text: str) -> int:
-    """Conservative token upper-bound heuristic for arbitrary text.
-
-    Approximates ~3.5 chars per token for Latin script plus word-boundary padding,
-    ensuring we do not under-estimate required context.
-    """
+    """Legacy character estimate, never sufficient to admit a hard token budget."""
     if not text:
         return 0
     words = len(re.findall(r"\w+", text))
@@ -33,6 +30,11 @@ def math_ceil(v: float) -> int:
 class TokenProfiler:
     """Local token profiler providing token measurement and admission evaluation."""
 
+    def __init__(self, *, validated_utf8_models: frozenset[tuple[str, str]] = frozenset()) -> None:
+        # Only enable after checking the selected provider tokenizer's byte-level
+        # upper bound and framing. Unknown vendor tokenizers must fail admission.
+        self._validated_utf8_models = validated_utf8_models
+
     def measure(
         self,
         profile: ModelProfile,
@@ -40,17 +42,22 @@ class TokenProfiler:
         tools: list[dict[str, Any]] | None = None,
     ) -> TokenMeasurement:
         """Measure tokens with an explicit basis."""
-        tokens = estimate_tokens_heuristic(text)
+        verified = (profile.provider, profile.model_id) in self._validated_utf8_models
+        tokens = len(text.encode("utf-8")) + 256 if verified else estimate_tokens_heuristic(text)
         if tools:
             import json
 
             tools_str = json.dumps(tools)
-            tokens += estimate_tokens_heuristic(tools_str)
+            tokens += (
+                len(tools_str.encode("utf-8")) + 64 * len(tools)
+                if verified
+                else estimate_tokens_heuristic(tools_str)
+            )
 
         return TokenMeasurement(
-            input_tokens=tokens,
-            basis="validated_upper_bound",
-            profile_revision=profile.schema_version,
+            inputTokens=tokens,
+            basis="validated_upper_bound" if verified else "unknown",
+            profileRevision=profile.schema_version,
         )
 
     def evaluate_admission(

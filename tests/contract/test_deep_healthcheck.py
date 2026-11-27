@@ -5,10 +5,11 @@ against frozen sockets / thread hangs (SIGSTOP simulation), and FastAPI router e
 """
 
 import time
-import pytest
-from fastapi import Response
 
-from agent_runtime.api.health import HealthChecker, HealthStatus, deep_health_probe, get_health, liveness_probe
+from agent_runtime.api.health import (
+    HealthChecker,
+    HealthStatus,
+)
 
 
 def test_health_checker_all_healthy():
@@ -68,15 +69,25 @@ def test_health_checker_sigstop_hang_protection():
     assert "timed out" in comp["message"].lower()
 
 
-def test_fastapi_health_endpoints():
-    health = get_health()
-    assert health["status"] in ("ok", "ready", "degraded", "not_ready")
+def test_fastapi_health_endpoints(monkeypatch):
+    from agent_runtime.api import health
+    from agent_runtime.main import app
+    from agent_runtime.settings import RuntimeSettings
+    from fastapi.testclient import TestClient
 
-    liveness = liveness_probe()
-    assert liveness["status"] == "alive"
-
-    response = Response()
-    data = deep_health_probe(response)
-    assert response.status_code in (200, 503)
-    assert "components" in data
-    assert len(data["components"]) >= 2
+    monkeypatch.setattr(
+        "agent_runtime.main.get_settings",
+        lambda: RuntimeSettings(_env_file=None, model_gateway_config_path=""),
+    )
+    monkeypatch.setattr(
+        health.default_health_checker, "probes", {"fixture_db": (lambda: True, True)}
+    )
+    with TestClient(app) as client:
+        assert client.get("/health/live").json()["status"] == "alive"
+        assert client.get("/health").json()["health_state"] == "not_ready"
+        response = client.get("/health/deep")
+        assert response.status_code == 503
+        assert (
+            next(c for c in response.json()["components"] if c["name"] == "model_gateway")["status"]
+            == "failed"
+        )

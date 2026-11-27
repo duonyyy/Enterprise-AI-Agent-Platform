@@ -48,6 +48,25 @@ class E5EmbeddingModel:
     def embed_query(self, text: str) -> tuple[float, ...]:
         return self._encode((text,), prefix="query: ")[0]
 
+    def count_tokens(self, texts: Sequence[str], *, purpose: str) -> int:
+        """Count actual prefixed tokenizer input including special tokens, without truncation."""
+        if purpose not in {"query", "passage"}:
+            raise ValueError("unsupported_embedding_purpose")
+        if isinstance(texts, (str, bytes)) or not texts or len(texts) > MAX_EMBEDDING_BATCH:
+            raise ValueError("embedding_batch_size_out_of_range")
+        if any(
+            not isinstance(value, str) or not value.strip() or len(value.encode()) > MAX_TEXT_BYTES
+            for value in texts
+        ):
+            raise ValueError("embedding_text_empty_or_too_large")
+        with self._lock:
+            rows = self._model.tokenizer(
+                [f"{purpose}: {value}" for value in texts], truncation=False, padding=False
+            )["input_ids"]
+        if any(len(row) > MAX_EMBEDDING_TOKENS for row in rows):
+            raise ValueError("embedding_token_limit_exceeded")
+        return sum(len(row) for row in rows)
+
     def embed_passages(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
         return self._encode(texts, prefix="passage: ")
 

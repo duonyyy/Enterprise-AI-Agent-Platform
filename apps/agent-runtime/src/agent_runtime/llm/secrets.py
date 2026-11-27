@@ -77,22 +77,21 @@ class ScopedSecretResolver:
 
         normalized_ref = secret_ref.lower()
         if any(bad in normalized_ref for bad in _DISALLOWED_PATTERNS):
-            raise SecretAccessDeniedError(f"Access to prohibited secret pattern denied: '{secret_ref}'")
+            raise SecretAccessDeniedError(
+                f"Access to prohibited secret pattern denied: '{secret_ref}'"
+            )
 
         # 1. Check scoped static registry
         key = (service, tenant_id, workspace_id, secret_ref)
         if key in self._static_registry:
             return RedactedSecret(self._static_registry[key])
 
-        # 2. Check workspace-prefixed environment variable
-        # Format: MODEL_GATEWAY_SECRET_<TENANT>_<WORKSPACE>_<REF> or MODEL_GATEWAY_SECRET_<REF>
-        ws_env_key = f"{self._env_prefix}{str(workspace_id).replace('-', '_').upper()}_{secret_ref.replace('-', '_').upper()}"
+        # Bind service, tenant and workspace. Never fall back to a global key.
+        service_part = service.replace("-", "_").upper()
+        tenant_part = str(tenant_id).replace("-", "_").upper()
+        ws_env_key = f"{self._env_prefix}{service_part}_{tenant_part}_{str(workspace_id).replace('-', '_').upper()}_{secret_ref.replace('-', '_').upper()}"
         if ws_env_key in os.environ:
             return RedactedSecret(os.environ[ws_env_key])
-
-        global_env_key = f"{self._env_prefix}{secret_ref.replace('-', '_').upper()}"
-        if global_env_key in os.environ:
-            return RedactedSecret(os.environ[global_env_key])
 
         raise SecretNotFoundError(
             f"Secret reference '{secret_ref}' not found in workspace scope '{workspace_id}'"

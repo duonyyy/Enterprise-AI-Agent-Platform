@@ -7,12 +7,13 @@ isolation against frozen processes (SIGSTOP / connection pool exhaustion).
 from __future__ import annotations
 
 import concurrent.futures
-from dataclasses import dataclass, field
 import enum
 import time
-from typing import Callable, Dict, List, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 
 router = APIRouter(prefix="/health", tags=["Health & Observability"])
 
@@ -29,19 +30,21 @@ class ComponentReport:
     status: str  # 'ok' | 'degraded' | 'failed'
     latency_ms: float
     is_critical: bool
-    message: Optional[str] = None
+    message: str | None = None
 
 
 class HealthChecker:
     def __init__(self, probe_timeout_seconds: float = 0.5):
         self.probe_timeout_seconds = probe_timeout_seconds
-        self.probes: Dict[str, Tuple[Callable[[], bool], bool]] = {}
+        self.probes: dict[str, tuple[Callable[[], bool], bool]] = {}
 
     def register_probe(self, name: str, probe_fn: Callable[[], bool], is_critical: bool = True):
         """Registers a synchronous or lightweight check function."""
         self.probes[name] = (probe_fn, is_critical)
 
-    def _execute_probe_with_timeout(self, name: str, probe_fn: Callable[[], bool], is_critical: bool) -> ComponentReport:
+    def _execute_probe_with_timeout(
+        self, name: str, probe_fn: Callable[[], bool], is_critical: bool
+    ) -> ComponentReport:
         start = time.perf_counter()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(probe_fn)
@@ -49,7 +52,9 @@ class HealthChecker:
             is_ok = future.result(timeout=self.probe_timeout_seconds)
             latency = (time.perf_counter() - start) * 1000.0
             if is_ok:
-                return ComponentReport(name=name, status="ok", latency_ms=latency, is_critical=is_critical)
+                return ComponentReport(
+                    name=name, status="ok", latency_ms=latency, is_critical=is_critical
+                )
             else:
                 return ComponentReport(
                     name=name,
@@ -67,20 +72,20 @@ class HealthChecker:
                 is_critical=is_critical,
                 message=f"Probe timed out after {self.probe_timeout_seconds:.2f}s (possible SIGSTOP freeze)",
             )
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 -- isolate dependency failures without exposing credentials
             latency = (time.perf_counter() - start) * 1000.0
             return ComponentReport(
                 name=name,
                 status="failed" if is_critical else "degraded",
                 latency_ms=latency,
                 is_critical=is_critical,
-                message=str(exc),
+                message="Dependency probe failed",
             )
         finally:
             executor.shutdown(wait=False)
 
-    def check_all(self) -> Dict[str, Any]:
-        reports: List[ComponentReport] = []
+    def check_all(self) -> dict[str, Any]:
+        reports: list[ComponentReport] = []
         overall_status = HealthStatus.READY
 
         for name, (probe_fn, is_critical) in self.probes.items():
@@ -109,9 +114,7 @@ class HealthChecker:
 
 
 import os
-import socket
 import urllib.request
-from urllib.parse import urlparse
 
 from agent_runtime.settings import get_settings
 
@@ -125,32 +128,27 @@ def probe_postgres() -> bool:
     try:
         import psycopg
 
-        clean_url = (
-            url.replace("postgresql+asyncpg://", "postgresql://")
-            .replace("postgresql+psycopg://", "postgresql://")
+        clean_url = url.replace("postgresql+asyncpg://", "postgresql://").replace(
+            "postgresql+psycopg://", "postgresql://"
         )
-        with psycopg.connect(clean_url, connect_timeout=1) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                row = cur.fetchone()
-                return bool(row and row[0] == 1)
-    except Exception:
+        with psycopg.connect(clean_url, connect_timeout=1) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+            return bool(row and row[0] == 1)
+    except Exception:  # noqa: BLE001 -- readiness fails closed without leaking credentials
         return False
 
 
 def probe_redis() -> bool:
-    """Protocol-level PING/PONG probe to Redis server."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    """Use the configured authenticated Redis transport, including TLS when configured."""
+    import redis
+
     try:
-        parsed = urlparse(redis_url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or 6379
-        with socket.create_connection((host, port), timeout=0.8) as sock:
-            sock.settimeout(0.8)
-            sock.sendall(b"*1\r\n$4\r\nPING\r\n")
-            data = sock.recv(64)
-            return data.startswith(b"+PONG")
-    except Exception:
+        with redis.Redis.from_url(
+            get_settings().redis_url, socket_timeout=0.8, socket_connect_timeout=0.8
+        ) as client:
+            return bool(client.ping())
+    except (redis.RedisError, OSError, ValueError):
         return False
 
 
@@ -166,21 +164,7 @@ def probe_qdrant() -> bool:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=0.8) as resp:
             return 200 <= resp.status < 400
-    except Exception:
-        return False
-
-
-def probe_model_gateway() -> bool:
-    """Probes the explicitly configured model gateway URL if present."""
-    settings = get_settings()
-    url = settings.model_gateway_health_url or os.getenv("MODEL_GATEWAY_URL", "")
-    if not url:
-        return False
-    try:
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=0.8) as resp:
-            return 200 <= resp.status < 400
-    except Exception:
+    except Exception:  # noqa: BLE001 -- readiness fails closed without leaking credentials
         return False
 
 
@@ -190,24 +174,42 @@ default_health_checker = HealthChecker(probe_timeout_seconds=1.5)
 # Register real dependency probes
 default_health_checker.register_probe("database_postgres", probe_postgres, is_critical=True)
 default_health_checker.register_probe("vector_index_qdrant", probe_qdrant, is_critical=True)
-default_health_checker.register_probe("semantic_cache_redis", probe_redis, is_critical=False)
-default_health_checker.register_probe(
-    "model_gateway",
-    probe_model_gateway,
-    is_critical=bool(get_settings().model_gateway_health_url or os.getenv("MODEL_GATEWAY_URL", "")),
-)
+default_health_checker.register_probe("semantic_cache_redis", probe_redis, is_critical=True)
+
+
+def _runtime_health(request: Request) -> dict[str, Any]:
+    """Check startup-owned local capabilities; never call a paid model for health."""
+    from agent_runtime.llm.gateway import ModelGateway
+
+    result = default_health_checker.check_all()
+    gateway = getattr(request.app.state, "model_gateway", None)
+    capabilities = sorted(gateway.ready_capabilities) if isinstance(gateway, ModelGateway) else []
+    ready = bool(capabilities)
+    result["components"].append(
+        {
+            "name": "model_gateway",
+            "status": "ok" if ready else "failed",
+            "is_critical": True,
+            "latency_ms": 0.0,
+            "capabilities": capabilities,
+            "message": None if ready else "No usable model capability is provisioned",
+        }
+    )
+    if not ready:
+        result["status"] = HealthStatus.NOT_READY.value
+    return result
 
 
 @router.get("", summary="Overall health status")
-def get_health():
-    res = default_health_checker.check_all()
+def get_health(request: Request):
+    res = _runtime_health(request)
     status_val = "ok" if res["status"] in (HealthStatus.READY.value, "ok") else res["status"]
     return {"status": status_val, "health_state": res["status"], "service": "agent-runtime-v2"}
 
 
 @router.get("/ready", summary="Kubernetes Readiness Probe")
-def readiness_probe(response: Response):
-    res = default_health_checker.check_all()
+def readiness_probe(response: Response, request: Request):
+    res = _runtime_health(request)
     if res["status"] == HealthStatus.NOT_READY.value:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     else:
@@ -221,8 +223,8 @@ def liveness_probe():
 
 
 @router.get("/deep", summary="Detailed Health & Latency Report")
-def deep_health_probe(response: Response):
-    res = default_health_checker.check_all()
+def deep_health_probe(response: Response, request: Request):
+    res = _runtime_health(request)
     if res["status"] == HealthStatus.NOT_READY.value:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return res

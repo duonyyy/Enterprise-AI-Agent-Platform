@@ -83,7 +83,13 @@ def _seed_budget_scope(
         )
         conn.execute(
             "INSERT INTO iam.users (id, issuer, subject, display_name, email_normalized) VALUES (%s, %s, %s, %s, %s)",
-            (caller_id, "https://budget.test", f"caller-{caller_id.hex[:12]}", "Budget Caller", f"{caller_id.hex}@example.test"),
+            (
+                caller_id,
+                "https://budget.test",
+                f"caller-{caller_id.hex[:12]}",
+                "Budget Caller",
+                f"{caller_id.hex}@example.test",
+            ),
         )
         conn.execute(
             "INSERT INTO catalog.model_configs (tenant_id, workspace_id, id, name, provider, provider_model_id) VALUES (%s, %s, %s, 'budget-model', 'test-provider', 'test-model')",
@@ -94,10 +100,13 @@ def _seed_budget_scope(
             (tenant_id, workspace_id, agent_id),
         )
         conn.execute(
-            "INSERT INTO catalog.agent_versions (tenant_id, workspace_id, id, agent_id, version, schema_version, frozen_spec, bundle_sha256, bundle_manifest) VALUES (%s, %s, %s, %s, 1, '1.0', '{\"name\":\"budget\"}', %s, '{\"fixture\":\"budget\"}')",
+            'INSERT INTO catalog.agent_versions (tenant_id, workspace_id, id, agent_id, version, schema_version, frozen_spec, bundle_sha256, bundle_manifest) VALUES (%s, %s, %s, %s, 1, \'1.0\', \'{"name":"budget"}\', %s, \'{"fixture":"budget"}\')',
             (tenant_id, workspace_id, version_id, agent_id, "b" * 64),
         )
-        conn.execute("UPDATE catalog.agent_versions SET bindings_sealed_at = now() WHERE id = %s", (version_id,))
+        conn.execute(
+            "UPDATE catalog.agent_versions SET bindings_sealed_at = now() WHERE id = %s",
+            (version_id,),
+        )
         conn.execute(
             "INSERT INTO runtime.runs (tenant_id, workspace_id, id, agent_version_id, initiated_by, external_request_key) VALUES (%s, %s, %s, %s, %s, %s)",
             (tenant_id, workspace_id, run_id, version_id, caller_id, f"budget-{run_id.hex}"),
@@ -117,7 +126,9 @@ def _seed_budget_scope(
 
 def _request(scope: dict[str, UUID], operation_key: str) -> BudgetReservationRequest:
     profile = _profile()
-    envelope = calculate_admission_envelope(profile, prompt_tokens=1_000, requested_max_tokens=1_000)
+    envelope = calculate_admission_envelope(
+        profile, prompt_tokens=1_000, requested_max_tokens=1_000
+    )
     return BudgetReservationRequest(
         tenant_id=scope["tenant_id"],
         workspace_id=scope["workspace_id"],
@@ -158,12 +169,13 @@ def test_budget_admission_is_atomic_and_idempotent_on_real_postgres(migrated_dat
 
             winner = next(item for item in outcomes if not isinstance(item, Exception))
             assert winner.replayed is False
-            replay = await reserve("budget-race-a" if winner.id == first.id else "budget-race-b")
+            winning_key = "budget-race-a" if winner is first else "budget-race-b"
+            replay = await reserve(winning_key)
             assert replay.id == winner.id
             assert replay.replayed is True
 
             with pytest.raises(IdempotencyConflictError):
-                conflicting = _request(scope, "budget-race-a" if winner.id == first.id else "budget-race-b")
+                conflicting = _request(scope, winning_key)
                 conflicting = replace(conflicting, request_hash="c" * 64)
                 async with factory() as session, session.begin():
                     await ledger.reserve(session, conflicting)
@@ -186,7 +198,9 @@ def test_budget_admission_is_atomic_and_idempotent_on_real_postgres(migrated_dat
 @pytest.mark.integration
 def test_budget_settlement_and_unknown_outcome_preserve_durable_state(migrated_database) -> None:
     """Settlement consumes once; a dispatched timeout remains reserved and unknown."""
-    scope = _seed_budget_scope(migrated_database["owner_url"], budget_limit_usd=Decimal("0.05000000"))
+    scope = _seed_budget_scope(
+        migrated_database["owner_url"], budget_limit_usd=Decimal("0.05000000")
+    )
 
     async def scenario() -> None:
         engine = create_async_engine(_async_url(migrated_database["app_url"]), poolclass=NullPool)
@@ -355,10 +369,14 @@ def test_budget_settlement_and_unknown_outcome_preserve_durable_state(migrated_d
                     )
                 ).one()
                 statuses = (
-                    await session.execute(
-                        text("SELECT status FROM ops.model_reservations ORDER BY created_at")
+                    (
+                        await session.execute(
+                            text("SELECT status FROM ops.model_reservations ORDER BY created_at")
+                        )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 assert balance.spent_usd == Decimal("0.02600000")
                 assert balance.reserved_usd == Decimal("0.00000000")
                 assert statuses == ["settled", "released", "settled"]
@@ -488,17 +506,62 @@ def test_late_settlement_uses_the_original_budget_period(migrated_database) -> N
 
             with psycopg.connect(migrated_database["owner_url"]) as conn:
                 balances = conn.execute(
-                        """
+                    """
                         SELECT id, spent_usd, reserved_usd FROM ops.workspace_budgets
                         WHERE tenant_id = %s AND workspace_id = %s
                         ORDER BY period_start
                         """,
-                        (scope["tenant_id"], scope["workspace_id"]),
+                    (scope["tenant_id"], scope["workspace_id"]),
                 ).fetchall()
                 old_budget = next(row for row in balances if row[0] == old_budget_id)
                 new_budget = next(row for row in balances if row[0] != old_budget_id)
                 assert old_budget[1:] == (Decimal("0.01100000"), Decimal("0.00000000"))
                 assert new_budget[1:] == (Decimal("0.00000000"), Decimal("0.00000000"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_expired_dispatch_after_process_loss_is_reconcilable_without_refund(migrated_database):
+    scope = _seed_budget_scope(migrated_database["owner_url"])
+
+    async def scenario():
+        engine = create_async_engine(_async_url(migrated_database["app_url"]), poolclass=NullPool)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        ledger = PostgresModelBudgetLedger()
+        try:
+            async with factory() as session, session.begin():
+                reservation = await ledger.reserve(session, _request(scope, "crashed-dispatch"))
+            async with factory() as session, session.begin():
+                await ledger.mark_dispatched(
+                    session,
+                    tenant_id=scope["tenant_id"],
+                    workspace_id=scope["workspace_id"],
+                    reservation_id=reservation.id,
+                    attempt_id=reservation.attempt_id,
+                )
+            with psycopg.connect(migrated_database["owner_url"]) as conn:
+                conn.execute(
+                    "UPDATE ops.model_reservations SET expires_at=now()-interval '1 second' WHERE id=%s",
+                    (reservation.id,),
+                )
+            async with factory() as session, session.begin():
+                leases = await ledger.claim_unknown_attempts(
+                    session,
+                    tenant_id=scope["tenant_id"],
+                    workspace_id=scope["workspace_id"],
+                    worker_id="recovery",
+                    limit=10,
+                    lease_for=timedelta(minutes=1),
+                )
+                assert [lease.reservation_id for lease in leases] == [reservation.id]
+            with psycopg.connect(migrated_database["owner_url"]) as conn:
+                row = conn.execute(
+                    "SELECT r.status,b.reserved_usd FROM ops.model_reservations r JOIN ops.workspace_budgets b ON b.id=r.budget_id WHERE r.id=%s",
+                    (reservation.id,),
+                ).fetchone()
+                assert row[0] == "unknown" and row[1] == reservation.reserved_cost_usd
         finally:
             await engine.dispose()
 
