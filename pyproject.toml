@@ -17,6 +17,7 @@ members = [
 [tool.uv.sources]
 platform-common = { workspace = true }
 agent-contracts = { workspace = true }
+agent-runtime = { workspace = true }
 
 [dependency-groups]
 dev = [

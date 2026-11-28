@@ -70,6 +70,9 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
     )
     assert "0008_model_budget_ledger.sql adds durable workspace budget" in result.stdout
     assert "0010_run_queue_deadline_and_job_closure.sql adds run queue deadline" in result.stdout
+    assert (
+        "0011_run_execution_authority_and_fences.sql adds run execution authority" in result.stdout
+    )
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -120,6 +123,20 @@ def test_queue_deadline_guard_delta_cannot_be_silently_weakened(tmp_path: Path) 
     )
     assert any(
         "reviewed queue deadline and job closure guards" in e
+        for e in validator.validate_database_schema(migrations_dir)
+    )
+
+
+def test_execution_authority_guard_delta_cannot_be_silently_weakened(tmp_path: Path) -> None:
+    validator = _load_validator_module()
+    migrations_dir = _copy_migrations(tmp_path)
+    path = migrations_dir / "0011_run_execution_authority_and_fences.sql"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("interval '30 days'", "interval '60 days'"),
+        encoding="utf-8",
+    )
+    assert any(
+        "reviewed execution authority and fence guards" in e
         for e in validator.validate_database_schema(migrations_dir)
     )
 

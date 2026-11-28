@@ -77,6 +77,11 @@ def build_run_admission_service(
         if active_settings.run_admission_execution_enabled
         else "no_executor_configured",
         queue_ttl_seconds=active_settings.run_queue_ttl_seconds,
+        execution_grants_enabled=active_settings.run_execution_grants_enabled,
+        execution_key=active_settings.run_execution_key,
+        execution_key_id=active_settings.run_execution_key_id,
+        jwt_issuer=active_settings.runtime_jwt_issuer,
+        settings=active_settings,
     )
 
 
@@ -217,6 +222,10 @@ async def get_run(
         finished_at=record.finished_at.isoformat() if record.finished_at else None,
         created_at=record.created_at.isoformat() if record.created_at else None,
         queue_expires_at=record.queue_expires_at.isoformat() if record.queue_expires_at else None,
+        execution_deadline_at=record.execution_deadline_at.isoformat()
+        if record.execution_deadline_at
+        else None,
+        error_code=record.error_code,
     )
 
 
