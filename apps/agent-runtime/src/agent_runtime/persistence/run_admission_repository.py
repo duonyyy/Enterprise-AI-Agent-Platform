@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -146,6 +147,7 @@ class RunAdmissionRepository:
                     text(f"""
                         SELECT id, agent_version_id, conversation_id, initiated_by, status,
                                request_sha256,
+                               (execution_authority_ciphertext IS NOT NULL) AS has_execution_authority,
                                (receipt_expires_at IS NOT NULL
                                 AND clock_timestamp() >= receipt_expires_at
                                 AND NOT EXISTS (
@@ -190,6 +192,7 @@ class RunAdmissionRepository:
             status=str(run_row["status"]),
             request_sha256=request_sha256,
             receipt_expired=bool(run_row["receipt_expired"]),
+            has_execution_authority=bool(run_row.get("has_execution_authority", False)),
         )
 
     async def validate_pinned_agent_version(
@@ -519,6 +522,9 @@ class RunAdmissionRepository:
         input_sha256: str,
         input_size_bytes: int,
         queue_ttl_seconds: int = 86400,
+        execution_authority_ciphertext: bytes | None = None,
+        execution_authority_key_id: str | None = None,
+        authority_expires_at: datetime | None = None,
     ) -> bool:
         """Atomically insert queued run on (tenant_id, workspace_id, external_request_key)."""
         res = await session.execute(
@@ -529,13 +535,15 @@ class RunAdmissionRepository:
                 INSERT INTO runtime.runs (
                     id, tenant_id, workspace_id, agent_version_id, conversation_id,
                     initiated_by, external_request_key, status, trace_id, next_event_seq, created_at,
-                    request_sha256, input_ref, input_sha256, input_size_bytes, queue_expires_at
+                    request_sha256, input_ref, input_sha256, input_size_bytes, queue_expires_at,
+                    execution_authority_ciphertext, execution_authority_key_id, authority_expires_at
                 )
                 SELECT
                     :run_id, :tenant_id, :workspace_id, :agent_version_id, :conversation_id,
                     :initiated_by, :external_request_key, 'queued', :trace_id, 1, clock.ts,
                     :request_sha256, :input_ref, :input_sha256, :input_size_bytes,
-                    clock.ts + make_interval(secs => :queue_ttl_seconds)
+                    clock.ts + make_interval(secs => :queue_ttl_seconds),
+                    :execution_authority_ciphertext, :execution_authority_key_id, :authority_expires_at
                 FROM clock
                 ON CONFLICT (tenant_id, workspace_id, external_request_key) DO NOTHING
                 RETURNING id
@@ -554,6 +562,9 @@ class RunAdmissionRepository:
                 "input_sha256": input_sha256,
                 "input_size_bytes": input_size_bytes,
                 "queue_ttl_seconds": queue_ttl_seconds,
+                "execution_authority_ciphertext": execution_authority_ciphertext,
+                "execution_authority_key_id": execution_authority_key_id,
+                "authority_expires_at": authority_expires_at,
             },
         )
         return res.scalar_one_or_none() is not None
@@ -679,7 +690,8 @@ class RunAdmissionRepository:
                     text("""
                         SELECT id, agent_version_id, conversation_id, workflow_version_id,
                                initiated_by, status, trace_id, next_event_seq,
-                               started_at, finished_at, created_at, queue_expires_at
+                               started_at, finished_at, created_at, queue_expires_at,
+                               execution_deadline_at, error_code
                         FROM runtime.runs
                         WHERE tenant_id = :tenant_id
                           AND workspace_id = :workspace_id
@@ -714,4 +726,6 @@ class RunAdmissionRepository:
             finished_at=row["finished_at"],
             created_at=row["created_at"],
             queue_expires_at=row["queue_expires_at"],
+            execution_deadline_at=row["execution_deadline_at"],
+            error_code=row["error_code"],
         )

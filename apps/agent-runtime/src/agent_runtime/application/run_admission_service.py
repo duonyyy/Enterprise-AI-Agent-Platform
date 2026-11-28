@@ -6,11 +6,20 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
+from agent_runtime.application.execution.grant import (
+    DEFAULT_KEY_ID,
+    ExecutionGrant,
+    ExecutionKeyUnavailableError,
+    encrypt_execution_grant,
+    normalize_encryption_key,
+)
 from agent_runtime.application.run_admission import (
     DEFAULT_ADMISSION_EVENT_TYPE,
     INITIAL_RUN_STATUS,
@@ -43,9 +52,15 @@ from agent_runtime.application.run_data import (
     RunDataValidationError,
 )
 from agent_runtime.application.run_data_service import RunDataService, StagedRunObject
-from agent_runtime.auth import RuntimePrincipal, has_effective_runtime_scope
+from agent_runtime.auth import (
+    ParentSessionVerifierProtocol,
+    RuntimePrincipal,
+    get_parent_session_verifier,
+    has_effective_runtime_scope,
+)
 from agent_runtime.persistence.database import RuntimeDatabaseUnavailable
 from agent_runtime.persistence.run_data_repository import RunDataRepository
+from agent_runtime.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +92,12 @@ class RunAdmissionService:
         availability_reason: str | None = "no_executor_configured",
         initial_event_type: str = DEFAULT_ADMISSION_EVENT_TYPE,
         queue_ttl_seconds: int = 86400,
+        execution_grants_enabled: bool = False,
+        execution_key: str = "",
+        execution_key_id: str = DEFAULT_KEY_ID,
+        jwt_issuer: str = "",
+        parent_session_verifier: ParentSessionVerifierProtocol | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._run_data_service = run_data_service
@@ -90,6 +111,12 @@ class RunAdmissionService:
         self._availability_reason = availability_reason if not execution_available else None
         self._initial_event_type = initial_event_type
         self._queue_ttl_seconds = queue_ttl_seconds
+        self._execution_grants_enabled = execution_grants_enabled
+        self._execution_key = execution_key
+        self._execution_key_id = execution_key_id
+        self._jwt_issuer = jwt_issuer
+        self._parent_session_verifier = parent_session_verifier
+        self._settings = settings
 
     def _resolve_replay_or_conflict(
         self,
@@ -433,22 +460,102 @@ class RunAdmissionService:
                     tenant_id=principal.tenant_id,
                     workspace_id=principal.workspace_id,
                 )
-                inserted = await self._repo.insert_run_if_absent(
-                    session,
-                    run_id=run_id,
-                    tenant_id=principal.tenant_id,
-                    workspace_id=principal.workspace_id,
-                    agent_version_id=parsed.agent_version_id,
-                    conversation_id=parsed.conversation_id,
-                    initiated_by=principal.user_id,
-                    external_request_key=parsed.idempotency_key,
-                    trace_id=resolved_trace_id,
-                    request_sha256=parsed.request_sha256,
-                    input_ref=staged.receipt.ref,
-                    input_sha256=staged.receipt.sha256,
-                    input_size_bytes=staged.receipt.size_bytes,
-                    queue_ttl_seconds=self._queue_ttl_seconds,
-                )
+
+                authority_ciphertext: bytes | None = None
+                authority_key_id: str | None = None
+                authority_expires_at_dt: datetime | None = None
+
+                if self._execution_grants_enabled:
+                    if principal.session_id is None:
+                        raise RunAdmissionAccessDeniedError(
+                            "Parent application session is required",
+                            code="parent_session_missing",
+                        )
+                    verifier = self._parent_session_verifier or get_parent_session_verifier(
+                        self._settings
+                    )
+                    try:
+                        sess_status, sess_data = verifier.verify_parent_session(
+                            session_id=principal.session_id,
+                            user_id=principal.user_id,
+                        )
+                    except HTTPException as exc:
+                        raise RunAdmissionUnavailableError(
+                            "Session verification service temporarily unavailable",
+                            code="service_unavailable",
+                        ) from exc
+                    except Exception as exc:
+                        raise RunAdmissionUnavailableError(
+                            "Session verification service temporarily unavailable",
+                            code="service_unavailable",
+                        ) from exc
+
+                    if sess_status != "OK" or not isinstance(sess_data, dict):
+                        raise RunAdmissionAccessDeniedError(
+                            "Parent session is inactive or revoked",
+                            code="parent_session_inactive",
+                        )
+
+                    now_dt = datetime.now(UTC)
+                    parent_abs_exp_ts = sess_data.get("absolute_expires_at")
+                    max_grant_dt = now_dt + timedelta(hours=24)
+                    if isinstance(parent_abs_exp_ts, (int, float)) and parent_abs_exp_ts > 0:
+                        parent_abs_dt = datetime.fromtimestamp(parent_abs_exp_ts, tz=UTC)
+                        authority_expires_at_dt = min(parent_abs_dt, max_grant_dt)
+                    else:
+                        authority_expires_at_dt = max_grant_dt
+
+                    grant = ExecutionGrant(
+                        issuer=self._jwt_issuer or "agent-runtime",
+                        subject=principal.subject,
+                        user_id=principal.user_id,
+                        tenant_id=principal.tenant_id,
+                        workspace_id=principal.workspace_id,
+                        run_id=run_id,
+                        parent_session_id=principal.session_id,
+                        parent_rotation_version=int(sess_data.get("rotation_version", 1)),
+                        original_scopes=tuple(sorted(principal.token_scopes or principal.scopes))[
+                            :64
+                        ],
+                        granted_at=now_dt.isoformat(),
+                        authority_expires_at=authority_expires_at_dt.isoformat(),
+                    )
+
+                    try:
+                        key_bytes = normalize_encryption_key(self._execution_key)
+                        authority_ciphertext, authority_key_id, _ = encrypt_execution_grant(
+                            grant=grant,
+                            key=key_bytes,
+                            key_id=self._execution_key_id,
+                        )
+                    except ExecutionKeyUnavailableError as exc:
+                        raise RunAdmissionUnavailableError(
+                            "Run execution encryption key is unavailable",
+                            code="service_unavailable",
+                        ) from exc
+
+                insert_kwargs: dict[str, Any] = {
+                    "session": session,
+                    "run_id": run_id,
+                    "tenant_id": principal.tenant_id,
+                    "workspace_id": principal.workspace_id,
+                    "agent_version_id": parsed.agent_version_id,
+                    "conversation_id": parsed.conversation_id,
+                    "initiated_by": principal.user_id,
+                    "external_request_key": parsed.idempotency_key,
+                    "trace_id": resolved_trace_id,
+                    "request_sha256": parsed.request_sha256,
+                    "input_ref": staged.receipt.ref,
+                    "input_sha256": staged.receipt.sha256,
+                    "input_size_bytes": staged.receipt.size_bytes,
+                    "queue_ttl_seconds": self._queue_ttl_seconds,
+                }
+                if self._execution_grants_enabled:
+                    insert_kwargs["execution_authority_ciphertext"] = authority_ciphertext
+                    insert_kwargs["execution_authority_key_id"] = authority_key_id
+                    insert_kwargs["authority_expires_at"] = authority_expires_at_dt
+
+                inserted = await self._repo.insert_run_if_absent(**insert_kwargs)
                 if not inserted:
                     existing = await self._repo.lookup_existing_admission(
                         session,

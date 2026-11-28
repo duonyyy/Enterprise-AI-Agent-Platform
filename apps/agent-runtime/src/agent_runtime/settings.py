@@ -55,6 +55,15 @@ class RuntimeSettings(BaseSettings):
     run_admission_execution_enabled: bool = False
     run_queue_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
     run_maintenance_mutations_enabled: bool = False
+    run_execution_grants_enabled: bool = False
+    run_execution_key: str = ""
+    run_execution_key_id: str = "key-exec-v1"
+    run_worker_execution_enabled: bool = False
+    run_execution_max_wall_time_seconds: int = Field(default=180, ge=1, le=900)
+    run_lease_duration_seconds: int = Field(default=30, ge=30, le=120)
+    run_heartbeat_interval_seconds: int = Field(default=5, ge=1, le=10)
+    run_max_claim_attempts: int = Field(default=3, ge=1, le=3)
+    run_workspace_concurrency_cap: int = Field(default=2, ge=1, le=10)
 
 
 @lru_cache(maxsize=1)

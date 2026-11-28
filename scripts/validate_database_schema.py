@@ -25,6 +25,7 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0008_model_budget_ledger.sql",
     "0009_run_admission_receipt_columns.sql",
     "0010_run_queue_deadline_and_job_closure.sql",
+    "0011_run_execution_authority_and_fences.sql",
 )
 
 APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
@@ -52,6 +53,9 @@ REVIEWED_AGENT_PUBLISH_RECEIPTS_FINGERPRINT: Final[str] = (
 )
 REVIEWED_QUEUE_DEADLINE_FINGERPRINT: Final[str] = (
     "e9dfb2c460e61ba991d50593d38ab4f09089c25b945cf4da9d5d7970aa14e44a"
+)
+REVIEWED_EXECUTION_AUTHORITY_FINGERPRINT: Final[str] = (
+    "8f2add001c854d27c33f5eb8afeb061bd6047c61908cf36ebdf90d9b212dadcd"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -929,6 +933,14 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
             "0010_run_queue_deadline_and_job_closure.sql differs from reviewed queue deadline and job closure guards"
         )
 
+    execution_authority_sql = (
+        target_dir / "0011_run_execution_authority_and_fences.sql"
+    ).read_text(encoding="utf-8-sig")
+    if _sql_structure(execution_authority_sql)[1] != REVIEWED_EXECUTION_AUTHORITY_FINGERPRINT:
+        errors.append(
+            "0011_run_execution_authority_and_fences.sql differs from reviewed execution authority and fence guards"
+        )
+
     return errors
 
 
@@ -1139,7 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 10 ordered migrations, 7 schemas, 56 baseline + 5 deltas = 61 canonical tables, "
+        f"PASS static checks: {len(EXPECTED_MIGRATIONS)} ordered migrations, 7 schemas, 56 baseline + 5 deltas = 61 canonical tables, "
         "recognized FK/UNIQUE declarations, 55 baseline + 5 deltas = 60 RLS declarations, "
         "10 immutable trigger declarations + 1 document guard + 1 version sealing guard + 1 admission receipt guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
@@ -1169,6 +1181,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0010_run_queue_deadline_and_job_closure.sql adds run queue deadline, job closure reason, and receipt deadline guards (ADR-025 / 06-D)."
+    )
+    print(
+        "0011_run_execution_authority_and_fences.sql adds run execution authority, lease fencing, deadline and state owner guards (ADR-026 / 07-A)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

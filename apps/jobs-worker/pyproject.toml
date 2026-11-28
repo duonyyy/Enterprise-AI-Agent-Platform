@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "platform-common",
     "cryptography>=44.0.0",
+    "agent-runtime",
 ]
 [build-system]
 requires = ["hatchling"]

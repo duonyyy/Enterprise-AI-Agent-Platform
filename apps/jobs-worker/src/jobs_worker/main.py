@@ -8,7 +8,7 @@ import logging
 import os
 import signal
 
-from jobs_worker.invitation_consumer import InvitationOutboxConsumer, _parse_bool_env
+from jobs_worker.invitation_consumer import InvitationOutboxConsumer, parse_bool_env
 from jobs_worker.worker import JobWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -33,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    invitations_enabled = _parse_bool_env("INVITATIONS_ENABLED", default=False)
+    invitations_enabled = parse_bool_env("INVITATIONS_ENABLED", default=False)
     run_jobs = args.mode in {"all", "jobs"}
     run_invitations = args.mode == "invitations" or (args.mode == "all" and invitations_enabled)
 
@@ -59,12 +59,16 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.once:
         if job_worker is not None:
-            job_worker.reclaim_expired_leases()
-            while True:
-                job = job_worker.lease_next_job()
-                if job is None:
-                    break
-                job_worker.process_job(job)
+
+            async def _run_once_jobs() -> None:
+                job_worker.reclaim_expired_leases()
+                while True:
+                    job = job_worker.lease_next_job()
+                    if job is None:
+                        break
+                    await job_worker.process_job_async(job)
+
+            asyncio.run(_run_once_jobs())
         if invitation_consumer is not None:
             processed = invitation_consumer.run_once()
             logger.info("InvitationOutboxConsumer --once processed %d event(s)", processed)

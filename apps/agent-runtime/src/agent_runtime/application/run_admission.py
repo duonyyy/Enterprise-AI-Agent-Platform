@@ -142,6 +142,8 @@ class RunMetadataResponseDTO(BaseModel):
     finished_at: str | None
     created_at: str | None
     queue_expires_at: str | None = None
+    execution_deadline_at: str | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +157,7 @@ class ExistingRunAdmission:
     status: str
     request_sha256: str | None
     receipt_expired: bool = False
+    has_execution_authority: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +203,8 @@ class AdmittedRunMetadata:
     finished_at: datetime | None
     created_at: datetime | None
     queue_expires_at: datetime | None = None
+    execution_deadline_at: datetime | None = None
+    error_code: str | None = None
 
 
 def validate_idempotency_key(raw_key: str | None) -> str:
@@ -365,6 +370,9 @@ class RunAdmissionRepositoryPort(Protocol):
         input_sha256: str,
         input_size_bytes: int,
         queue_ttl_seconds: int = 86400,
+        execution_authority_ciphertext: bytes | None = None,
+        execution_authority_key_id: str | None = None,
+        authority_expires_at: datetime | None = None,
     ) -> bool: ...
 
     async def insert_queued_run_job(
