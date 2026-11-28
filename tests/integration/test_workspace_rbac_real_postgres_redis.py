@@ -218,7 +218,9 @@ def _seed_extra_members_and_dual_ws_user(owner_url: str, seeded: dict[str, Any])
     }
 
 
-def _seed_runtime_run(owner_url: str, *, tenant_id: UUID, workspace_id: UUID, user_id: UUID) -> UUID:
+def _seed_runtime_run(
+    owner_url: str, *, tenant_id: UUID, workspace_id: UUID, user_id: UUID
+) -> UUID:
     agent_id = uuid4()
     version_id = uuid4()
     run_id = uuid4()
@@ -256,7 +258,7 @@ def _seed_runtime_run(owner_url: str, *, tenant_id: UUID, workspace_id: UUID, us
             """
             INSERT INTO runtime.run_events (
                 tenant_id, workspace_id, run_id, sequence, event_type, redacted_payload
-            ) VALUES (%s, %s, %s, 1, 'run.started', '{"step":"init"}'::jsonb)
+            ) VALUES (%s, %s, %s, 1, 'run.started', '{"status":"running"}'::jsonb)
             """,
             (tenant_id, workspace_id, run_id),
         )
@@ -304,7 +306,9 @@ class _TcpRelay:
             except OSError:
                 break
             try:
-                upstream = socket.create_connection((self._target_host, self._target_port), timeout=2.0)
+                upstream = socket.create_connection(
+                    (self._target_host, self._target_port), timeout=2.0
+                )
             except OSError:
                 client_sock.close()
                 continue
@@ -358,12 +362,24 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                 subjs = extra["subjects"]
                 mids = extra["memberships"]
 
-                owner_h = _issue_session_cookie_header(seeded["owner_a"], issuer, subjs[seeded["owner_a"]])
-                admin_h = _issue_session_cookie_header(seeded["admin_a"], issuer, subjs[seeded["admin_a"]])
-                dev_h = _issue_session_cookie_header(seeded["dev_a"], issuer, subjs[seeded["dev_a"]])
-                op_h = _issue_session_cookie_header(extra["operator_a"], issuer, subjs[extra["operator_a"]])
-                view_h = _issue_session_cookie_header(extra["viewer_a"], issuer, subjs[extra["viewer_a"]])
-                owner_b_h = _issue_session_cookie_header(seeded["owner_b"], issuer, subjs[seeded["owner_b"]])
+                owner_h = _issue_session_cookie_header(
+                    seeded["owner_a"], issuer, subjs[seeded["owner_a"]]
+                )
+                admin_h = _issue_session_cookie_header(
+                    seeded["admin_a"], issuer, subjs[seeded["admin_a"]]
+                )
+                dev_h = _issue_session_cookie_header(
+                    seeded["dev_a"], issuer, subjs[seeded["dev_a"]]
+                )
+                op_h = _issue_session_cookie_header(
+                    extra["operator_a"], issuer, subjs[extra["operator_a"]]
+                )
+                view_h = _issue_session_cookie_header(
+                    extra["viewer_a"], issuer, subjs[extra["viewer_a"]]
+                )
+                owner_b_h = _issue_session_cookie_header(
+                    seeded["owner_b"], issuer, subjs[seeded["owner_b"]]
+                )
 
                 admin_mid = mids[(ws_a, seeded["admin_a"])]
                 dev_mid = mids[(ws_a, seeded["dev_a"])]
@@ -373,14 +389,20 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                 owner1_mid = mids[(ws_a, seeded["owner_a"])]
 
                 transport = ASGITransport(app=control_app)
-                async with AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+                async with AsyncClient(
+                    transport=transport, base_url="http://localhost:8000"
+                ) as client:
                     # 1. Non-admin roles cannot view or mutate memberships
                     for role_h in (dev_h, op_h, view_h):
                         r = await client.get(f"/v1/workspaces/{ws_a}/memberships", headers=role_h)
                         assert r.status_code == 403
                         r2 = await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{op_mid}/role",
-                            json={"role": "viewer", "expected_role": "operator", "expected_status": "active"},
+                            json={
+                                "role": "viewer",
+                                "expected_role": "operator",
+                                "expected_status": "active",
+                            },
                             headers=role_h,
                         )
                         assert r2.status_code == 403
@@ -458,21 +480,33 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{owner1_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=admin_h,
                         )
                     ).status_code == 403
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{admin_mid}/role",
-                            json={"role": "owner", "expected_role": "admin", "expected_status": "active"},
+                            json={
+                                "role": "owner",
+                                "expected_role": "admin",
+                                "expected_status": "active",
+                            },
                             headers=admin_h,
                         )
                     ).status_code == 403
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                            json={"role": "admin", "expected_role": "developer", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "developer",
+                                "expected_status": "active",
+                            },
                             headers=admin_h,
                         )
                     ).status_code == 403
@@ -487,7 +521,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     # Admin CAN update developer -> operator -> developer
                     adm_upd = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                        json={"role": "operator", "expected_role": "developer", "expected_status": "active"},
+                        json={
+                            "role": "operator",
+                            "expected_role": "developer",
+                            "expected_status": "active",
+                        },
                         headers=admin_h,
                     )
                     assert adm_upd.status_code == 200
@@ -496,7 +534,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
 
                     adm_back = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                        json={"role": "developer", "expected_role": "operator", "expected_status": "active"},
+                        json={
+                            "role": "developer",
+                            "expected_role": "operator",
+                            "expected_status": "active",
+                        },
                         headers=admin_h,
                     )
                     assert adm_back.status_code == 200
@@ -504,7 +546,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     # 5. Stale expected_role returns 409 & writes 0 audit rows; no-op writes 0 audit rows
                     stale = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                        json={"role": "operator", "expected_role": "operator", "expected_status": "active"},
+                        json={
+                            "role": "operator",
+                            "expected_role": "operator",
+                            "expected_status": "active",
+                        },
                         headers=owner_h,
                     )
                     assert stale.status_code == 409
@@ -512,7 +558,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
 
                     noop = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                        json={"role": "developer", "expected_role": "developer", "expected_status": "active"},
+                        json={
+                            "role": "developer",
+                            "expected_role": "developer",
+                            "expected_status": "active",
+                        },
                         headers=owner_h,
                     )
                     assert noop.status_code == 200
@@ -541,7 +591,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     # 7. Owner promotion & last-owner protection
                     prom = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{admin_mid}/role",
-                        json={"role": "owner", "expected_role": "admin", "expected_status": "active"},
+                        json={
+                            "role": "owner",
+                            "expected_role": "admin",
+                            "expected_status": "active",
+                        },
                         headers=owner_h,
                     )
                     assert prom.status_code == 200
@@ -551,21 +605,33 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{owner2_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=owner_h,
                         )
                     ).status_code == 200
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{admin_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=owner_h,
                         )
                     ).status_code == 200
 
                     last_demote = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{owner1_mid}/role",
-                        json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                        json={
+                            "role": "admin",
+                            "expected_role": "owner",
+                            "expected_status": "active",
+                        },
                         headers=owner_h,
                     )
                     assert last_demote.status_code == 409
@@ -587,7 +653,11 @@ def test_rbac_matrix_pagination_privacy_audit_and_rls_real_pg_redis(
                     assert cross_list.status_code == 403
                     cross_patch = await client.patch(
                         f"/v1/workspaces/{ws_b}/memberships/{dev_mid}/role",
-                        json={"role": "viewer", "expected_role": "developer", "expected_status": "active"},
+                        json={
+                            "role": "viewer",
+                            "expected_role": "developer",
+                            "expected_status": "active",
+                        },
                         headers=owner_b_h,
                     )
                     assert cross_patch.status_code == 404
@@ -667,9 +737,15 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                 subjs = extra["subjects"]
                 mids = extra["memberships"]
 
-                owner1_h = _issue_session_cookie_header(seeded["owner_a"], issuer, subjs[seeded["owner_a"]])
-                owner2_h = _issue_session_cookie_header(extra["owner2_a"], issuer, subjs[extra["owner2_a"]])
-                admin_h = _issue_session_cookie_header(seeded["admin_a"], issuer, subjs[seeded["admin_a"]])
+                owner1_h = _issue_session_cookie_header(
+                    seeded["owner_a"], issuer, subjs[seeded["owner_a"]]
+                )
+                owner2_h = _issue_session_cookie_header(
+                    extra["owner2_a"], issuer, subjs[extra["owner2_a"]]
+                )
+                admin_h = _issue_session_cookie_header(
+                    seeded["admin_a"], issuer, subjs[seeded["admin_a"]]
+                )
 
                 owner1_mid = mids[(ws_a, seeded["owner_a"])]
                 owner2_mid = mids[(ws_a, extra["owner2_a"])]
@@ -677,17 +753,27 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                 dev_mid = mids[(ws_a, seeded["dev_a"])]
 
                 transport = ASGITransport(app=control_app)
-                async with AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+                async with AsyncClient(
+                    transport=transport, base_url="http://localhost:8000"
+                ) as client:
                     # 1. Race A: Owner1 demotes Owner2 while Owner2 concurrently demotes Owner1
                     r1, r2 = await asyncio.gather(
                         client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{owner2_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=owner1_h,
                         ),
                         client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{owner1_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=owner2_h,
                         ),
                     )
@@ -701,7 +787,11 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                     assert (
                         await client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{winner_target}/role",
-                            json={"role": "owner", "expected_role": "admin", "expected_status": "active"},
+                            json={
+                                "role": "owner",
+                                "expected_role": "admin",
+                                "expected_status": "active",
+                            },
                             headers=active_owner_h,
                         )
                     ).status_code == 200
@@ -727,7 +817,11 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                     lo1, lo2 = await asyncio.gather(
                         client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{survivor_mid}/role",
-                            json={"role": "admin", "expected_role": "owner", "expected_status": "active"},
+                            json={
+                                "role": "admin",
+                                "expected_role": "owner",
+                                "expected_status": "active",
+                            },
                             headers=survivor_h,
                         ),
                         client.post(
@@ -736,8 +830,14 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                             headers=survivor_h,
                         ),
                     )
-                    assert lo1.status_code == 409 and lo1.json()["detail"]["code"] == "last_owner_protected"
-                    assert lo2.status_code == 409 and lo2.json()["detail"]["code"] == "last_owner_protected"
+                    assert (
+                        lo1.status_code == 409
+                        and lo1.json()["detail"]["code"] == "last_owner_protected"
+                    )
+                    assert (
+                        lo2.status_code == 409
+                        and lo2.json()["detail"]["code"] == "last_owner_protected"
+                    )
 
                     # 3. Race C: Remaining owner revokes Admin while Admin mutates Developer
                     ra, rb = await asyncio.gather(
@@ -748,7 +848,11 @@ def test_concurrent_last_owner_and_revoke_serialization_real_postgres(
                         ),
                         client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/role",
-                            json={"role": "operator", "expected_role": "developer", "expected_status": "active"},
+                            json={
+                                "role": "operator",
+                                "expected_role": "developer",
+                                "expected_status": "active",
+                            },
                             headers=admin_h,
                         ),
                     )
@@ -854,14 +958,22 @@ def test_promoted_owner_accepted_invitation_replay_compatibility(
                     subject=subjs[admin_a],
                     identity_evidence=admin_ev,
                 )
-                owner_h = _issue_session_cookie_header(seeded["owner_a"], issuer, subjs[seeded["owner_a"]])
+                owner_h = _issue_session_cookie_header(
+                    seeded["owner_a"], issuer, subjs[seeded["owner_a"]]
+                )
 
                 transport = ASGITransport(app=control_app)
-                async with AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+                async with AsyncClient(
+                    transport=transport, base_url="http://localhost:8000"
+                ) as client:
                     # Promote admin_a to owner via Step 03-D API
                     prom = await client.patch(
                         f"/v1/workspaces/{ws_a}/memberships/{admin_mid}/role",
-                        json={"role": "owner", "expected_role": "admin", "expected_status": "active"},
+                        json={
+                            "role": "owner",
+                            "expected_role": "admin",
+                            "expected_status": "active",
+                        },
                         headers=owner_h,
                     )
                     assert prom.status_code == 200
@@ -943,8 +1055,12 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
         subjs = extra["subjects"]
         mids = extra["memberships"]
 
-        run_a_id = _seed_runtime_run(owner_url, tenant_id=tenant_a, workspace_id=ws_a, user_id=seeded["dev_a"])
-        run_b_id = _seed_runtime_run(owner_url, tenant_id=tenant_b, workspace_id=ws_b, user_id=seeded["dev_a"])
+        run_a_id = _seed_runtime_run(
+            owner_url, tenant_id=tenant_a, workspace_id=ws_a, user_id=seeded["dev_a"]
+        )
+        run_b_id = _seed_runtime_run(
+            owner_url, tenant_id=tenant_b, workspace_id=ws_b, user_id=seeded["dev_a"]
+        )
 
         runtime_secret = settings.runtime_jwt_secret.get_secret_value()
         if len(runtime_secret) < 32:
@@ -1015,8 +1131,12 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
             stderr=subprocess.STDOUT,
         )
 
-        _wait_http_ready(f"http://127.0.0.1:{port_main}/health/live", proc=proc_main, log_path=main_log)
-        _wait_http_ready(f"http://127.0.0.1:{port_relay}/health/live", proc=proc_relay, log_path=relay_log)
+        _wait_http_ready(
+            f"http://127.0.0.1:{port_main}/health/live", proc=proc_main, log_path=main_log
+        )
+        _wait_http_ready(
+            f"http://127.0.0.1:{port_relay}/health/live", proc=proc_relay, log_path=relay_log
+        )
 
         async def _scenario() -> None:
             async_engine, _sf, rev_store = _configure_rbac_control_api(
@@ -1026,9 +1146,15 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                 max_overflow=6,
             )
             try:
-                owner_h = _issue_session_cookie_header(seeded["owner_a"], issuer, subjs[seeded["owner_a"]])
-                dev_h = _issue_session_cookie_header(seeded["dev_a"], issuer, subjs[seeded["dev_a"]])
-                admin_h = _issue_session_cookie_header(seeded["admin_a"], issuer, subjs[seeded["admin_a"]])
+                owner_h = _issue_session_cookie_header(
+                    seeded["owner_a"], issuer, subjs[seeded["owner_a"]]
+                )
+                dev_h = _issue_session_cookie_header(
+                    seeded["dev_a"], issuer, subjs[seeded["dev_a"]]
+                )
+                admin_h = _issue_session_cookie_header(
+                    seeded["admin_a"], issuer, subjs[seeded["admin_a"]]
+                )
 
                 dev_mid = mids[(ws_a, seeded["dev_a"])]
                 admin_mid = mids[(ws_a, seeded["admin_a"])]
@@ -1039,13 +1165,19 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                     base_url="http://localhost:8000",
                 ) as api_client:
                     tok_dev_a = (
-                        await api_client.post("/v1/auth/token", json={"workspace_id": str(ws_a)}, headers=dev_h)
+                        await api_client.post(
+                            "/v1/auth/token", json={"workspace_id": str(ws_a)}, headers=dev_h
+                        )
                     ).json()["access_token"]
                     tok_dev_b = (
-                        await api_client.post("/v1/auth/token", json={"workspace_id": str(ws_b)}, headers=dev_h)
+                        await api_client.post(
+                            "/v1/auth/token", json={"workspace_id": str(ws_b)}, headers=dev_h
+                        )
                     ).json()["access_token"]
                     tok_admin_a = (
-                        await api_client.post("/v1/auth/token", json={"workspace_id": str(ws_a)}, headers=admin_h)
+                        await api_client.post(
+                            "/v1/auth/token", json={"workspace_id": str(ws_a)}, headers=admin_h
+                        )
                     ).json()["access_token"]
 
                     async with httpx.AsyncClient(trust_env=False, timeout=15.0) as http_client:
@@ -1061,16 +1193,19 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                             assert sse_resp.status_code == 200
                             async for line in sse_resp.aiter_lines():
                                 seen_lines.append(line)
-                                if (
-                                    t_revoked is None
-                                    and ('"step":"init"' in line or '"step": "init"' in line or "event: run.started" in line)
-                                    and any('"step"' in seen_line for seen_line in seen_lines)
+                                if t_revoked is None and (
+                                    "event: run.started" in line
+                                    or '"status":"running"' in line
+                                    or '"status": "running"' in line
                                 ):
                                     # Revoke dev_a in Workspace A while SSE stream is open!
                                     t_revoked = time.monotonic()
                                     rev_resp = await api_client.post(
                                         f"/v1/workspaces/{ws_a}/memberships/{dev_mid}/revoke",
-                                        json={"expected_role": "developer", "expected_status": "active"},
+                                        json={
+                                            "expected_role": "developer",
+                                            "expected_status": "active",
+                                        },
                                         headers=owner_h,
                                     )
                                     assert rev_resp.status_code == 200
@@ -1090,7 +1225,9 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                                     break
 
                         assert t_revoked is not None
-                        assert t_error_event is not None, f"Missing SSE error termination; lines={seen_lines}"
+                        assert t_error_event is not None, (
+                            f"Missing SSE error termination; lines={seen_lines}"
+                        )
                         assert (t_error_event - t_revoked) <= 5.0
                         joined_output = "\n".join(seen_lines)
                         assert "run.post_revoke_secret" not in joined_output
@@ -1109,7 +1246,11 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                         # 3. Demoted admin's stale JWT (missing write scope) rejected immediately; WS-B survives WS-A revoke
                         dem_resp = await api_client.patch(
                             f"/v1/workspaces/{ws_a}/memberships/{admin_mid}/role",
-                            json={"role": "viewer", "expected_role": "admin", "expected_status": "active"},
+                            json={
+                                "role": "viewer",
+                                "expected_role": "admin",
+                                "expected_status": "active",
+                            },
                             headers=owner_h,
                         )
                         assert dem_resp.status_code == 200
@@ -1143,16 +1284,25 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                             assert sse_relay_resp.status_code == 200
                             async for line in sse_relay_resp.aiter_lines():
                                 wsb_lines.append(line)
-                                if t_cut is None and '"step"' in line:
+                                if t_cut is None and (
+                                    "event: run.started" in line
+                                    or '"status":"running"' in line
+                                    or '"status": "running"' in line
+                                ):
                                     t_cut = time.monotonic()
                                     relay.cut_traffic()
                                 if line.startswith("event: error"):
                                     t_cut_err = time.monotonic()
-                                if "authorization_revalidation_failed" in line or "authorization_revoked" in line:
+                                if (
+                                    "authorization_revalidation_failed" in line
+                                    or "authorization_revoked" in line
+                                ):
                                     break
 
                         assert t_cut is not None
-                        assert t_cut_err is not None, f"Redis outage did not fail closed; lines={wsb_lines}"
+                        assert t_cut_err is not None, (
+                            f"Redis outage did not fail closed; lines={wsb_lines}"
+                        )
                         assert (t_cut_err - t_cut) <= 5.0
 
                         # 4. Parent-session revocation via Redis kills open owner SSE in <= 5s
@@ -1167,7 +1317,9 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                         )
                         tok_owner_b = (
                             await api_client.post(
-                                "/v1/auth/token", json={"workspace_id": str(ws_b)}, headers=owner_b_h
+                                "/v1/auth/token",
+                                json={"workspace_id": str(ws_b)},
+                                headers=owner_b_h,
                             )
                         ).json()["access_token"]
                         from agent_runtime.auth import RuntimeSettings, verify_runtime_token
@@ -1191,9 +1343,15 @@ def test_real_tcp_runtime_sse_live_revocation_redis_outage_and_workspace_isolati
                             assert sse_sess_resp.status_code == 200
                             async for line in sse_sess_resp.aiter_lines():
                                 sess_lines.append(line)
-                                if t_sess_rev is None and '"step"' in line:
+                                if t_sess_rev is None and (
+                                    "event: run.started" in line
+                                    or '"status":"running"' in line
+                                    or '"status": "running"' in line
+                                ):
                                     t_sess_rev = time.monotonic()
-                                    rev_store.revoke_session(rt_parsed.session_id, int(time.time()) + 600)
+                                    rev_store.revoke_session(
+                                        rt_parsed.session_id, int(time.time()) + 600
+                                    )
                                 if line.startswith("event: error"):
                                     t_sess_err = time.monotonic()
                                 if "authorization_revoked" in line:

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import hmac
 import logging
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
+from uuid import UUID
 
 import httpx
 
@@ -25,6 +29,18 @@ from agent_runtime.settings import RuntimeSettings
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class InventoryObject:
+    key: str
+    last_modified: dt.datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectInventoryPage:
+    objects: tuple[InventoryObject, ...]
+    truncated: bool
+
+
 class _ObjectReadLimitExceeded(RunDataValidationError):
     """Internal signal: an existing object's bytes exceed the bounded read."""
 
@@ -40,6 +56,7 @@ def _sign_s3_v4_headers(
     region: str,
     content_type: str | None = None,
     if_none_match: str | None = None,
+    canonical_query: str = "",
 ) -> dict[str, str]:
     now = dt.datetime.now(dt.UTC)
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
@@ -62,9 +79,7 @@ def _sign_s3_v4_headers(
 
     canonical_headers = "".join(f"{k}:{v}\n" for k, v in headers_to_sign)
     signed_headers = ";".join(k for k, _ in headers_to_sign)
-    canonical_request = (
-        f"{method}\n{uri_path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    )
+    canonical_request = f"{method}\n{uri_path}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
 
     algorithm = "AWS4-HMAC-SHA256"
     credential_scope = f"{date_stamp}/{region}/s3/aws4_request"
@@ -168,6 +183,75 @@ class S3SigV4ObjectStore:
         if self._client is not None and self._owns_client:
             await self._client.aclose()
             self._client = None
+
+    async def list_scoped_run_objects(
+        self, *, tenant_id: str, workspace_id: str, limit: int = 100
+    ) -> ObjectInventoryPage:
+        """One bounded, read-only ListObjectsV2 page; never a whole-bucket scan."""
+        if not 1 <= limit <= 100:
+            raise RunDataValidationError("Invalid inventory limit")
+        prefix = f"tenants/{UUID(tenant_id)}/workspaces/{UUID(workspace_id)}/runs/"
+        query = urlencode(
+            sorted(
+                {
+                    "encoding-type": "url",
+                    "list-type": "2",
+                    "max-keys": str(limit),
+                    "prefix": prefix,
+                }.items()
+            ),
+            quote_via=quote,
+            safe="~",
+        )
+        client = self._ensure_ready()
+        uri_path = f"/{quote(self._bucket, safe='-_.~')}"
+        headers = _sign_s3_v4_headers(
+            method="GET",
+            host=self._host,
+            uri_path=uri_path,
+            payload=b"",
+            access_key=self._access_key,
+            secret_key=self._secret_key,
+            region=self._region,
+            canonical_query=query,
+        )
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            async with client.stream(
+                "GET", f"{self._endpoint}{uri_path}?{query}", headers=headers
+            ) as response:
+                if response.status_code != 200:
+                    raise RunDataStorageUnavailableError("Object inventory unavailable")
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 1_048_576:
+                        raise RunDataStorageUnavailableError("Object inventory exceeds bound")
+                    chunks.append(chunk)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            raise RunDataStorageUnavailableError("Object inventory unavailable") from exc
+        body = b"".join(chunks)
+        if b"<!DOCTYPE" in body.upper() or b"<!ENTITY" in body.upper():
+            raise RunDataStorageUnavailableError("Invalid object inventory")
+        try:
+            root = ET.fromstring(body)
+            objects = []
+            for item in root.findall("./{*}Contents"):
+                key = unquote(item.findtext("{*}Key") or "")
+                modified = dt.datetime.fromisoformat(item.findtext("{*}LastModified") or "")
+                if (
+                    not key.startswith(prefix)
+                    or len(key.encode("utf-8")) > 1024
+                    or modified.tzinfo is None
+                ):
+                    raise ValueError("Invalid inventory item")
+                objects.append(InventoryObject(key, modified.astimezone(dt.UTC)))
+            truncated_text = root.findtext("{*}IsTruncated")
+            if len(objects) > limit or truncated_text not in ("true", "false"):
+                raise ValueError("Invalid inventory page")
+            return ObjectInventoryPage(tuple(objects), truncated_text == "true")
+        except (ET.ParseError, ValueError) as exc:
+            raise RunDataStorageUnavailableError("Invalid object inventory") from exc
 
     def _uri_path(self, bucket: str, key: str) -> str:
         encoded_key = quote(key, safe="/-_.~")
@@ -286,6 +370,34 @@ class S3SigV4ObjectStore:
         expected_size_bytes: int | None = None,
         max_bytes: int | None = None,
     ) -> bytes:
+        """Retry one interrupted GET, within one overall read budget; never retry PUT."""
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                for attempt in range(2):
+                    try:
+                        return await self._get_verified_object_once(
+                            bucket=bucket,
+                            key=key,
+                            expected_sha256=expected_sha256,
+                            expected_size_bytes=expected_size_bytes,
+                            max_bytes=max_bytes,
+                        )
+                    except httpx.RemoteProtocolError as exc:
+                        if attempt == 1:
+                            raise RunDataStorageUnavailableError("Object read interrupted") from exc
+        except TimeoutError as exc:
+            raise RunDataStorageUnavailableError("Object read timed out") from exc
+        raise RunDataStorageUnavailableError("Object read unavailable")
+
+    async def _get_verified_object_once(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        expected_sha256: str | None = None,
+        expected_size_bytes: int | None = None,
+        max_bytes: int | None = None,
+    ) -> bytes:
         clean_bucket, clean_key = _validate_bucket_and_key(bucket, key)
         client = self._ensure_ready()
         uri_path = self._uri_path(clean_bucket, clean_key)
@@ -333,6 +445,8 @@ class S3SigV4ObjectStore:
                         )
                     hasher.update(chunk)
                     chunks.append(chunk)
+        except httpx.RemoteProtocolError:
+            raise
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             logger.warning("Object store GET failed (%s)", type(exc).__name__)
             raise RunDataStorageUnavailableError("Object storage request failed") from exc
@@ -387,3 +501,35 @@ def create_object_store(settings: RuntimeSettings) -> S3SigV4ObjectStore:
         client=client,
         owns_client=client is not None,
     )
+
+
+def probe_object_store_sync(
+    settings: RuntimeSettings,
+    *,
+    timeout_seconds: float = 0.8,
+) -> bool:
+    """Bounded synchronous SigV4 HEAD /<bucket> readiness check (never leaks secrets)."""
+    endpoint = settings.s3_endpoint.rstrip("/")
+    bucket = settings.s3_bucket.strip()
+    parsed = urlparse(endpoint) if endpoint else None
+    host = parsed.netloc if parsed else ""
+    if not (endpoint and host and settings.s3_access_key and settings.s3_secret_key and bucket):
+        return False
+    if "/" in bucket or "\\" in bucket or ".." in bucket:
+        return False
+    uri_path = f"/{bucket}"
+    headers = _sign_s3_v4_headers(
+        method="HEAD",
+        host=host,
+        uri_path=uri_path,
+        payload=b"",
+        access_key=settings.s3_access_key,
+        secret_key=settings.s3_secret_key,
+        region=settings.s3_region,
+    )
+    try:
+        with httpx.Client(timeout=timeout_seconds, trust_env=False) as client:
+            resp = client.head(f"{endpoint}{uri_path}", headers=headers)
+            return bool(resp.status_code == 200)
+    except (httpx.TimeoutException, httpx.TransportError, OSError, ValueError):
+        return False

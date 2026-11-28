@@ -1,316 +1,258 @@
+"""Agent Runtime HTTP endpoints for run admission, redacted metadata, and fail-closed resume."""
+
 from __future__ import annotations
 
-import hashlib
-import json
-from uuid import UUID, uuid4
+from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, status
-from pydantic import BaseModel, Field
-from sqlalchemy import text
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from platform_common.event_bus import PostgresOutboxEventBus
 
+from agent_runtime.application.run_admission import (
+    RunAdmissionAccessDeniedError,
+    RunAdmissionConflictError,
+    RunAdmissionError,
+    RunAdmissionNotFoundError,
+    RunAdmissionQuotaExceededError,
+    RunAdmissionUnavailableError,
+    RunAdmissionValidationError,
+    RunMetadataResponseDTO,
+    RunResumeDisabledError,
+    StartRunRequestDTO,
+    StartRunResponseDTO,
+)
+from agent_runtime.application.run_admission_service import RunAdmissionService
+from agent_runtime.application.run_data import ObjectStorePort
+from agent_runtime.application.run_data_service import RunDataService
+from agent_runtime.application.run_lifecycle import (
+    CancelRunRequestDTO,
+    CancelRunResponseDTO,
+    RunLifecycleAccessDeniedError,
+    RunLifecycleConflictError,
+    RunLifecycleError,
+    RunLifecycleNotFoundError,
+    RunLifecycleResumeDisabledError,
+    RunLifecycleUnavailableError,
+    RunLifecycleValidationError,
+)
+from agent_runtime.application.run_lifecycle_service import RunLifecycleService
 from agent_runtime.auth import CurrentRuntimePrincipal
-from agent_runtime.persistence.database import scoped_session
+from agent_runtime.persistence.database import get_session_factory, scoped_session
+from agent_runtime.persistence.object_store import create_object_store
+from agent_runtime.persistence.run_admission_repository import RunAdmissionRepository
+from agent_runtime.persistence.run_data_repository import RunDataRepository
+from agent_runtime.persistence.run_event_repository import RunEventRepository
+from agent_runtime.persistence.run_lifecycle_repository import RunLifecycleRepository
+from agent_runtime.settings import RuntimeSettings, get_settings
 
 router = APIRouter(tags=["runs"])
 
 
-class StartRunRequest(BaseModel):
-    workspace_id: str
-    agent_version_id: str
-    inputs: dict = Field(default_factory=dict)
-    conversation_id: str | None = None
+def build_run_admission_service(
+    *,
+    settings: RuntimeSettings | None = None,
+    object_store: ObjectStorePort | None = None,
+) -> RunAdmissionService:
+    """Compose RunAdmissionService from runtime settings and process-owned adapters."""
+    active_settings = settings or get_settings()
+    store = object_store if object_store is not None else create_object_store(active_settings)
+    run_data_repo = RunDataRepository()
+    run_data_service = RunDataService(
+        object_store=store,
+        bucket=active_settings.s3_bucket,
+        repository=run_data_repo,
+        max_input_bytes=active_settings.run_data_max_input_bytes,
+        max_output_bytes=active_settings.run_data_max_output_bytes,
+        default_retention_days=active_settings.run_data_default_retention_days,
+    )
+    outbox = PostgresOutboxEventBus(lambda: get_session_factory()())
+    return RunAdmissionService(
+        session_factory=scoped_session,
+        run_data_service=run_data_service,
+        admission_repository=RunAdmissionRepository(),
+        outbox_publisher=outbox,
+        run_data_repository=run_data_repo,
+        max_queued_per_workspace=active_settings.run_admission_max_queued_per_workspace,
+        execution_available=active_settings.run_admission_execution_enabled,
+        availability_reason=None
+        if active_settings.run_admission_execution_enabled
+        else "no_executor_configured",
+        queue_ttl_seconds=active_settings.run_queue_ttl_seconds,
+    )
 
 
-@router.post("/v1/runs", status_code=status.HTTP_202_ACCEPTED)
+def get_run_admission_service(request: Request) -> RunAdmissionService:
+    """Resolve lifespan-owned RunAdmissionService or compose fail-closed fallback."""
+    existing = getattr(request.app.state, "run_admission_service", None)
+    if isinstance(existing, RunAdmissionService):
+        return existing
+    store = getattr(request.app.state, "object_store", None)
+    return build_run_admission_service(object_store=store)
+
+
+_ADMISSION_ERROR_STATUS_MAP: tuple[tuple[type[RunAdmissionError], int], ...] = (
+    (RunAdmissionValidationError, status.HTTP_400_BAD_REQUEST),
+    (RunAdmissionAccessDeniedError, status.HTTP_403_FORBIDDEN),
+    (RunAdmissionNotFoundError, status.HTTP_404_NOT_FOUND),
+    (RunAdmissionConflictError, status.HTTP_409_CONFLICT),
+    (RunAdmissionQuotaExceededError, status.HTTP_429_TOO_MANY_REQUESTS),
+    (RunAdmissionUnavailableError, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (RunResumeDisabledError, status.HTTP_503_SERVICE_UNAVAILABLE),
+)
+
+
+def _translate_admission_error(exc: RunAdmissionError) -> HTTPException:
+    detail = {"code": exc.code, "message": exc.message}
+    for error_cls, status_code in _ADMISSION_ERROR_STATUS_MAP:
+        if isinstance(exc, error_cls):
+            return HTTPException(status_code=status_code, detail=detail)
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
+
+
+RunAdmissionServiceDep = Annotated[RunAdmissionService, Depends(get_run_admission_service)]
+
+
+def build_run_lifecycle_service(
+    *,
+    settings: RuntimeSettings | None = None,
+) -> RunLifecycleService:
+    """Compose RunLifecycleService from runtime settings and process-owned adapters."""
+    outbox = PostgresOutboxEventBus(lambda: get_session_factory()())
+    event_repo = RunEventRepository()
+    lifecycle_repo = RunLifecycleRepository(
+        event_repository=event_repo,
+        outbox_publisher=outbox,
+    )
+    admission_repo = RunAdmissionRepository()
+    return RunLifecycleService(
+        session_factory=scoped_session,
+        lifecycle_repository=lifecycle_repo,
+        admission_repository=admission_repo,
+    )
+
+
+def get_run_lifecycle_service(request: Request) -> RunLifecycleService:
+    """Resolve lifespan-owned RunLifecycleService or compose fail-closed fallback."""
+    existing = getattr(request.app.state, "run_lifecycle_service", None)
+    if isinstance(existing, RunLifecycleService):
+        return existing
+    return build_run_lifecycle_service()
+
+
+_LIFECYCLE_ERROR_STATUS_MAP: tuple[tuple[type[RunLifecycleError], int], ...] = (
+    (RunLifecycleValidationError, status.HTTP_400_BAD_REQUEST),
+    (RunLifecycleAccessDeniedError, status.HTTP_403_FORBIDDEN),
+    (RunLifecycleNotFoundError, status.HTTP_404_NOT_FOUND),
+    (RunLifecycleConflictError, status.HTTP_409_CONFLICT),
+    (RunLifecycleUnavailableError, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (RunLifecycleResumeDisabledError, status.HTTP_503_SERVICE_UNAVAILABLE),
+)
+
+
+def _translate_lifecycle_error(exc: RunLifecycleError) -> HTTPException:
+    detail = {"code": exc.code, "message": exc.message}
+    for error_cls, status_code in _LIFECYCLE_ERROR_STATUS_MAP:
+        if isinstance(exc, error_cls):
+            return HTTPException(status_code=status_code, detail=detail)
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
+
+
+RunLifecycleServiceDep = Annotated[RunLifecycleService, Depends(get_run_lifecycle_service)]
+
+
+@router.post(
+    "/v1/runs",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=StartRunResponseDTO,
+)
 async def start_run(
-    req: StartRunRequest,
+    req: StartRunRequestDTO,
     principal: CurrentRuntimePrincipal,
+    service: RunAdmissionServiceDep,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict:
+) -> StartRunResponseDTO:
     try:
-        req_workspace_uuid = str(UUID(req.workspace_id))
-        agent_version_uuid = str(UUID(req.agent_version_id))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid workspace_id or agent_version_id UUID format",
-        ) from exc
-
-    if req_workspace_uuid != principal.workspace_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Workspace scope denied: principal does not belong to requested workspace",
+        admitted = await service.admit_run(
+            principal=principal,
+            workspace_id=str(req.workspace_id),
+            agent_version_id=str(req.agent_version_id),
+            inputs=req.inputs,
+            conversation_id=str(req.conversation_id) if req.conversation_id is not None else None,
+            attachments=req.attachments,
+            idempotency_key=idempotency_key,
         )
+    except RunAdmissionError as exc:
+        raise _translate_admission_error(exc) from exc
 
-    principal.require_scope("run:start")
-
-    if idempotency_key is None or not idempotency_key.strip() or len(idempotency_key) > 200:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Idempotency-Key is required and must be at most 200 characters",
-        )
-
-    request_digest = hashlib.sha256(
-        json.dumps(
-            {
-                "agent_version_id": agent_version_uuid,
-                "conversation_id": req.conversation_id,
-                "inputs": req.inputs,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-
-    run_id = str(uuid4())
-
-    async with scoped_session(
-        principal.tenant_id,
-        principal.workspace_id,
-        principal.user_id,
-    ) as session:
-        # Create run in runtime.runs
-        inserted = await session.execute(
-            text("""
-                INSERT INTO runtime.runs (
-                    id, tenant_id, workspace_id, agent_version_id, initiated_by, external_request_key,
-                    status, next_event_seq, created_at
-                ) VALUES (
-                    CAST(:run_id AS uuid),
-                    CAST(:tenant_id AS uuid),
-                    CAST(:workspace_id AS uuid),
-                    CAST(:agent_version_id AS uuid),
-                    CAST(:user_id AS uuid),
-                    :idempotency_key,
-                    'queued',
-                    2,
-                    now()
-                )
-                ON CONFLICT (tenant_id, workspace_id, external_request_key) DO NOTHING
-                RETURNING id
-            """),
-            {
-                "run_id": run_id,
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "agent_version_id": agent_version_uuid,
-                "user_id": principal.user_id,
-                "idempotency_key": idempotency_key.strip(),
-            },
-        )
-        created_run_id = inserted.scalar_one_or_none()
-        if created_run_id is None:
-            existing = await session.execute(
-                text("""
-                    SELECT r.id, r.status, e.redacted_payload
-                    FROM runtime.runs AS r
-                    LEFT JOIN runtime.run_events AS e
-                      ON e.run_id = r.id AND e.tenant_id = r.tenant_id AND e.workspace_id = r.workspace_id
-                     AND e.sequence = 1
-                    WHERE r.tenant_id = CAST(:tenant_id AS uuid)
-                      AND r.workspace_id = CAST(:workspace_id AS uuid)
-                      AND r.external_request_key = :idempotency_key
-                    FOR UPDATE
-                """),
-                {
-                    "tenant_id": principal.tenant_id,
-                    "workspace_id": principal.workspace_id,
-                    "idempotency_key": idempotency_key.strip(),
-                },
-            )
-            row = existing.mappings().one()
-            recorded_digest = (row["redacted_payload"] or {}).get("request_digest")
-            if recorded_digest != request_digest:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Idempotency-Key was previously used with a different request",
-                )
-            return {"run_id": str(row["id"]), "status": row["status"], "replayed": True}
-
-        # Enqueue execution job in runtime.jobs
-        await session.execute(
-            text("""
-                INSERT INTO runtime.jobs (
-                    tenant_id, workspace_id, run_id, job_type, status, created_at
-                ) VALUES (
-                    CAST(:tenant_id AS uuid),
-                    CAST(:workspace_id AS uuid),
-                    CAST(:run_id AS uuid),
-                    'run',
-                    'queued',
-                    now()
-                )
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_id,
-            },
-        )
-
-        # Record initial event in runtime.run_events
-        await session.execute(
-            text("""
-                INSERT INTO runtime.run_events (
-                    tenant_id, workspace_id, run_id, sequence, event_type, redacted_payload
-                ) VALUES (
-                    CAST(:tenant_id AS uuid),
-                    CAST(:workspace_id AS uuid),
-                    CAST(:run_id AS uuid),
-                    1,
-                    'run.created',
-                    CAST(:payload AS jsonb)
-                )
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_id,
-                "payload": json.dumps({"request_digest": request_digest}),
-            },
-        )
-
-    return {"run_id": run_id, "status": "queued", "replayed": False}
+    return StartRunResponseDTO(
+        run_id=admitted.run_id,
+        agent_version_id=admitted.agent_version_id,
+        conversation_id=admitted.conversation_id,
+        status=admitted.status,
+        replayed=admitted.replayed,
+        execution_available=admitted.execution_available,
+        availability_reason=admitted.availability_reason,
+    )
 
 
-@router.get("/v1/runs/{run_id}")
+@router.get("/v1/runs/{run_id}", response_model=RunMetadataResponseDTO)
 async def get_run(
     run_id: str,
     principal: CurrentRuntimePrincipal,
-) -> dict:
-    principal.require_scope("run:read")
+    service: RunAdmissionServiceDep,
+) -> RunMetadataResponseDTO:
     try:
-        run_uuid = str(UUID(run_id))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid run_id UUID format",
-        ) from exc
+        record = await service.get_run_metadata(principal=principal, run_id=run_id)
+    except RunAdmissionError as exc:
+        raise _translate_admission_error(exc) from exc
 
-    async with scoped_session(
-        principal.tenant_id,
-        principal.workspace_id,
-        principal.user_id,
-    ) as session:
-        result = await session.execute(
-            text("""
-                SELECT id, agent_version_id, conversation_id, workflow_version_id,
-                       initiated_by, status, trace_id, next_event_seq, started_at, finished_at, created_at
-                FROM runtime.runs
-                WHERE tenant_id = CAST(:tenant_id AS uuid)
-                  AND workspace_id = CAST(:workspace_id AS uuid)
-                  AND id = CAST(:run_id AS uuid)
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_uuid,
-            },
-        )
-        record = result.mappings().one_or_none()
-        if not record:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Run '{run_id}' not found",
-            )
+    return RunMetadataResponseDTO(
+        run_id=record.run_id,
+        agent_version_id=record.agent_version_id,
+        conversation_id=record.conversation_id,
+        workflow_version_id=record.workflow_version_id,
+        status=record.status,
+        trace_id=record.trace_id,
+        next_event_seq=record.next_event_seq,
+        started_at=record.started_at.isoformat() if record.started_at else None,
+        finished_at=record.finished_at.isoformat() if record.finished_at else None,
+        created_at=record.created_at.isoformat() if record.created_at else None,
+        queue_expires_at=record.queue_expires_at.isoformat() if record.queue_expires_at else None,
+    )
 
-        return {
-            "run_id": str(record["id"]),
-            "agent_version_id": str(record["agent_version_id"]),
-            "conversation_id": str(record["conversation_id"]) if record["conversation_id"] else None,
-            "status": record["status"],
-            "trace_id": record["trace_id"],
-            "next_event_seq": record["next_event_seq"],
-            "started_at": record["started_at"].isoformat() if record["started_at"] else None,
-            "finished_at": record["finished_at"].isoformat() if record["finished_at"] else None,
-            "created_at": record["created_at"].isoformat() if record["created_at"] else None,
-        }
+
+@router.post(
+    "/v1/runs/{run_id}/cancel",
+    status_code=status.HTTP_200_OK,
+    response_model=CancelRunResponseDTO,
+)
+async def cancel_run(
+    run_id: str,
+    req: CancelRunRequestDTO,
+    principal: CurrentRuntimePrincipal,
+    service: RunLifecycleServiceDep,
+) -> CancelRunResponseDTO:
+    try:
+        res = await service.cancel_run(principal=principal, run_id=run_id)
+    except RunLifecycleError as exc:
+        raise _translate_lifecycle_error(exc) from exc
+
+    return CancelRunResponseDTO(
+        run_id=res.run_id,
+        status=res.status,
+        changed=res.changed,
+        disposition=res.disposition,
+    )
 
 
 @router.post("/internal/v1/runs/{run_id}/resume")
 async def resume_run(
     run_id: str,
     principal: CurrentRuntimePrincipal,
-) -> dict:
+    service: RunAdmissionServiceDep,
+) -> dict[str, str]:
     principal.require_scope("run:start")
     try:
-        run_uuid = str(UUID(run_id))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid run_id UUID format",
-        ) from exc
-
-    async with scoped_session(
-        principal.tenant_id,
-        principal.workspace_id,
-        principal.user_id,
-    ) as session:
-        # Check current run status
-        result = await session.execute(
-            text("""
-                SELECT status FROM runtime.runs
-                WHERE tenant_id = CAST(:tenant_id AS uuid)
-                  AND workspace_id = CAST(:workspace_id AS uuid)
-                  AND id = CAST(:run_id AS uuid)
-                FOR UPDATE
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_uuid,
-            },
-        )
-        record = result.mappings().one_or_none()
-        if not record:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Run '{run_id}' not found",
-            )
-
-        if record["status"] != "waiting_approval":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Cannot resume run with status '{record['status']}'. Must be 'waiting_approval'.",
-            )
-
-        # Update run status to queued
-        await session.execute(
-            text("""
-                UPDATE runtime.runs
-                SET status = 'queued',
-                    next_event_seq = next_event_seq + 1
-                WHERE tenant_id = CAST(:tenant_id AS uuid)
-                  AND workspace_id = CAST(:workspace_id AS uuid)
-                  AND id = CAST(:run_id AS uuid)
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_uuid,
-            },
-        )
-
-        # Enqueue resume job
-        await session.execute(
-            text("""
-                INSERT INTO runtime.jobs (
-                    tenant_id, workspace_id, run_id, job_type, status, created_at
-                ) VALUES (
-                    CAST(:tenant_id AS uuid),
-                    CAST(:workspace_id AS uuid),
-                    CAST(:run_id AS uuid),
-                    'resume',
-                    'queued',
-                    now()
-                )
-            """),
-            {
-                "tenant_id": principal.tenant_id,
-                "workspace_id": principal.workspace_id,
-                "run_id": run_uuid,
-            },
-        )
-
+        await service.resume_run(principal=principal, run_id=run_id)
+    except RunAdmissionError as exc:
+        raise _translate_admission_error(exc) from exc
     return {"run_id": run_id, "status": "queued"}

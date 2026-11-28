@@ -69,6 +69,7 @@ def test_canonical_migrations_pass_module_and_cli() -> None:
         in result.stdout
     )
     assert "0008_model_budget_ledger.sql adds durable workspace budget" in result.stdout
+    assert "0010_run_queue_deadline_and_job_closure.sql adds run queue deadline" in result.stdout
     assert "fail-closed RLS policy." not in result.stdout
 
 
@@ -87,11 +88,40 @@ def test_missing_migration_file_fails(tmp_path: Path) -> None:
 def test_non_sequential_or_duplicate_migration_filename_fails(tmp_path: Path) -> None:
     validator = _load_validator_module()
     migrations_dir = _copy_migrations(tmp_path)
-    (migrations_dir / "0010_unapproved.sql").write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
+    gap_name = f"{len(validator.EXPECTED_MIGRATIONS) + 2:04d}_unapproved.sql"
+    (migrations_dir / gap_name).write_text("BEGIN;\nCOMMIT;\n", encoding="utf-8")
 
     errors = validator.validate_database_schema(migrations_dir)
     assert any("Non-sequential migration numbering" in e for e in errors)
     assert any("Unexpected unapproved migration files" in e for e in errors)
+
+
+def test_run_receipt_guard_delta_cannot_be_silently_weakened(tmp_path: Path) -> None:
+    validator = _load_validator_module()
+    migrations_dir = _copy_migrations(tmp_path)
+    path = migrations_dir / "0009_run_admission_receipt_columns.sql"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("interval '30 days'", "interval '90 days'"),
+        encoding="utf-8",
+    )
+    assert any(
+        "reviewed receipt column guards" in e
+        for e in validator.validate_database_schema(migrations_dir)
+    )
+
+
+def test_queue_deadline_guard_delta_cannot_be_silently_weakened(tmp_path: Path) -> None:
+    validator = _load_validator_module()
+    migrations_dir = _copy_migrations(tmp_path)
+    path = migrations_dir / "0010_run_queue_deadline_and_job_closure.sql"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("interval '24 hours'", "interval '48 hours'"),
+        encoding="utf-8",
+    )
+    assert any(
+        "reviewed queue deadline and job closure guards" in e
+        for e in validator.validate_database_schema(migrations_dir)
+    )
 
 
 def test_missing_domain_table_fails(tmp_path: Path) -> None:
@@ -374,13 +404,18 @@ def test_model_budget_migration_rejects_permissive_rls_or_missing_attempt_invari
         ),
         encoding="utf-8",
     )
-    assert any("must fail closed" in error for error in validator.validate_database_schema(migrations))
+    assert any(
+        "must fail closed" in error for error in validator.validate_database_schema(migrations)
+    )
 
     path.write_text(
         original.replace("UNIQUE (tenant_id, workspace_id, reservation_id, attempt_number)", ""),
         encoding="utf-8",
     )
-    assert any("required accounting invariant" in error for error in validator.validate_database_schema(migrations))
+    assert any(
+        "required accounting invariant" in error
+        for error in validator.validate_database_schema(migrations)
+    )
 
 
 def test_invitation_acceptance_projection_rejects_table_creation_or_fingerprint_drift(

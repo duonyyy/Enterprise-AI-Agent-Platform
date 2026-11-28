@@ -32,6 +32,14 @@ class RuntimeSettings(BaseSettings):
     sse_revalidation_interval_seconds: float = Field(default=2.0, gt=0.05, le=4.5)
     sse_auth_lookup_timeout_seconds: float = Field(default=1.5, gt=0.05, le=3.0)
     sse_max_auth_age_seconds: float = Field(default=5.0, gt=0.1, le=5.0)
+    sse_poll_interval_seconds: float = Field(default=0.5, ge=0.1, le=1.0)
+    sse_query_timeout_seconds: float = Field(default=1.0, ge=0.1, le=5.0)
+    sse_send_timeout_seconds: float = Field(default=2.0, ge=0.1, le=5.0)
+    sse_heartbeat_interval_seconds: float = Field(default=15.0, ge=5.0, le=60.0)
+    sse_max_stream_duration_seconds: float = Field(default=900.0, ge=10.0, le=1800.0)
+    sse_max_connections_total: int = Field(default=100, ge=1, le=100)
+    sse_max_connections_per_workspace: int = Field(default=50, ge=1, le=50)
+    sse_max_connections_per_user_workspace: int = Field(default=5, ge=1, le=5)
     mcp_timeout_seconds: float = 10.0
     mcp_max_response_bytes: int = 1_048_576
     s3_endpoint: str = ""
@@ -43,6 +51,10 @@ class RuntimeSettings(BaseSettings):
     run_data_max_input_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
     run_data_max_output_bytes: int = Field(default=4_194_304, ge=1024, le=20_971_520)
     run_data_default_retention_days: int = Field(default=30, ge=1, le=36500)
+    run_admission_max_queued_per_workspace: int = Field(default=1000, ge=1, le=100_000)
+    run_admission_execution_enabled: bool = False
+    run_queue_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
+    run_maintenance_mutations_enabled: bool = False
 
 
 @lru_cache(maxsize=1)

@@ -8,18 +8,11 @@ import logging
 import os
 import signal
 
-from jobs_worker.invitation_consumer import InvitationOutboxConsumer
+from jobs_worker.invitation_consumer import InvitationOutboxConsumer, _parse_bool_env
 from jobs_worker.worker import JobWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("jobs_worker")
-
-
-def _parse_bool_env(name: str, *, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -51,11 +44,13 @@ def main(argv: list[str] | None = None) -> None:
 
     job_worker = JobWorker.from_environment() if run_jobs else None
     if job_worker is not None:
-        logger.info("JobWorker initialized with ID: %s", job_worker.worker_id)
+        logger.info(
+            "JobWorker initialized with ID: %s (run_consumer_enabled=%s)",
+            job_worker.worker_id,
+            job_worker.has_run_executor,
+        )
 
-    invitation_consumer = (
-        InvitationOutboxConsumer.from_environment() if run_invitations else None
-    )
+    invitation_consumer = InvitationOutboxConsumer.from_environment() if run_invitations else None
     if invitation_consumer is not None:
         logger.info(
             "InvitationOutboxConsumer initialized with ID: %s",

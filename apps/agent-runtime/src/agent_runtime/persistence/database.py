@@ -13,6 +13,15 @@ from sqlalchemy.ext.asyncio import (
 
 from agent_runtime.settings import RuntimeSettings, get_settings
 
+__all__ = [
+    "RuntimeDatabaseUnavailable",
+    "get_db_session",
+    "get_engine",
+    "get_session_factory",
+    "scoped_session",
+    "set_rls_context",
+]
+
 
 class RuntimeDatabaseUnavailable(RuntimeError):
     pass
@@ -28,7 +37,9 @@ def get_engine(settings: RuntimeSettings | None = None) -> AsyncEngine:
         return _engine
 
     active_settings = settings or get_settings()
-    if not active_settings.database_url.startswith(("postgresql+asyncpg://", "postgresql+psycopg://", "postgresql://")):
+    if not active_settings.database_url.startswith(
+        ("postgresql+asyncpg://", "postgresql+psycopg://", "postgresql://")
+    ):
         raise RuntimeDatabaseUnavailable("A PostgreSQL DATABASE_URL is required")
 
     _engine = create_async_engine(
@@ -72,5 +83,3 @@ async def scoped_session(
             user_id=user_id,
         )
         yield session
-
-
