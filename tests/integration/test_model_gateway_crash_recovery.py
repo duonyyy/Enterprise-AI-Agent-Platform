@@ -470,6 +470,7 @@ def test_pg_dump_restore_and_new_gateway_process_preserve_all_states(
         restore_database,
         temporary_database,
     )
+    from scripts.validate_database_schema import EXPECTED_MIGRATIONS
 
     provider = Provider()
     scope = _seed_scope(migrated_database["owner_url"], profile=_profile(max_output=64))
@@ -558,8 +559,9 @@ def test_pg_dump_restore_and_new_gateway_process_preserve_all_states(
                 ):
                     assert conn.execute(f"SELECT count(*) FROM ops.{table}").fetchone()[0] == 0
             with psycopg.connect(restored["owner_url"]) as conn:
-                assert (
-                    conn.execute("SELECT count(*) FROM public.schema_migrations").fetchone()[0] == 8
-                )
+                restored_history = conn.execute(
+                    "SELECT name FROM public.schema_migrations ORDER BY version"
+                ).fetchall()
+                assert [record[0] for record in restored_history] == list(EXPECTED_MIGRATIONS)
     finally:
         provider.close()

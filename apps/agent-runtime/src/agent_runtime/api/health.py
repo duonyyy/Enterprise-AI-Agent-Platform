@@ -8,17 +8,21 @@ from __future__ import annotations
 
 import concurrent.futures
 import enum
+import os
 import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 
+from agent_runtime.settings import get_settings
+
 router = APIRouter(prefix="/health", tags=["Health & Observability"])
 
 
-class HealthStatus(str, enum.Enum):
+class HealthStatus(enum.StrEnum):
     READY = "ready"
     DEGRADED = "degraded"
     NOT_READY = "not_ready"
@@ -34,11 +38,13 @@ class ComponentReport:
 
 
 class HealthChecker:
-    def __init__(self, probe_timeout_seconds: float = 0.5):
+    def __init__(self, probe_timeout_seconds: float = 0.5) -> None:
         self.probe_timeout_seconds = probe_timeout_seconds
         self.probes: dict[str, tuple[Callable[[], bool], bool]] = {}
 
-    def register_probe(self, name: str, probe_fn: Callable[[], bool], is_critical: bool = True):
+    def register_probe(
+        self, name: str, probe_fn: Callable[[], bool], is_critical: bool = True
+    ) -> None:
         """Registers a synchronous or lightweight check function."""
         self.probes[name] = (probe_fn, is_critical)
 
@@ -72,7 +78,7 @@ class HealthChecker:
                 is_critical=is_critical,
                 message=f"Probe timed out after {self.probe_timeout_seconds:.2f}s (possible SIGSTOP freeze)",
             )
-        except Exception:  # noqa: BLE001 -- isolate dependency failures without exposing credentials
+        except Exception:  # noqa: BLE001 -- isolate arbitrary registered probes without leaking secrets
             latency = (time.perf_counter() - start) * 1000.0
             return ComponentReport(
                 name=name,
@@ -113,12 +119,6 @@ class HealthChecker:
         }
 
 
-import os
-import urllib.request
-
-from agent_runtime.settings import get_settings
-
-
 def probe_postgres() -> bool:
     """Executes a real SELECT 1 query against PostgreSQL using configured credentials."""
     settings = get_settings()
@@ -135,7 +135,7 @@ def probe_postgres() -> bool:
             cur.execute("SELECT 1")
             row = cur.fetchone()
             return bool(row and row[0] == 1)
-    except Exception:  # noqa: BLE001 -- readiness fails closed without leaking credentials
+    except Exception:  # noqa: BLE001 -- readiness boundary must sanitize driver/config failures
         return False
 
 
@@ -163,8 +163,8 @@ def probe_qdrant() -> bool:
     try:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=0.8) as resp:
-            return 200 <= resp.status < 400
-    except Exception:  # noqa: BLE001 -- readiness fails closed without leaking credentials
+            return bool(200 <= resp.status < 400)
+    except Exception:  # noqa: BLE001 -- readiness boundary must sanitize URL/transport failures
         return False
 
 
@@ -180,11 +180,44 @@ default_health_checker.register_probe("semantic_cache_redis", probe_redis, is_cr
 def _runtime_health(request: Request) -> dict[str, Any]:
     """Check startup-owned local capabilities; never call a paid model for health."""
     from agent_runtime.llm.gateway import ModelGateway
+    from agent_runtime.persistence.object_store import probe_object_store_sync
 
     result = default_health_checker.check_all()
     gateway = getattr(request.app.state, "model_gateway", None)
     capabilities = sorted(gateway.ready_capabilities) if isinstance(gateway, ModelGateway) else []
     ready = bool(capabilities)
+    settings = get_settings()
+    object_store = getattr(request.app.state, "object_store", None)
+    storage_configured = bool(
+        getattr(object_store, "is_configured", False)
+        or (
+            settings.s3_endpoint
+            and settings.s3_access_key
+            and settings.s3_secret_key
+            and settings.s3_bucket
+        )
+    )
+    storage_timeout = min(settings.dependency_timeout_seconds, 0.8)
+    storage_rep = default_health_checker._execute_probe_with_timeout(
+        "object_store",
+        lambda: probe_object_store_sync(settings, timeout_seconds=storage_timeout),
+        is_critical=False,
+    )
+    storage_ready = storage_rep.status == "ok"
+    db_ok = any(
+        c["name"] in {"database_postgres", "fixture_db"} and c["status"] == "ok"
+        for c in result["components"]
+    )
+    redis_ok = any(
+        c["name"] == "semantic_cache_redis" and c["status"] == "ok" for c in result["components"]
+    )
+    result["capabilities"] = {
+        "admission_ready": bool(db_ok and redis_ok and storage_ready),
+        "execution_ready": bool(settings.run_admission_execution_enabled and ready),
+        "storage_configured": storage_configured,
+        "storage_ready": storage_ready,
+        "model_capabilities": capabilities,
+    }
     result["components"].append(
         {
             "name": "model_gateway",
@@ -201,14 +234,14 @@ def _runtime_health(request: Request) -> dict[str, Any]:
 
 
 @router.get("", summary="Overall health status")
-def get_health(request: Request):
+def get_health(request: Request) -> dict[str, Any]:
     res = _runtime_health(request)
     status_val = "ok" if res["status"] in (HealthStatus.READY.value, "ok") else res["status"]
     return {"status": status_val, "health_state": res["status"], "service": "agent-runtime-v2"}
 
 
 @router.get("/ready", summary="Kubernetes Readiness Probe")
-def readiness_probe(response: Response, request: Request):
+def readiness_probe(response: Response, request: Request) -> dict[str, Any]:
     res = _runtime_health(request)
     if res["status"] == HealthStatus.NOT_READY.value:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -218,12 +251,12 @@ def readiness_probe(response: Response, request: Request):
 
 
 @router.get("/live", summary="Kubernetes Liveness Probe")
-def liveness_probe():
+def liveness_probe() -> dict[str, Any]:
     return {"status": "alive", "timestamp": time.time()}
 
 
 @router.get("/deep", summary="Detailed Health & Latency Report")
-def deep_health_probe(response: Response, request: Request):
+def deep_health_probe(response: Response, request: Request) -> dict[str, Any]:
     res = _runtime_health(request)
     if res["status"] == HealthStatus.NOT_READY.value:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

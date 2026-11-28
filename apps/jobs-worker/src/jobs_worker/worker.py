@@ -11,10 +11,13 @@ import asyncio
 import enum
 import logging
 import os
+import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Protocol
+from typing import Any, Protocol
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from sqlalchemy import create_engine, text
@@ -22,15 +25,17 @@ from sqlalchemy.engine import Engine
 
 logger = logging.getLogger("jobs_worker")
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-class JobStatus(str, enum.Enum):
+
+class JobStatus(enum.StrEnum):
     QUEUED = "queued"
     LEASED = "leased"
     DONE = "done"
     DEAD = "dead"
 
 
-class JobType(str, enum.Enum):
+class JobType(enum.StrEnum):
     RUN = "run"
     RESUME = "resume"
     INGEST = "ingest"
@@ -42,7 +47,7 @@ class JobExecutionError(RuntimeError):
 
 
 class RunExecutor(Protocol):
-    def execute(self, job: "JobRecord") -> None:
+    def execute(self, job: JobRecord) -> None:
         """Execute the pinned run and raise if it did not reach a real terminal result."""
 
 
@@ -95,14 +100,69 @@ class JobWorker:
         self._running = False
 
     @classmethod
-    def from_environment(cls) -> "JobWorker":
+    def from_environment(cls) -> JobWorker:
         return cls(
             database_url=os.environ.get("DATABASE_URL", ""),
             tenant_id=os.environ.get("WORKER_TENANT_ID", ""),
             workspace_id=os.environ.get("WORKER_WORKSPACE_ID", ""),
         )
 
-    def _set_scope(self, connection: object) -> None:
+    @property
+    def has_run_executor(self) -> bool:
+        """Return True only when a real run executor is configured."""
+        return self._run_executor is not None
+
+    def _claimable_job_types(self) -> tuple[str, ...]:
+        types: list[str] = []
+        if self._run_executor is not None:
+            types.extend((JobType.RUN.value, JobType.RESUME.value))
+        for ext_type in (JobType.INGEST, JobType.RECONCILE):
+            if ext_type in self._handlers:
+                types.append(ext_type.value)
+        return tuple(types)
+
+    @staticmethod
+    def validate_run_payload_ref(
+        job: JobRecord, *, expected_bucket: str | None = None
+    ) -> tuple[str, str, str, int]:
+        """Validate that a run/resume job payload_ref matches the 06-A scoped S3 contract."""
+        ref = job.payload_ref
+        if not ref or "\\" in ref or "\x00" in ref:
+            raise JobExecutionError("Run job is missing a valid payload_ref")
+        decoded = unquote(ref)
+        if ".." in decoded or "\\" in decoded:
+            raise JobExecutionError("Job payload_ref contains forbidden path traversal")
+        parsed = urlparse(ref)
+        if parsed.scheme != "s3" or parsed.query or parsed.fragment or parsed.params:
+            raise JobExecutionError("Job payload_ref must use canonical s3:// format")
+        bucket = parsed.netloc
+        if not bucket or (expected_bucket is not None and bucket != expected_bucket.strip()):
+            raise JobExecutionError("Job payload_ref bucket mismatch")
+        parts = parsed.path.lstrip("/").split("/")
+        if (
+            len(parts) != 8
+            or parts[0] != "tenants"
+            or parts[2] != "workspaces"
+            or parts[4] != "runs"
+            or parts[6] != "input"
+            or not parts[7].endswith(".json")
+        ):
+            raise JobExecutionError("Job payload_ref does not match canonical scoped layout")
+        if (
+            str(UUID(parts[1])) != job.tenant_id
+            or str(UUID(parts[3])) != job.workspace_id
+            or (job.run_id is not None and str(UUID(parts[5])) != job.run_id)
+        ):
+            raise JobExecutionError("Job payload_ref scope mismatch")
+        stem = parts[7].removesuffix(".json")
+        if "-" not in stem:
+            raise JobExecutionError("Job payload_ref missing sha256-size integrity binding")
+        sha_part, size_part = stem.split("-", 1)
+        if not _SHA256_RE.match(sha_part) or not size_part.isdigit():
+            raise JobExecutionError("Job payload_ref has invalid sha256-size binding")
+        return bucket, parsed.path.lstrip("/"), sha_part, int(size_part)
+
+    def _set_scope(self, connection: Any) -> None:
         connection.execute(
             text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
             {"tenant_id": self.tenant_id},
@@ -113,7 +173,7 @@ class JobWorker:
         )
 
     @staticmethod
-    def _record(row: object) -> JobRecord:
+    def _record(row: Any) -> JobRecord:
         data = row._mapping
         return JobRecord(
             id=str(data["id"]),
@@ -132,20 +192,39 @@ class JobWorker:
         )
 
     def lease_next_job(self) -> JobRecord | None:
-        """Atomically claim one due job. Network or model work never runs in this transaction."""
+        """Atomically claim one due job. Network or model work never runs in this transaction.
+
+        D6-03 guard: When no real run executor is configured, 'run' and 'resume' jobs are
+        never claimed so valid queued runs stay durable instead of failing to dead-letter.
+        """
+        claimable = self._claimable_job_types()
+        if not claimable:
+            return None
         with self._engine.begin() as connection:
             self._set_scope(connection)
             result = connection.execute(
                 text("""
                     WITH candidate AS (
-                        SELECT id
-                        FROM runtime.jobs
-                        WHERE tenant_id = CAST(:tenant_id AS uuid)
-                          AND workspace_id = CAST(:workspace_id AS uuid)
-                          AND status = 'queued'
-                          AND available_at <= now()
-                        ORDER BY available_at, id
-                        FOR UPDATE SKIP LOCKED
+                        SELECT j.id
+                        FROM runtime.jobs AS j
+                        LEFT JOIN runtime.runs AS r
+                          ON r.tenant_id = j.tenant_id
+                         AND r.workspace_id = j.workspace_id
+                         AND r.id = j.run_id
+                        WHERE j.tenant_id = CAST(:tenant_id AS uuid)
+                          AND j.workspace_id = CAST(:workspace_id AS uuid)
+                          AND j.status = 'queued'
+                          AND j.job_type = ANY(:claimable_types)
+                          AND j.available_at <= now()
+                          AND (
+                              j.run_id IS NULL
+                              OR (
+                                  r.status = 'queued'
+                                  AND (r.queue_expires_at IS NULL OR r.queue_expires_at > clock_timestamp())
+                              )
+                          )
+                        ORDER BY j.available_at, j.id
+                        FOR UPDATE OF j SKIP LOCKED
                         LIMIT 1
                     )
                     UPDATE runtime.jobs AS job
@@ -164,6 +243,7 @@ class JobWorker:
                     "workspace_id": self.workspace_id,
                     "worker_id": self.worker_id,
                     "lease_seconds": self.lease_duration_seconds,
+                    "claimable_types": list(claimable),
                 },
             ).first()
         return self._record(result) if result is not None else None
@@ -189,7 +269,7 @@ class JobWorker:
                 """),
                 {"tenant_id": self.tenant_id, "workspace_id": self.workspace_id},
             )
-            return result.rowcount
+            return int(result.rowcount or 0)
 
     def _set_run_status(self, job: JobRecord, status: str, *, terminal: bool = False) -> None:
         if not job.run_id:
@@ -246,7 +326,12 @@ class JobWorker:
                       AND workspace_id = CAST(:workspace_id AS uuid)
                       AND status = 'leased' AND leased_by = :worker_id
                 """),
-                {"job_id": job.id, "tenant_id": self.tenant_id, "workspace_id": self.workspace_id, "worker_id": self.worker_id},
+                {
+                    "job_id": job.id,
+                    "tenant_id": self.tenant_id,
+                    "workspace_id": self.workspace_id,
+                    "worker_id": self.worker_id,
+                },
             )
             if result.rowcount != 1:
                 raise JobExecutionError("Lost job lease before completion")
@@ -294,7 +379,9 @@ class JobWorker:
             self._complete(job)
             return True
         except Exception as exc:
-            logger.exception("Job failed without a durable success receipt", extra={"job_id": job.id})
+            logger.exception(
+                "Job failed without a durable success receipt", extra={"job_id": job.id}
+            )
             self._fail(job, exc)
             return False
 

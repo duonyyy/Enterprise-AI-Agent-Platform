@@ -1,6 +1,6 @@
 """PostgreSQL repository for durable run data, conversations, messages, and retention (06-A-T03).
 
-Operates strictly on the verified baseline schema (0001..0008) using caller-owned
+Operates on migrations 0001..0009 using caller-owned
 AsyncSession transactions with PostgreSQL RLS context already bound.
 """
 
@@ -405,15 +405,17 @@ class RunDataRepository:
             (
                 await session.execute(
                     text("""
-                        SELECT payload_ref
-                        FROM runtime.jobs
-                        WHERE tenant_id = CAST(:tenant_id AS uuid)
-                          AND workspace_id = CAST(:workspace_id AS uuid)
-                          AND run_id = CAST(:run_id AS uuid)
-                          AND job_type = 'run'
-                          AND payload_ref IS NOT NULL
-                        ORDER BY created_at ASC, id ASC
-                        LIMIT 1
+                        SELECT COALESCE(r.input_ref, (
+                            SELECT j.payload_ref FROM runtime.jobs AS j
+                            WHERE j.tenant_id = r.tenant_id AND j.workspace_id = r.workspace_id
+                              AND j.run_id = r.id AND j.job_type = 'run'
+                              AND j.payload_ref IS NOT NULL
+                            ORDER BY j.created_at, j.id LIMIT 1
+                        )) AS payload_ref
+                        FROM runtime.runs AS r
+                        WHERE r.tenant_id = CAST(:tenant_id AS uuid)
+                          AND r.workspace_id = CAST(:workspace_id AS uuid)
+                          AND r.id = CAST(:run_id AS uuid)
                     """),
                     {
                         "tenant_id": str(UUID(tenant_id)),

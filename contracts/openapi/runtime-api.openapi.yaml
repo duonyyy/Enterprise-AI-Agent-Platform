@@ -1,65 +1,753 @@
 openapi: 3.1.0
 info:
-  title: Agent Runtime API v2.0
-  version: 2.0.0
+  title: Agent Runtime API v2.3
+  version: 2.3.0
 paths:
   /v1/runs:
     post:
       summary: Start run with pinned agent version
       security:
-        - BearerAuth: []
+      - BearerAuth: []
       parameters:
-        - name: Idempotency-Key
-          in: header
-          required: true
-          schema: { type: string, minLength: 1, maxLength: 200 }
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 200
       responses:
-        '202': { description: Queued }
-        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
-        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '202':
+          description: Durably accepted or authorized same-key replay; not evidence of execution
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunResponse'
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Required dependency unavailable or commit outcome unknown; retry only with the
+            same key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: Invalid UUID, input, canonical JSON or Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scoped resource not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflicting or expired key, archived version or unavailable dependency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Workspace admission capacity exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      description: Accept a pinned, sealed AgentVersion without executing it. Same actor/key/intent replays
+        return 202 with current status, including terminal runs. Receipt replay lasts 30 days after finished_at;
+        active or legally held runs are protected. Expired keys return 409 and never start another run.
+        No executor returns execution_available=false. Uses RunEvent v1.1 run.queued for the initial timeline
+        record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRunRequest'
   /v1/runs/{run_id}:
     get:
       summary: Get run status
       security:
-        - BearerAuth: []
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      - BearerAuth: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
       responses:
-        '200': { description: Success }
-        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
-        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '200':
+          description: Redacted workspace-scoped run metadata; excludes input/output and storage references
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunMetadataResponse'
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Required dependency unavailable or commit outcome unknown; retry only with the
+            same key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: Invalid UUID, input, canonical JSON or Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scoped resource not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/runs/{run_id}/cancel:
+    post:
+      summary: Cancel queued run
+      description: 'Cancel a queued run before it has been leased by a worker. Runs that are running, waiting_approval, or already leased return 409 run_in_flight without mutation. Terminal runs return 200 with changed=false and disposition=already_terminal. Requires run:start scope. Creators can cancel their own runs; Owners, Admins, and Operators can cancel peer runs; Viewers receive 403; Developer peer runs receive 404.'
+      security:
+      - BearerAuth: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRunRequest'
+      responses:
+        '200':
+          description: Run cancellation outcome or idempotent terminal status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelRunResponse'
+        '400':
+          description: Invalid run_id UUID format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scoped run not found or hidden peer run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Run is in flight (leased/running/waiting_approval) or legacy unsupported
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Request body is not empty or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Required dependency unavailable or run state inconsistent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/runs/{run_id}/history:
+    get:
+      summary: Get run event history
+      description: 'Fetch paginated historical run events using keyset cursor. Requires run:read scope and workspace membership. Same-workspace peer runs are readable only by Owner, Admin, or Operator; Developers and Viewers receive 404.'
+      security:
+      - BearerAuth: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: last_event_id
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+          default: '0'
+        description: 'Decimal sequence cursor 0..9007199254740991'
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        description: 'Maximum number of events to return (1..100)'
+      responses:
+        '200':
+          description: Redacted run event history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunHistoryResponse'
+        '400':
+          description: Invalid UUID format, malformed cursor, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scoped run not found or hidden peer run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Cursor exceeds committed head sequence (cursor_ahead)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Cursor precedes oldest retained sequence (history_pruned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Required dependency unavailable or event history inconsistent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /v1/runs/{run_id}/events:
     get:
       summary: Reconnectable SSE events stream
-      description: >
-        Requires live workspace membership, active tenant/workspace, and required runtime scope.
-        Revalidates parent session and PostgreSQL authorization before each business event emission
-        and on bounded intervals (<= 5s); emits an SSE error event and terminates on revocation
-        or authorization backend timeout/unavailability.
+      description: 'Requires live workspace membership, active tenant/workspace, and run:read scope. Revalidates parent session and PostgreSQL authorization before each business event emission and on bounded intervals (<= 5s); emits an SSE error event and terminates on revocation or authorization backend timeout/unavailability. Same-workspace peer runs are streamable only by Owner, Admin, or Operator; Developers and Viewers receive 404.'
       security:
-        - BearerAuth: []
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      - BearerAuth: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: last_event_id
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+        description: 'Decimal sequence cursor 0..9007199254740991'
+      - name: Last-Event-ID
+        in: header
+        required: false
+        schema:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+        description: 'Standard SSE Last-Event-ID header; if both query and header are provided, they must match'
       responses:
-        '200': { description: Text/event-stream yielding run events and terminal error events on live revocation }
-        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
-        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '200':
+          description: Text/event-stream yielding run events and terminal error events on live revocation
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid UUID, empty query, malformed cursor, or conflicting cursor headers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scoped run not found or hidden peer run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Cursor exceeds committed head sequence (cursor_ahead)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Cursor precedes oldest retained sequence (history_pruned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Local replica connection capacity reached (stream_limit_reached)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Authorization or session store temporarily unavailable, or event history inconsistent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /internal/v1/runs/{run_id}/resume:
     post:
       summary: Private service resume with signed approval decision proof
       security:
-        - BearerAuth: []
-      parameters: [{ name: run_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      - BearerAuth: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
       responses:
-        '200': { description: Resumed }
-        '401': { description: Missing, invalid, expired, or revoked workspace bearer token }
-        '403': { description: Workspace access denied, inactive membership/workspace/tenant, or insufficient scope }
-        '503': { description: Authorization or session store temporarily unavailable }
+        '401':
+          description: Missing, invalid, expired or revoked bearer/parent session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Inactive scope/membership or insufficient current role/grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Required dependency unavailable or commit outcome unknown; retry only with the
+            same key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      description: Disabled fail-closed until a reviewed durable approval-proof protocol is implemented.
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-
+  schemas:
+    StartRunRequest:
+      additionalProperties: false
+      description: Strict request DTO for POST /v1/runs (extra fields forbidden).
+      properties:
+        workspace_id:
+          format: uuid
+          title: Workspace Id
+          type: string
+        agent_version_id:
+          format: uuid
+          title: Agent Version Id
+          type: string
+        inputs:
+          additionalProperties: true
+          title: Inputs
+          type: object
+        conversation_id:
+          anyOf:
+          - format: uuid
+            type: string
+          - type: 'null'
+          default: null
+          title: Conversation Id
+        attachments:
+          items:
+            additionalProperties: true
+            type: object
+          maxItems: 100
+          title: Attachments
+          type: array
+      required:
+      - workspace_id
+      - agent_version_id
+      title: StartRunRequestDTO
+      type: object
+    StartRunResponse:
+      additionalProperties: false
+      description: Strict 202 Accepted response DTO for POST /v1/runs (D6-03 availability aware).
+      properties:
+        run_id:
+          title: Run Id
+          type: string
+          format: uuid
+        agent_version_id:
+          title: Agent Version Id
+          type: string
+          format: uuid
+        conversation_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Conversation Id
+        status:
+          title: Status
+          type: string
+          enum:
+          - queued
+          - running
+          - waiting_approval
+          - succeeded
+          - failed
+          - cancelled
+          - timed_out
+        replayed:
+          title: Replayed
+          type: boolean
+        execution_available:
+          title: Execution Available
+          type: boolean
+        availability_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Availability Reason
+      required:
+      - run_id
+      - agent_version_id
+      - conversation_id
+      - status
+      - replayed
+      - execution_available
+      title: StartRunResponseDTO
+      type: object
+    RunMetadataResponse:
+      additionalProperties: false
+      description: Strict redacted metadata DTO for GET /v1/runs/{run_id} (D6-01).
+      properties:
+        run_id:
+          title: Run Id
+          type: string
+          format: uuid
+        agent_version_id:
+          title: Agent Version Id
+          type: string
+          format: uuid
+        conversation_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Conversation Id
+        workflow_version_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          default: null
+          title: Workflow Version Id
+        status:
+          title: Status
+          type: string
+          enum:
+          - queued
+          - running
+          - waiting_approval
+          - succeeded
+          - failed
+          - cancelled
+          - timed_out
+        trace_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trace Id
+        next_event_seq:
+          title: Next Event Seq
+          type: integer
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+        finished_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Finished At
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        queue_expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Queue Expires At
+      required:
+      - run_id
+      - agent_version_id
+      - conversation_id
+      - status
+      - trace_id
+      - next_event_seq
+      - started_at
+      - finished_at
+      - created_at
+      - queue_expires_at
+      title: RunMetadataResponseDTO
+      type: object
+    CancelRunRequest:
+      type: object
+      additionalProperties: false
+      description: Strict empty request body for POST /v1/runs/{run_id}/cancel (extra fields forbidden).
+      title: CancelRunRequestDTO
+    CancelRunResponse:
+      type: object
+      additionalProperties: false
+      description: Strict response DTO for POST /v1/runs/{run_id}/cancel.
+      required:
+      - run_id
+      - status
+      - changed
+      - disposition
+      properties:
+        run_id:
+          type: string
+          format: uuid
+          title: Run Id
+        status:
+          type: string
+          title: Status
+          enum:
+          - queued
+          - running
+          - waiting_approval
+          - succeeded
+          - failed
+          - cancelled
+          - timed_out
+        changed:
+          type: boolean
+          title: Changed
+        disposition:
+          type: string
+          title: Disposition
+          enum:
+          - cancelled
+          - queue_expired
+          - already_terminal
+      title: CancelRunResponseDTO
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - detail
+      properties:
+        detail:
+          oneOf:
+          - type: string
+          - type: object
+            additionalProperties: false
+            required:
+            - code
+            - message
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+          - type: array
+            items:
+              type: object
+              required:
+              - type
+              - loc
+              - msg
+              properties:
+                type:
+                  type: string
+                loc:
+                  type: array
+                  items:
+                    type:
+                    - string
+                    - integer
+                msg:
+                  type: string
+                input: {}
+                ctx:
+                  type: object
+    RunEvent:
+      type: object
+      additionalProperties: false
+      required:
+      - schemaVersion
+      - eventId
+      - runId
+      - workspaceId
+      - sequence
+      - type
+      - timestamp
+      - data
+      properties:
+        schemaVersion:
+          type: string
+          enum:
+          - '1.2'
+        eventId:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+        workspaceId:
+          type: string
+          format: uuid
+        sequence:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        type:
+          type: string
+          enum:
+          - run.queued
+          - run.started
+          - run.step_started
+          - run.tool_call_requested
+          - run.tool_call_completed
+          - run.approval_requested
+          - run.approval_resolved
+          - run.completed
+          - run.failed
+          - run.cancelled
+          - run.timed_out
+        timestamp:
+          type: string
+          format: date-time
+        traceId:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        data:
+          type: object
+          required:
+          - status
+          properties:
+            status:
+              type: string
+    RunHistoryResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - run_id
+      - status
+      - events
+      - next_cursor
+      - has_more
+      - oldest_available_sequence
+      - head_sequence
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - waiting_approval
+          - succeeded
+          - failed
+          - cancelled
+          - timed_out
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunEvent'
+        next_cursor:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+        has_more:
+          type: boolean
+        oldest_available_sequence:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        head_sequence:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991

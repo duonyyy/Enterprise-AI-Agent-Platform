@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enterprise.vinai.vn/contracts/run-event.v1.2.schema.json",
+  "title": "RunEvent",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "runId",
+    "workspaceId",
+    "sequence",
+    "type",
+    "timestamp",
+    "data"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "enum": [
+        "1.2"
+      ]
+    },
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "runId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "workspaceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "traceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "run.queued",
+        "run.started",
+        "run.step_started",
+        "run.tool_call_requested",
+        "run.tool_call_completed",
+        "run.approval_requested",
+        "run.approval_resolved",
+        "run.completed",
+        "run.failed",
+        "run.cancelled",
+        "run.timed_out"
+      ]
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "type": {
+          "const": "run.queued"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "queued"
+            },
+            "agentVersionId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "executionAvailable": {
+              "type": "boolean"
+            },
+            "availabilityReason": {
+              "type": "string",
+              "enum": [
+                "no_executor_configured"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.started"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "running"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.step_started"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "running"
+            },
+            "stepId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.tool_call_requested"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "requested"
+            },
+            "toolOperationId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "toolVersionId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.tool_call_completed"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "completed"
+            },
+            "toolOperationId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "toolVersionId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.approval_requested"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "waiting_approval"
+            },
+            "approvalId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.approval_resolved"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "resolved"
+            },
+            "approvalId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.completed"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "succeeded"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.failed"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "run_failed"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.cancelled"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "cancelled"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "user_cancelled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "run.timed_out"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "timed_out"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "queue_deadline_exceeded"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

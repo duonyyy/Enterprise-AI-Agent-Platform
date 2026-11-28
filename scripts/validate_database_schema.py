@@ -23,6 +23,8 @@ EXPECTED_MIGRATIONS: Final[tuple[str, ...]] = (
     "0006_invitation_acceptance_projection.sql",
     "0007_agent_publish_receipts_and_binding_seals.sql",
     "0008_model_budget_ledger.sql",
+    "0009_run_admission_receipt_columns.sql",
+    "0010_run_queue_deadline_and_job_closure.sql",
 )
 
 APPROVED_DELTA_TABLES: Final[frozenset[str]] = frozenset({"iam.workspace_invitations"})
@@ -47,6 +49,9 @@ REVIEWED_INVITATION_ACCEPT_PROJECTION_FINGERPRINT: Final[str] = (
 )
 REVIEWED_AGENT_PUBLISH_RECEIPTS_FINGERPRINT: Final[str] = (
     "19ebc65f674b09b2a9fde5d160f1fd4543a85905e4544a8f78e55e947aaaf434"
+)
+REVIEWED_QUEUE_DEADLINE_FINGERPRINT: Final[str] = (
+    "e9dfb2c460e61ba991d50593d38ab4f09089c25b945cf4da9d5d7970aa14e44a"
 )
 DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$")
 WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z_0-9$]*|[0-9]+")
@@ -902,10 +907,27 @@ def validate_database_schema(migrations_dir: Path | None = None) -> list[str]:
     ).read_text(encoding="utf-8-sig")
     errors.extend(_validate_agent_publish_receipts_and_binding_seals_sql(agent_publish_sql))
 
-    model_budget_sql = (target_dir / "0008_model_budget_ledger.sql").read_text(
+    model_budget_sql = (target_dir / "0008_model_budget_ledger.sql").read_text(encoding="utf-8-sig")
+    errors.extend(_validate_model_budget_ledger_sql(model_budget_sql))
+
+    receipt_sql = (target_dir / "0009_run_admission_receipt_columns.sql").read_text(
         encoding="utf-8-sig"
     )
-    errors.extend(_validate_model_budget_ledger_sql(model_budget_sql))
+    if (
+        _sql_structure(receipt_sql)[1]
+        != "89ebae6256f9a05d04404c0f0e15079bae0f9db4318c8beeeddf77710064ad61"
+    ):
+        errors.append(
+            "0009_run_admission_receipt_columns.sql differs from reviewed receipt column guards"
+        )
+
+    queue_deadline_sql = (target_dir / "0010_run_queue_deadline_and_job_closure.sql").read_text(
+        encoding="utf-8-sig"
+    )
+    if _sql_structure(queue_deadline_sql)[1] != REVIEWED_QUEUE_DEADLINE_FINGERPRINT:
+        errors.append(
+            "0010_run_queue_deadline_and_job_closure.sql differs from reviewed queue deadline and job closure guards"
+        )
 
     return errors
 
@@ -1117,9 +1139,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "PASS static checks: 8 ordered migrations, 7 schemas, 56 baseline + 5 deltas = 61 canonical tables, "
+        "PASS static checks: 10 ordered migrations, 7 schemas, 56 baseline + 5 deltas = 61 canonical tables, "
         "recognized FK/UNIQUE declarations, 55 baseline + 5 deltas = 60 RLS declarations, "
-        "10 immutable trigger declarations + 1 document guard + 1 version sealing guard, "
+        "10 immutable trigger declarations + 1 document guard + 1 version sealing guard + 1 admission receipt guard, "
         "reviewed 0002 content fingerprint, reviewed 0003 content fingerprint, "
         "reviewed 0004 content fingerprint, reviewed 0006 content fingerprint, "
         "reviewed 0007 content fingerprint."
@@ -1141,6 +1163,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "0008_model_budget_ledger.sql adds durable workspace budget, reservation and attempt ledgers (ADR-023 / 05-B)."
+    )
+    print(
+        "0009_run_admission_receipt_columns.sql adds run receipt/input columns with 30-day terminal replay guards (ADR-024 / 06-B), without new tables."
+    )
+    print(
+        "0010_run_queue_deadline_and_job_closure.sql adds run queue deadline, job closure reason, and receipt deadline guards (ADR-025 / 06-D)."
     )
     print(
         "NOT_RUN: actual PostgreSQL DDL execution, dynamic PL/pgSQL policy state, "

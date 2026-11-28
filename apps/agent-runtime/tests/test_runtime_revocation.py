@@ -57,6 +57,7 @@ async def _run_sse_midstream_revocation(monkeypatch: pytest.MonkeyPatch) -> None
         "role": "viewer",
         "events": [
             {
+                "id": str(uuid4()),
                 "sequence": 1,
                 "event_type": "run.started",
                 "redacted_payload": {"step": 1},
@@ -107,8 +108,20 @@ async def _run_sse_midstream_revocation(monkeypatch: pytest.MonkeyPatch) -> None
             if (
                 "SELECT id, status FROM runtime.runs" in sql
                 or "SELECT status FROM runtime.runs" in sql
+                or "FROM runtime.runs" in sql
             ):
-                res.mappings.return_value = _Mappings(item={"id": run_id, "status": "running"})
+                res.mappings.return_value = _Mappings(
+                    item={
+                        "id": run_id,
+                        "status": "running",
+                        "next_event_seq": 2,
+                        "oldest_sequence": 1,
+                        "tail_sequence": 1,
+                        "initiated_by": user_id,
+                        "trace_id": None,
+                    }
+                )
+                res.scalar_one_or_none.return_value = 1
                 return res
             if "FROM runtime.run_events" in sql:
                 cursor_seq = int(params.get("cursor_seq", 0))
@@ -249,10 +262,21 @@ async def _run_sse_timeout_or_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
                 )
                 return res
             res.mappings.return_value = (
-                _Mappings(item={"id": run_id, "status": "running"})
+                _Mappings(
+                    item={
+                        "id": run_id,
+                        "status": "running",
+                        "next_event_seq": 1,
+                        "oldest_sequence": None,
+                        "tail_sequence": None,
+                        "initiated_by": user_id,
+                        "trace_id": None,
+                    }
+                )
                 if "runs" in sql
                 else _Mappings(items=[])
             )
+            res.scalar_one_or_none.return_value = 1
             return res
 
         session.execute = AsyncMock(side_effect=execute)
@@ -298,7 +322,7 @@ async def _run_sse_timeout_or_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
                 text_body = (await resp.aread()).decode("utf-8")
             await task
             assert "event: error" in text_body
-            assert "authorization_unavailable" in text_body
+            assert "backend_unavailable" in text_body
     finally:
         app.dependency_overrides.clear()
         set_parent_session_verifier(None)

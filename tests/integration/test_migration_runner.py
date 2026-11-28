@@ -40,7 +40,7 @@ def test_fresh_migration_bootstrap_and_technical_table(
             "SELECT version, name, checksum, applied_by FROM public.schema_migrations ORDER BY version"
         )
         rows = cur.fetchall()
-        assert len(rows) == 8
+        assert len(rows) == 10
         assert rows[0][0] == "0001"
         assert rows[0][1] == "0001_baseline.sql"
         assert rows[1][0] == "0002"
@@ -57,6 +57,10 @@ def test_fresh_migration_bootstrap_and_technical_table(
         assert rows[6][1] == "0007_agent_publish_receipts_and_binding_seals.sql"
         assert rows[7][0] == "0008"
         assert rows[7][1] == "0008_model_budget_ledger.sql"
+        assert rows[8][0] == "0009"
+        assert rows[8][1] == "0009_run_admission_receipt_columns.sql"
+        assert rows[9][0] == "0010"
+        assert rows[9][1] == "0010_run_queue_deadline_and_job_closure.sql"
 
         # Baseline plus the reviewed forward deltas.
         cur.execute(
@@ -126,7 +130,7 @@ def test_migration_upgrade_preserves_data(isolated_database, tmp_path):
             "INSERT INTO iam.workspaces (tenant_id,id,slug,name) VALUES (%s,%s,%s,%s)",
             (tenant, workspace, "upgrade-ws", "Upgrade Workspace"),
         )
-    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006", "0007", "0008"]
+    assert run_migrations(db_url) == ["0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"]
     with psycopg.connect(db_url) as conn:
         assert conn.execute(
             "SELECT name FROM iam.workspaces WHERE id=%s", (workspace,)
@@ -195,7 +199,18 @@ def test_migration_advisory_locking(isolated_database):
         ).fetchone() == (True,)
         with pytest.raises(MigrationLockError):
             run_migrations(db_url)
-    assert run_migrations(db_url) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
+    assert run_migrations(db_url) == [
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0007",
+        "0008",
+        "0009",
+        "0010",
+    ]
 
 
 @pytest.mark.integration
@@ -226,6 +241,8 @@ def test_check_and_dry_run_do_not_create_history(isolated_database):
         "0006",
         "0007",
         "0008",
+        "0009",
+        "0010",
     ]
     from run_migrations import MigrationError
 

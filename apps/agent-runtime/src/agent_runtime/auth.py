@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_runtime.persistence.database import (
     RuntimeDatabaseUnavailable,
-    get_db_session,
     scoped_session,
     set_rls_context,
 )
@@ -164,6 +163,19 @@ def compute_effective_runtime_scopes(
     return frozenset(effective)
 
 
+def has_effective_runtime_scope(
+    db_role: str,
+    principal: RuntimePrincipal,
+    required_scope: str,
+) -> bool:
+    """Recompute effective scopes from live DB role and token scopes."""
+    base_token_scopes = (
+        principal.token_scopes if principal.token_scopes is not None else principal.scopes
+    )
+    effective_scopes = compute_effective_runtime_scopes(db_role, base_token_scopes)
+    return _scope_matches(effective_scopes, required_scope)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePrincipal:
     subject: str
@@ -174,6 +186,7 @@ class RuntimePrincipal:
     scopes: frozenset[str]
     session_id: str | None = None
     token_scopes: frozenset[str] | None = None
+    token_expires_at: int | None = None
 
     def require_scope(self, scope: str) -> None:
         if not _scope_matches(self.scopes, scope):
@@ -376,7 +389,7 @@ def _decode_segment(value: str) -> bytes:
 def _as_uuid_claim(payload: dict[str, object], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str):
-        raise ValueError(f"missing_{name}")  # noqa: TRY004
+        raise ValueError(f"missing_{name}")  # noqa: TRY004 -- malformed token claims share the verifier's ValueError contract
     return str(UUID(value))
 
 
@@ -399,7 +412,7 @@ def verify_runtime_token(
     if not isinstance(header, dict) or header.get("alg") != "HS256":
         raise ValueError("unsupported_token_algorithm")
     if not isinstance(payload, dict):
-        raise ValueError("invalid_token_payload")  # noqa: TRY004
+        raise ValueError("invalid_token_payload")  # noqa: TRY004 -- callers translate malformed tokens from ValueError to 401
 
     signed = f"{encoded_header}.{encoded_payload}".encode("ascii")
     expected = hmac.new(
@@ -452,12 +465,18 @@ def verify_runtime_token(
         roles=tuple(roles_value),
         scopes=frozenset(scopes_value),
         session_id=session_id,
+        token_expires_at=exp,
     )
+
+
+def _get_optional_db_session() -> AsyncSession | None:
+    """Dependency placeholder that returns None without holding an open database session."""
+    return None
 
 
 async def get_runtime_principal(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession | None, Depends(_get_optional_db_session)] = None,
 ) -> RuntimePrincipal:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing_bearer_token")
@@ -487,61 +506,109 @@ async def get_runtime_principal(
         )
 
     # 2. Verify live membership, workspace status, and tenant status in PostgreSQL (D3-B.2 / D3-C)
+    # If caller did not provide an open session, use a short scoped_session that closes
+    # immediately, avoiding holding a DB connection open across StreamingResponse.
     stmt = text("SELECT * FROM iam.resolve_user_workspace_membership(:user_id, :workspace_id)")
-    try:
-        row = (
-            (
-                await session.execute(
-                    stmt,
-                    {
-                        "user_id": UUID(token_principal.user_id),
-                        "workspace_id": UUID(token_principal.workspace_id),
-                    },
+    if session is not None:
+        try:
+            row = (
+                (
+                    await session.execute(
+                        stmt,
+                        {
+                            "user_id": UUID(token_principal.user_id),
+                            "workspace_id": UUID(token_principal.workspace_id),
+                        },
+                    )
                 )
+                .mappings()
+                .one_or_none()
             )
-            .mappings()
-            .one_or_none()
-        )
-    except (SQLAlchemyError, RuntimeDatabaseUnavailable) as exc:
-        logger.warning("Runtime workspace authorization lookup failed (%s)", type(exc).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authorization service temporarily unavailable",
-        ) from exc
+        except (SQLAlchemyError, RuntimeDatabaseUnavailable) as exc:
+            logger.warning("Runtime workspace authorization lookup failed (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service temporarily unavailable",
+            ) from exc
 
-    if (
-        row is None
-        or row.get("tenant_status", "active") != "active"
-        or row.get("workspace_status", "active") != "active"
-        or str(row["tenant_id"]) != token_principal.tenant_id
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Active workspace membership required",
-        )
+        if (
+            row is None
+            or row.get("tenant_status", "active") != "active"
+            or row.get("workspace_status", "active") != "active"
+            or str(row["tenant_id"]) != token_principal.tenant_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active workspace membership required",
+            )
 
-    db_role = str(row["role"])
-    if db_role not in RUNTIME_ROLE_SCOPES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Active workspace membership required",
-        )
+        db_role = str(row["role"])
+        if db_role not in RUNTIME_ROLE_SCOPES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active workspace membership required",
+            )
 
-    effective_scopes = compute_effective_runtime_scopes(db_role, token_principal.scopes)
+        effective_scopes = compute_effective_runtime_scopes(db_role, token_principal.scopes)
+        try:
+            await set_rls_context(
+                session,
+                tenant_id=token_principal.tenant_id,
+                workspace_id=token_principal.workspace_id,
+                user_id=token_principal.user_id,
+            )
+        except SQLAlchemyError as exc:
+            logger.warning("Runtime failed to bind RLS context (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service temporarily unavailable",
+            ) from exc
+    else:
+        try:
+            async with scoped_session(
+                token_principal.tenant_id,
+                token_principal.workspace_id,
+                token_principal.user_id,
+            ) as short_session:
+                row = (
+                    (
+                        await short_session.execute(
+                            stmt,
+                            {
+                                "user_id": UUID(token_principal.user_id),
+                                "workspace_id": UUID(token_principal.workspace_id),
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except (SQLAlchemyError, RuntimeDatabaseUnavailable) as exc:
+            logger.warning("Runtime workspace authorization lookup failed (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service temporarily unavailable",
+            ) from exc
 
-    try:
-        await set_rls_context(
-            session,
-            tenant_id=token_principal.tenant_id,
-            workspace_id=token_principal.workspace_id,
-            user_id=token_principal.user_id,
-        )
-    except SQLAlchemyError as exc:
-        logger.warning("Runtime failed to bind RLS context (%s)", type(exc).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authorization service temporarily unavailable",
-        ) from exc
+        if (
+            row is None
+            or row.get("tenant_status", "active") != "active"
+            or row.get("workspace_status", "active") != "active"
+            or str(row["tenant_id"]) != token_principal.tenant_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active workspace membership required",
+            )
+
+        db_role = str(row["role"])
+        if db_role not in RUNTIME_ROLE_SCOPES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active workspace membership required",
+            )
+
+        effective_scopes = compute_effective_runtime_scopes(db_role, token_principal.scopes)
 
     return RuntimePrincipal(
         subject=token_principal.subject,
@@ -552,6 +619,7 @@ async def get_runtime_principal(
         scopes=effective_scopes,
         session_id=token_principal.session_id,
         token_scopes=token_principal.scopes,
+        token_expires_at=token_principal.token_expires_at,
     )
 
 
@@ -573,6 +641,8 @@ async def revalidate_runtime_authorization(
             "authorization_revoked",
             "Parent application session is required",
         )
+    if principal.token_expires_at is not None and time.time() >= principal.token_expires_at:
+        raise RuntimeStreamAuthError("authorization_expired", "Runtime token expired")
 
     active_settings = settings or get_settings()
     budget = max(
@@ -676,6 +746,8 @@ async def revalidate_runtime_authorization(
             "authorization_revoked",
             "Required workspace runtime scope was revoked",
         )
+    if principal.token_expires_at is not None and time.time() >= principal.token_expires_at:
+        raise RuntimeStreamAuthError("authorization_expired", "Runtime token expired")
 
     return RuntimePrincipal(
         subject=principal.subject,
@@ -686,6 +758,7 @@ async def revalidate_runtime_authorization(
         scopes=effective_scopes,
         session_id=principal.session_id,
         token_scopes=base_token_scopes,
+        token_expires_at=principal.token_expires_at,
     )
 
 
